@@ -9,3 +9,5 @@ __pycache__/
 test.py
 *.pdf
 *.log
+test/
+CLAUDE.md
