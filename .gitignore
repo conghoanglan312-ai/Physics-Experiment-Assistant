@@ -11,3 +11,8 @@ test.py
 *.log
 test/
 CLAUDE.md
+
+# generated pipeline artefacts - never commit these
+*.mp4
+*.csv
+output/
