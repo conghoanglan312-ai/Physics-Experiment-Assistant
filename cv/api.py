@@ -129,11 +129,21 @@ def survey(video_path: str) -> list:
     ]
 
 
-def analyze(video_path: str) -> dict:
+def analyze(video_path: str, binding=None) -> dict:
     """One measurement session: health, droplets, and each droplet's falls.
 
-    NOTE: the signature changes when live capture lands. A live session is not a
-    `video_path` — it will take a frame source and stream updates. Everything
+    `binding` groups fall ids into droplets, e.g. [[51143, 51890], [60011, 60422]].
+    Ⅳ.4 lifts and re-drops the SAME droplet five times, and the tracker loses it
+    during each motionless hold, so one droplet produces several track ids. Nothing
+    in a recording says which ids belong together — only the operator watching the
+    bench knows. Guessing it (falls close in time, similar speed) would silently
+    file five falls from two droplets as one, and the resulting charge looks
+    perfectly normal. So it is passed in, or not at all.
+
+    With no binding, `droplets` comes back empty and you want survey() instead.
+
+    NOTE: the signature changes again when live capture lands. A live session is not
+    a `video_path` — it will take a frame source and stream updates. Everything
     below keeps its shape; only how you start it changes.
     """
     return {
@@ -160,6 +170,7 @@ def analyze(video_path: str) -> dict:
         # that by eye -- a fresh droplet at the same speed looks identical.
         "sprayFrames": [],
 
+        # Empty unless `binding` said which fall ids belong to which droplet.
         "droplets": [
             {
                 "id": 51143,             # App only. Binds these falls to one droplet.
