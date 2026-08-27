@@ -5,3 +5,9 @@ pandas
 streamlit
 anthropic
 python-dotenv
+google-genai
+chromadb
+langchain-community
+langchain-text-splitters
+pypdf
+openai
