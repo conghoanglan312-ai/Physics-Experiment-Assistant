@@ -16,3 +16,4 @@ CLAUDE.md
 *.mp4
 *.csv
 output/
+uvc_check/
