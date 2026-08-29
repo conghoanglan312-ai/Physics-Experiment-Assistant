@@ -490,6 +490,15 @@ def buildSettings(roi, spacing):
     mag = spacing / 71.5           # px/division on 150V_1, where these were measured
     return {"kernel": cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
             "areaMin": 8 * mag ** 2, "areaMax": 100 * mag ** 2,
+            # AREA_TOLERANCE is a RELATIVE test, which is brutal on small blobs: a
+            # droplet measured at 10 px one frame and 18 the next differs by 80%,
+            # and that is ordinary threshold noise on a 5-pixel object, not a
+            # different droplet.  Measured on clip 1 f52313-52341: one droplet's
+            # area swung between 10 and 27 px on consecutive frames, and the gate
+            # rejected the correct blob on 42 of them.  Dividing by at least this
+            # floor keeps the test meaningful on big blobs while letting normal
+            # noise through on small ones.
+            "areaFloor": 20 * mag ** 2,
             "gridClear": 4 * mag, "edgeClear": 20 * mag,
             "maxStep": 12 * mag,
             "gridRows": [r - roi["y"] for r in roi["rows"]],
@@ -536,6 +545,27 @@ PROBATION_S = 0.2          # an unconfirmed track dies this fast; kills one-fram
 AREA_TOLERANCE = 0.7       # a re-found blob may differ this much in area
 SCREEN_MIN, SCREEN_MAX = 0.15, 0.60     # provisional band, deliberately wider than legal
 
+# --- re-acquiring a droplet after the track dies ----------------------------
+#
+#  A track only dies after MAX_COAST_S with no match, so by then the droplet has
+#  been unseen for 3 s.  When it reappears a NEW track is created, starting with
+#  fTop unset -- so a droplet that crossed `0`, went dark, and came back finishes
+#  its fall with no record of ever having started one.  Measured on clip 1: 388
+#  traverses began, only 157 finished.
+#
+#  The information is not lost, it is just thrown away: the dying track knows
+#  where it crossed `0`.  So keep the corpse for a while and let a new detection
+#  inherit from it.
+#
+#  The gate is deliberately asymmetric.  A falling droplet's x barely moves -- 6 px
+#  over a whole 8-division traverse on the falls we frame-stepped -- while y is
+#  predictable from its speed but with growing error.  A circular gate wide enough
+#  to cover 3 s of falling would be far too loose sideways, which is exactly how
+#  two droplets get filed as one.
+REID_MAX_S = 6.0           # how long a dead track waits to be claimed
+REID_X_PX = 14             # sideways tolerance, scaled by magnification
+REID_Y_SLACK = 0.6         # fraction of the predicted drop allowed as error
+
 
 class Track:
     nextId = 0
@@ -549,6 +579,7 @@ class Track:
         self.miss = 0
         self.points = [(frame, float(centre[1]))]
         self.xs = [float(centre[0])]        # parallel to points; only fallDrift reads it
+        self.reacquired = 0                 # times this track was rebuilt after dying
         self.fTop = None
         self.fBottom = None
         self.seconds = None
@@ -580,7 +611,38 @@ class Track:
         return float(np.polyfit(f, y, 1)[0]) * fps / spacing
 
 
-def assign(tracks, centres, maxStep):
+def reacquire(dead, centre, frame, fps, s):
+    """Find the dead track this detection most likely continues, or None.
+
+    Only confirmed tracks are considered -- letting a one-frame stray hand its
+    history to something else is how a fabricated fall gets built.
+    """
+    x, y, area = float(centre[0]), float(centre[1]), centre[2]
+    xGate = REID_X_PX * (s["maxStep"] / 12.0)      # same magnification scaling
+    best, bestCost = None, None
+    for t in dead:
+        lastF, lastY = t.points[-1]
+        elapsed = frame - lastF
+        if elapsed <= 0 or elapsed > REID_MAX_S * fps:
+            continue
+        if abs(x - t.xs[-1]) > xGate:              # a falling droplet does not sidestep
+            continue
+        vy = t.vel[1]
+        if vy <= 0:                                 # only continue things that were falling
+            continue
+        predY = lastY + vy * elapsed
+        slack = max(4.0, REID_Y_SLACK * abs(predY - lastY))
+        if not (lastY - 4.0 <= y <= predY + slack):  # must be at or below where it was
+            continue
+        if abs(area - t.area) / max(t.area, 1.0) > AREA_TOLERANCE:
+            continue
+        cost = abs(y - predY) + 3.0 * abs(x - t.xs[-1])
+        if bestCost is None or cost < bestCost:
+            best, bestCost = t, cost
+    return best
+
+
+def assign(tracks, centres, maxStep, areaFloor = 1.0):
     # one global assignment, so two tracks can never claim the same blob
     if not tracks or not centres:
         return {}
@@ -592,7 +654,7 @@ def assign(tracks, centres, maxStep):
             d = float(np.hypot(c[0] - aim[0], c[1] - aim[1]))
             if d > maxStep:
                 continue
-            areaDiff = abs(c[2] - t.area) / max(t.area, 1.0)
+            areaDiff = abs(c[2] - t.area) / max(t.area, areaFloor)
             if areaDiff > AREA_TOLERANCE:
                 continue
             cost[i, j] = d + areaDiff * maxStep      # appearance weighs as much as position
@@ -717,7 +779,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
         print("  rolling background: %.0f s window, %d samples, every %d frames"
               % (bgWindowS, len(roller.buf), roller.every), flush = True)
 
-    live, falls, n = [], [], fromFrame
+    live, morgue, falls, n = [], [], [], fromFrame
     detections = 0
     if fromFrame:
         cap.set(cv2.CAP_PROP_POS_FRAMES, fromFrame)
@@ -737,7 +799,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
         centres, _, _ = detectDroplets(gray, background, s)
         detections += len(centres)
 
-        pairs = assign(live, centres, maxStep)
+        pairs = assign(live, centres, maxStep, s["areaFloor"])
         for i, t in enumerate(live):
             if i in pairs:
                 t.update(centres[pairs[i]], n, maxStep)
@@ -756,12 +818,40 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                           flush = True)
             else:
                 t.miss += 1
-        live = [t for t in live
-                if t.miss <= (coast if len(t.points) >= CONFIRM_POINTS else probation)]
+        keep, buried = [], []
+        for t in live:
+            if t.miss <= (coast if len(t.points) >= CONFIRM_POINTS else probation):
+                keep.append(t)
+            elif len(t.points) >= CONFIRM_POINTS:
+                buried.append(t)                 # only confirmed tracks are worth keeping
+        live = keep
+        morgue.extend(buried)
+        morgue[:] = [t for t in morgue if n - t.points[-1][0] <= REID_MAX_S * fps]
+
         claimed = set(pairs.values())
+        # A coasting track is still live and still aiming at its droplet.  If assign
+        # did not match it this frame, its blob is unclaimed -- and creating a new
+        # track on that blob puts TWO tracks on one droplet, after which the global
+        # assignment feeds only one and starves the other.  Measured on clip 1: a
+        # duplicate took the blob on 27 of the 90 frames its original was waiting.
+        # So do not spawn where a confirmed live track is already predicting.
+        coasting = [(t.predict(), t) for t in live
+                    if t.miss > 0 and len(t.points) >= CONFIRM_POINTS]
         for j, c in enumerate(centres):
-            if j not in claimed:
+            if j in claimed:
+                continue
+            if any((c[0] - aim[0]) ** 2 + (c[1] - aim[1]) ** 2 <= maxStep ** 2
+                   for aim, _t in coasting):
+                continue                     # belongs to a coaster; do not duplicate
+            old = reacquire(morgue, c, n, fps, s)
+            if old is None:
                 live.append(Track(c, n))
+            else:
+                morgue.remove(old)               # it lives again, with its history
+                old.miss = 0
+                old.reacquired += 1
+                old.update(c, n, maxStep)
+                live.append(old)
 
         if show or writer is not None:
             marked = crop.copy()
@@ -809,7 +899,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
             (tw, _th), _ = cv2.getTextSize(clock, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
             cv2.putText(marked, clock, (W - tw - 10, 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
-            if writer is not None and (videoFrom is None or videoFrom <= n)                     and (videoTo is None or n <= videoTo):
+            if writer is not None and (videoFrom is None or videoFrom <= n) \
+               and (videoTo is None or n <= videoTo):
                 writer.write(marked)      # track over a wide span, record a narrow one
             if show:
                 cv2.imshow("Droplets", marked)
@@ -860,6 +951,7 @@ def report(falls, outDir = None, path = None):
         else (os.path.join(outDir, "falls.csv") if outDir else "falls.csv")
     pd.DataFrame([{"id": f.id, "startFrame": f.fTop, "seconds": f.seconds,
                    "speedGridPerSec": FALL_DIVISIONS / f.seconds,
+                   "reacquired": getattr(f, "reacquired", 0),
                    "kinematicLegal": getattr(f, "kinematicLegal", f.legal),
                    "fieldOff": getattr(f, "fieldOff", None),
                    "legal": f.legal}
@@ -917,6 +1009,10 @@ def fallRecord(f):
             "legal": f.legal,
             "fallDrift": getattr(f, "fallDrift", None),
             "fallDirection": getattr(f, "fallDirection", None),
+            # times the track died and was rebuilt during this fall.  0 is clean.
+            # Anything higher means the app should tell the operator, because a
+            # wrong re-acquisition fabricates a fall out of two droplets.
+            "reacquired": getattr(f, "reacquired", 0),
             # the hold that preceded this fall.  Needs hold-phase tracking, which
             # needs a live source -- nothing in a single-fall recording to measure.
             "holdDrift": None,
