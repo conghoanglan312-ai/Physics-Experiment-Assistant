@@ -119,8 +119,9 @@ NOW LOOK AT THE SAVED FRAME. This is the part no script can answer.
   [ ] Is the image steady, not rolling or torn?
 
 If the grid is missing, the converter is tapping the camera instead of the
-display. The dongle path is then dead and the webcam is the only option --
-which the pipeline already supports, so nothing is lost but the money.
+display. Move the tap to the monitor's own feed and re-run this. There is no
+fallback: the camera-on-monitor method is retired, and the geometry constants
+are calibrated on the dongle's field now.
 """)
 
 
