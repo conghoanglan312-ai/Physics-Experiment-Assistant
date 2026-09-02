@@ -24,6 +24,15 @@ import time
 
 import cv2
 
+# autoROI answers checklist item 1 -- 'is the grid visible' -- better than an
+# eye can, and it is the item that gates everything else.  Guarded: if the
+# import fails the bench tool must still run and report devices.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from cv.pipeline import autoROI
+except Exception:
+    autoROI = None
+
 # The Windows console defaults to cp1252 and cannot print the label on the
 # apparatus socket; without this the script dies before doing anything useful.
 try:
@@ -65,8 +74,14 @@ def describe(index, measure = True):
     shot = os.path.join(SHOTS, "device_%d.png" % index)
     cv2.imwrite(shot, frame)
     cap.release()
+    roi = None
+    if autoROI is not None:
+        try:
+            roi = autoROI(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        except Exception:
+            roi = None
     return {"index": index, "w": w, "h": h, "claimed": claimed,
-            "real": real, "frames": n, "shot": shot}
+            "real": real, "frames": n, "shot": shot, "roi": roi}
 
 
 def report(d):
@@ -84,9 +99,19 @@ def report(d):
     # The detector's size constants were validated between 43 and 93 pixels per
     # grid division.  The reticle is 11 lines tall and fills most of the frame,
     # so height / 10 is a rough stand-in for the spacing.
-    approx = d["h"] / 10.0
-    verdict = "in range" if 43 <= approx <= 93 else "OUTSIDE the tested 43-93 range"
-    print("    px/division    ~%.0f if the grid fills the frame  (%s)" % (approx, verdict))
+    roi = d.get("roi")
+    if autoROI is None:
+        approx = d["h"] / 10.0
+        verdict = "in range" if 43 <= approx <= 93 else "OUTSIDE the tested 43-93 range"
+        print("    px/division    ~%.0f if the grid fills the frame  (%s)"
+              % (approx, verdict))
+    elif roi is None:
+        print("    GRID           NOT FOUND -- this device is not showing the reticle")
+    else:
+        print("    GRID           found: %d rows, %.1f px/division"
+              % (len(roi["rows"]), roi["spacing"]))
+        print("    ROI            %d,%d,%d,%d   (%.1f divisions wide)"
+              % (roi["x"], roi["y"], roi["w"], roi["h"], roi["w"] / roi["spacing"]))
 
 
 def main(argv):
@@ -109,14 +134,28 @@ def main(argv):
         print("  - If it appears nowhere, it is not UVC and needs the vendor's")
         print("    driver -- which becomes a dependency we must declare.")
         return
-    print("%d device(s) responded, so the dongle IS UVC. cv2.VideoCapture works." % len(found))
+    withGrid = [d for d in found if d.get("roi")]
+    print("%d device(s) responded to cv2.VideoCapture." % len(found))
+    print("    NOTE: a laptop built-in webcam answers too, usually at index 0 and")
+    print("    640x480. Responding is NOT the same as being the dongle.")
+    if autoROI is not None:
+        if not withGrid:
+            print("\n*** NO DEVICE IS SHOWING THE RETICLE GRID. ***")
+            print("    If the dongle is plugged in, the converter is tapping the wrong")
+            print("    source. Nothing downstream can work until this is fixed.")
+        else:
+            print("\n>>> USE DEVICE %d -- it is the one showing the grid:" % withGrid[0]["index"])
+            print("        python -m cv.pipeline live %d" % withGrid[0]["index"])
+            if len(withGrid) > 1:
+                print("    (%d devices show a grid; check the sample frames.)" % len(withGrid))
     print("""
-NOW LOOK AT THE SAVED FRAME. This is the part no script can answer.
+NOW LOOK AT THE SAVED FRAME for the device named above. The grid and the row
+count are checked for you; these are the parts no script can answer.
 
-  [ ] Is the reticle grid visible?          <- if NO, stop. Nothing else matters.
-  [ ] Are all 11 horizontal lines in frame?
   [ ] Is the V: / t: readout panel visible? <- needed for the field-off check
+  [ ] Does the panel sit clear of the grid, not touching the right-hand column?
   [ ] Is the image steady, not rolling or torn?
+  [ ] Is the whole reticle in frame, not cropped at an edge?
 
 If the grid is missing, the converter is tapping the camera instead of the
 display. Move the tap to the monitor's own feed and re-run this. There is no
