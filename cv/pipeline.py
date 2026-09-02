@@ -137,19 +137,38 @@ def readoutLines(cell):
     return runs
 
 
-def glyphs(line):
+# How wide a gap still counts as inside one character, as a fraction of line height.
+# 0.40 was measured on the Aug_25 footage, which was a camera pointed at a monitor:
+# the glowing digits bloomed into fat filled blobs whose `0` had almost no hollow.
+# The Aug_31 dongle capture is sharp and high-contrast, so a `0` is a thin ring whose
+# interior gap is WIDER than 0.40 * lineH -- it split into two ~5 px strokes and the
+# width test then rejected the window.  Measured on 60 frames: clip 8 read 9/60,
+# clip 9 read 1/60, against clip 7's 60/60.
+#
+# The ladder is a search, not a new constant: each rung is tried only when the
+# previous one produced no valid segmentation, and validity is the plausibility test
+# allDigitsAlike already applies (6-9 glyphs, four consecutive like-sized ones).
+# 0.40 is tried first, so footage that already segmented cleanly is bit-identical --
+# clip 7 stays 60/60 and clip 1 keeps all four of its field-off reads.  Raising the
+# base value instead was measured and rejected: at a flat 0.55 clip 7 collapses to
+# 16/60 because adjacent characters merge.
+JOIN_FACTOR = 0.40
+JOIN_LADDER = (0.40, 0.55, 0.70, 0.85)
+
+
+def glyphs(line, joinFactor = JOIN_FACTOR):
     """segment a text line into characters.
 
     Counts bright pixels per column, so a grid line one or two pixels tall cannot
     pass as a glyph.  A `0` is hollow and splits into two strokes, so runs closer
-    than a quarter of the line height are merged back into one character."""
+    than `joinFactor` of the line height are merged back into one character."""
     h = line.shape[0]
     _lvl, bw = cv2.threshold(line, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
     cp = (bw > 0).sum(axis = 0).astype(float)
     runs = bands(cp, max(1.0, 0.18 * h))
     if not runs:
         return []
-    joinGap = max(3, int(round(0.40 * h)))
+    joinGap = max(3, int(round(joinFactor * h)))
     merged = [list(runs[0])]
     for a, b in runs[1:]:
         if a - merged[-1][1] <= joinGap:
@@ -160,18 +179,11 @@ def glyphs(line):
     return [(a, b, line[:, a:b]) for a, b in merged if b - a >= minWide]
 
 
-def allDigitsAlike(cell):
+def scoreGlyphs(gs):
     """Best score over every window of four consecutive glyphs: how alike are they?
 
-    Index-free on purpose.  Counting in from either end breaks whenever the font
-    renders `V` and `:` close enough to merge, or a `0` splits, which shifts every
-    position.  `+0000V` is the only realistic reading with four identical glyphs
-    in a row, so where they sit in the line does not matter."""
-    lines = readoutLines(cell)
-    if not lines:
-        return None
-    a, b = lines[0]
-    gs = glyphs(cell[a:b, :])
+    None means this segmentation is not a readable panel line, which is what lets
+    allDigitsAlike try the next rung of the ladder."""
     # `V : + d d d d V` is 8 characters, 7 when `V` and `:` render close enough to
     # merge.  Anything else means the line did not segment properly -- abstain rather
     # than score it, because four identical *fragments* would otherwise read as
@@ -192,6 +204,25 @@ def allDigitsAlike(cell):
                     for i in range(4) for j in range(i + 1, 4))
         best = worst if best is None else max(best, worst)
     return best
+
+
+def allDigitsAlike(cell):
+    """True-ish score that the panel read `+0000V` on this frame; None if unreadable.
+
+    Index-free on purpose.  Counting in from either end breaks whenever the font
+    renders `V` and `:` close enough to merge, or a `0` splits, which shifts every
+    position.  `+0000V` is the only realistic reading with four identical glyphs
+    in a row, so where they sit in the line does not matter.
+    """
+    lines = readoutLines(cell)
+    if not lines:
+        return None
+    a, b = lines[0]
+    for joinFactor in JOIN_LADDER:
+        score = scoreGlyphs(glyphs(cell[a:b, :], joinFactor))
+        if score is not None:
+            return score
+    return None
 
 
 def fieldOffFromCells(cells):
@@ -471,13 +502,53 @@ def autoROI(fullBackground):
     margin = int(round(0.3 * spacing))
     x = max(0, int(round(rightBorder - (TEXT_COL_DIV + GRID_DIV) * spacing)))
     y = max(0, rows[0] - margin)
+    textStart = int(round(rightBorder - TEXT_COL_DIV * spacing))
+
+    # Vertical grid lines: the same top-hat trick as the rows, with a horizontal
+    # kernel.  GRID_DIV = 10 was measured on the Aug_25 footage, a camera pointed at
+    # a monitor, whose observation area was 9.5 divisions -- so a fixed 10 covered
+    # all of it and the assumption was never tested.  The dongle delivers a wider
+    # horizontal field: clip 8 shows 14.6 divisions, and anchoring 10 of them to the
+    # right border threw away the leftmost 4.6 -- 75% of the first column, holding
+    # 28% of the droplet candidates inside the measured `0`..`16` band.
+    #
+    # This only ever WIDENS.  Narrowing is never right, and the detector is not
+    # reliable everywhere -- on clip 1 it finds a single line, which as an anchor
+    # would collapse the ROI to nothing.  Fewer than three lines, or a leftmost line
+    # that is already inside the nominal box, leaves the old geometry untouched.
+    colFilter = cv2.getStructuringElement(cv2.MORPH_RECT, (max(3, int(21 * scale)), 1))
+    colHat = cv2.morphologyEx(fullBackground, cv2.MORPH_TOPHAT,
+                              colFilter).astype(np.float32)
+    colProfile = colHat[rows[0]:rows[-1], :].mean(axis = 0)
+    vLines, floor = [], 0.45 * float(colProfile.max())
+    for i in range(minSep, len(colProfile) - minSep):
+        if colProfile[i] <= floor \
+           or colProfile[i] < colProfile[i - 1] \
+           or colProfile[i] < colProfile[i + 1]:
+            continue
+        if not vLines or i - vLines[-1] > minSep:
+            vLines.append(i)
+        elif colProfile[i] > colProfile[vLines[-1]]:
+            vLines[-1] = i
+    vLines = [c for c in vLines if c <= textStart + 3]
+
+    widened = len(vLines) >= 3 and min(vLines) - margin < x
+    if widened:
+        x = max(0, min(vLines) - margin)
+
     return {"x": x,
             "y": y,
-            "w": int(round(rightBorder - TEXT_COL_DIV * spacing)) - x,
+            "w": textStart - x,
             "h": min(int(h), rows[-1] + margin) - y,
             "rows": rows,
             "spacing": spacing,
-            "border": rightBorder}
+            "border": rightBorder,
+            # Interior verticals to mask, in full-frame coords.  Only trusted once the
+            # ROI was widened: the `w - 5 * spacing` heuristic in buildSettings puts a
+            # line at the middle of a NOMINAL 10-division box, which is exactly right
+            # there and meaningless once the width changes.  Keeping it wherever it
+            # already worked leaves every Aug_25 result untouched.
+            "cols": vLines if widened else None}
 
 
 def drawROI(fullBackground, roi, name):
@@ -552,7 +623,9 @@ def buildSettings(roi, spacing):
             # drifts 5-6 px sideways across a whole traverse however long it takes.
             "reidX": REID_X_PX * mag,
             "gridRows": [r - roi["y"] for r in roi["rows"]],
-            "gridCols": [int(round(roi["w"] - 5 * spacing))],
+            "gridCols": [c - roi["x"] for c in roi["cols"]
+                         if roi["x"] < c < roi["x"] + roi["w"]]
+                        if roi.get("cols") else [int(round(roi["w"] - 5 * spacing))],
             "roiW": roi["w"], "roiH": roi["h"]}
 
 
