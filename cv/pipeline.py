@@ -1396,7 +1396,18 @@ def analyze(videoPath = VIDEO, binding = None, show = False, saveVideo = False):
 
     droplets = []
     for k, group in enumerate(binding or [], 1):
-        falls = [byId[i] for i in group if i in byId]
+        # An id that is not in the survey is a typo in the operator's notes, not a
+        # droplet that produced fewer falls.  Dropping it silently is the worst
+        # outcome: `dropletsCompleted` quietly falls short and nothing says why,
+        # long after the apparatus is packed up.  Ⅳ.4 binding is hand-transcribed
+        # from paper, so this WILL happen.
+        unknown = [i for i in group if i not in byId]
+        if unknown:
+            raise KeyError(
+                "droplet %d: fall id(s) %s are not in this recording. Check the "
+                "drop-order notes against survey(). Ids present: %s"
+                % (k, unknown, sorted(byId)))
+        falls = [byId[i] for i in group]
         droplets.append({"id": group[0] if group else None,
                          "label": "Droplet %d" % k,
                          "fallCount": len(falls),
