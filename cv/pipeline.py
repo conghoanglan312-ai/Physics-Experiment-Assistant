@@ -10,6 +10,9 @@ The public contract is `cv/api.py`.  Import from there, not from here.
 CLI:
     python -m cv.pipeline <clip>            window, playing a recorded clip
     python -m cv.pipeline live [index]      window, from a camera or capture dongle
+    python -m cv.pipeline live [index] --blind
+                                            no window -- for benchmarking against a
+                                            human, who must not see the overlay
     python -m cv.pipeline survey <clip>     headless, writes falls.csv
     python -m cv.pipeline all [pattern]     every clip in MILLIKAN_FOOTAGE
     python -m cv.pipeline preview           ROI preview for every clip
@@ -1041,196 +1044,202 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                      and len(roller.buf) >= roller.samples)
     prevT, firstT, lastT = None, None, None
     start = time.perf_counter()
-    for frame, now in src.frames(fromFrame, toFrame):
-        n += 1
-        # dt comes from the timestamps, never from fps.  A dropped frame then widens
-        # every gate by exactly the right amount instead of orphaning the track.
-        dt = (1.0 / fps) if prevT is None else max(1e-6, now - prevT)
-        prevT = now
-        if firstT is None:
-            firstT = now
-        lastT = now
-        maxStep = maxSpeed * dt         # how far a droplet may move in THIS interval
-        crop = frame[Y:Y+H, X:X+W]
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        if roller is not None:
-            roller.push(gray, n)
-            rolled = roller.get(n)
-            if rolled is not None and rollerReady:
-                background = rolled
-            elif rolled is not None and len(roller.buf) >= roller.samples:
-                background, rollerReady = rolled, True
-        if src.isLive and n % panelEvery == 0:
-            panel.append((now, cv2.cvtColor(frame[box[1]:box[3], box[0]:box[2]],
-                                            cv2.COLOR_BGR2GRAY)))
-            while panel and now - panel[0][0] > MAX_FALL_S + 5.0:
-                panel.popleft()
-        centres, _, _ = detectDroplets(gray, background, s)
-        detections += len(centres)
+    # Ctrl+C has to land like `q` does, not kill the process: without this a headless
+    # run has no way to stop that still writes falls.csv, and the whole session is lost
+    # the way it used to be lost to the report() crash.
+    try:
+        for frame, now in src.frames(fromFrame, toFrame):
+            n += 1
+            # dt comes from the timestamps, never from fps.  A dropped frame then widens
+            # every gate by exactly the right amount instead of orphaning the track.
+            dt = (1.0 / fps) if prevT is None else max(1e-6, now - prevT)
+            prevT = now
+            if firstT is None:
+                firstT = now
+            lastT = now
+            maxStep = maxSpeed * dt         # how far a droplet may move in THIS interval
+            crop = frame[Y:Y+H, X:X+W]
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            if roller is not None:
+                roller.push(gray, n)
+                rolled = roller.get(n)
+                if rolled is not None and rollerReady:
+                    background = rolled
+                elif rolled is not None and len(roller.buf) >= roller.samples:
+                    background, rollerReady = rolled, True
+            if src.isLive and n % panelEvery == 0:
+                panel.append((now, cv2.cvtColor(frame[box[1]:box[3], box[0]:box[2]],
+                                                cv2.COLOR_BGR2GRAY)))
+                while panel and now - panel[0][0] > MAX_FALL_S + 5.0:
+                    panel.popleft()
+            centres, _, _ = detectDroplets(gray, background, s)
+            detections += len(centres)
 
-        pairs = assign(live, centres, maxStep, s["areaFloor"], now, s["reidX"])
-        for i, t in enumerate(live):
-            if i in pairs:
-                c = centres[pairs[i]]
-                # A match further from the prediction than one frame's step could
-                # reach only happened because the widened gate allowed it, i.e.
-                # this fall was stitched across a gap.  Count it, for the same
-                # reason dead-track re-acquisitions are counted: a gate that is
-                # too loose fabricates a fall out of two droplets, and this makes
-                # that visible in falls.csv instead of trusted.
-                aim = t.predict(now)
-                if t.miss > 0 and np.hypot(c[0] - aim[0], c[1] - aim[1]) > maxStep:
-                    t.reacquired += 1
-                t.update(c, now, maxSpeed)
-                finished = updateCrossings(t, yTop, yBottom, spacing)
-                if finished is not None:
-                    if not src.isLive:      # a frame index to seek back to, files only
-                        t.fTop, t.fBottom = t.tTop * fps, t.tBottom * fps
-                    t.kinematicLegal = t.legal
-                    t.fieldOff = None
-                    if t.legal:                  # only speed-legal falls need the check
-                        t.fieldOff = fieldOffFromCells(
-                            [cell for ct, cell in panel if t.tTop <= ct <= t.tBottom]) \
-                            if src.isLive else fieldWasOff(path, box, t.fTop, t.fBottom)
-                        t.legal = bool(t.fieldOff)
-                    falls.append(finished)
-                    print("  frame %6d  id %-5d  %6.2f s  %6.3f grid/s  %s"
-                          % (n, t.id, t.seconds, FALL_DIVISIONS / t.seconds,
-                             # fieldOff is TRI-STATE and this line used to flatten it:
-                             # anything kinematically legal printed as "field ON",
-                             # whether the panel was read and showed volts (False) or
-                             # was never readable at all (None).  Those need different
-                             # actions -- one is the operator's, one is ours.
-                             "LEGAL" if t.legal else
-                             ("field ON - rejected" if t.kinematicLegal
-                              and t.fieldOff is False else
-                              "panel UNREADABLE - rejected" if t.kinematicLegal
-                              else "rejected")),
-                          flush = True)
-            else:
-                t.miss += 1
-        keep, buried = [], []
-        probationS = max(PROBATION_S, 2 * dt)    # never shorter than two frames
-        for t in live:
-            waited = now - t.lastT
-            if waited <= (MAX_COAST_S if len(t.points) >= CONFIRM_POINTS
-                          else probationS):
-                keep.append(t)
-            elif len(t.points) >= CONFIRM_POINTS:
-                buried.append(t)                 # only confirmed tracks are worth keeping
-        live = keep
-        morgue.extend(buried)
-        morgue[:] = [t for t in morgue if now - t.points[-1][0] <= REID_MAX_S]
-
-        claimed = set(pairs.values())
-        # A coasting track is still live and still aiming at its droplet.  If assign
-        # did not match it this frame, its blob is unclaimed -- and creating a new
-        # track on that blob puts TWO tracks on one droplet, after which the global
-        # assignment feeds only one and starves the other.  Measured on clip 1: a
-        # duplicate took the blob on 27 of the 90 frames its original was waiting.
-        # So do not spawn where a confirmed live track is already predicting.
-        coasting = [(t.predict(now), t) for t in live
-                    if t.miss > 0 and len(t.points) >= CONFIRM_POINTS]
-        for j, c in enumerate(centres):
-            if j in claimed:
-                continue
-            if any((c[0] - aim[0]) ** 2 + (c[1] - aim[1]) ** 2 <= maxStep ** 2
-                   for aim, _t in coasting):
-                continue                     # belongs to a coaster; do not duplicate
-            old = reacquire(morgue, c, now, s)
-            if old is None:
-                live.append(Track(c, now))
-            else:
-                morgue.remove(old)               # it lives again, with its history
-                old.miss = 0
-                old.reacquired += 1
-                old.update(c, now, maxSpeed)
-                live.append(old)
-
-        if show or writer is not None:
-            marked = crop.copy()
-            cv2.line(marked, (0, yTop), (W, yTop), (255, 255, 0), 1)
-            cv2.line(marked, (0, yBottom), (W, yBottom), (255, 255, 0), 1)
+            pairs = assign(live, centres, maxStep, s["areaFloor"], now, s["reidX"])
+            for i, t in enumerate(live):
+                if i in pairs:
+                    c = centres[pairs[i]]
+                    # A match further from the prediction than one frame's step could
+                    # reach only happened because the widened gate allowed it, i.e.
+                    # this fall was stitched across a gap.  Count it, for the same
+                    # reason dead-track re-acquisitions are counted: a gate that is
+                    # too loose fabricates a fall out of two droplets, and this makes
+                    # that visible in falls.csv instead of trusted.
+                    aim = t.predict(now)
+                    if t.miss > 0 and np.hypot(c[0] - aim[0], c[1] - aim[1]) > maxStep:
+                        t.reacquired += 1
+                    t.update(c, now, maxSpeed)
+                    finished = updateCrossings(t, yTop, yBottom, spacing)
+                    if finished is not None:
+                        if not src.isLive:      # a frame index to seek back to, files only
+                            t.fTop, t.fBottom = t.tTop * fps, t.tBottom * fps
+                        t.kinematicLegal = t.legal
+                        t.fieldOff = None
+                        if t.legal:                  # only speed-legal falls need the check
+                            t.fieldOff = fieldOffFromCells(
+                                [cell for ct, cell in panel if t.tTop <= ct <= t.tBottom]) \
+                                if src.isLive else fieldWasOff(path, box, t.fTop, t.fBottom)
+                            t.legal = bool(t.fieldOff)
+                        falls.append(finished)
+                        print("  frame %6d  id %-5d  %6.2f s  %6.3f grid/s  %s"
+                              % (n, t.id, t.seconds, FALL_DIVISIONS / t.seconds,
+                                 # fieldOff is TRI-STATE and this line used to flatten it:
+                                 # anything kinematically legal printed as "field ON",
+                                 # whether the panel was read and showed volts (False) or
+                                 # was never readable at all (None).  Those need different
+                                 # actions -- one is the operator's, one is ours.
+                                 "LEGAL" if t.legal else
+                                 ("field ON - rejected" if t.kinematicLegal
+                                  and t.fieldOff is False else
+                                  "panel UNREADABLE - rejected" if t.kinematicLegal
+                                  else "rejected")),
+                              flush = True)
+                else:
+                    t.miss += 1
+            keep, buried = [], []
+            probationS = max(PROBATION_S, 2 * dt)    # never shorter than two frames
             for t in live:
-                if t.miss > 0:
-                    continue                     # never draw a coasting ghost
-                p = (int(round(t.pos[0])), int(round(t.pos[1])))
-                if len(t.points) < CONFIRM_POINTS:
-                    cv2.circle(marked, p, 2, (120, 120, 120), -1)    # unconfirmed: a dot
+                waited = now - t.lastT
+                if waited <= (MAX_COAST_S if len(t.points) >= CONFIRM_POINTS
+                              else probationS):
+                    keep.append(t)
+                elif len(t.points) >= CONFIRM_POINTS:
+                    buried.append(t)                 # only confirmed tracks are worth keeping
+            live = keep
+            morgue.extend(buried)
+            morgue[:] = [t for t in morgue if now - t.points[-1][0] <= REID_MAX_S]
+
+            claimed = set(pairs.values())
+            # A coasting track is still live and still aiming at its droplet.  If assign
+            # did not match it this frame, its blob is unclaimed -- and creating a new
+            # track on that blob puts TWO tracks on one droplet, after which the global
+            # assignment feeds only one and starves the other.  Measured on clip 1: a
+            # duplicate took the blob on 27 of the 90 frames its original was waiting.
+            # So do not spawn where a confirmed live track is already predicting.
+            coasting = [(t.predict(now), t) for t in live
+                        if t.miss > 0 and len(t.points) >= CONFIRM_POINTS]
+            for j, c in enumerate(centres):
+                if j in claimed:
                     continue
-                v = t.recentSpeed(spacing)
-                plausible = v is not None and SCREEN_MIN <= v <= SCREEN_MAX
-                if v is None:
-                    colour = (160, 160, 160)                 # not enough points yet
-                elif plausible:
-                    colour = (0, 255, 0)                     # plausible fall
-                elif v < 0:
-                    colour = (255, 120, 0)                   # rising
+                if any((c[0] - aim[0]) ** 2 + (c[1] - aim[1]) ** 2 <= maxStep ** 2
+                       for aim, _t in coasting):
+                    continue                     # belongs to a coaster; do not duplicate
+                old = reacquire(morgue, c, now, s)
+                if old is None:
+                    live.append(Track(c, now))
                 else:
-                    colour = (0, 0, 255)                     # too fast
-                cv2.circle(marked, p, 9, colour, 1)
-                if plausible:
-                    cv2.putText(marked, "%.2f gr/s" % v, (p[0] + 16, p[1] - 3),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                if t.tBottom is not None:                    # measured: freeze it
-                    done = (0, 255, 0) if t.legal else (0, 0, 255)
-                    cv2.circle(marked, p, 13, done, 1)
-                    cv2.putText(marked, "%.2f s" % t.seconds,
-                                (p[0] + 16, p[1] + 13),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, done, 1)
-                elif t.tTop is not None:                     # clock is running
-                    cv2.circle(marked, p, 13, (0, 255, 255), 1)
-                    cv2.putText(marked, "%.1f s" % (now - t.tTop),
-                                (p[0] + 16, p[1] + 13),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            nTracked = sum(1 for t in live
-                           if t.miss == 0 and len(t.points) >= CONFIRM_POINTS)
-            hud = "tracked %d   falls %d   legal %d" % (
-                nTracked, len(falls), sum(1 for f in falls if f.legal))
-            secs = int(now - (firstT or 0))
-            clock = "%d:%02d:%02d" % (secs // 3600, secs // 60 % 60, secs % 60)
+                    morgue.remove(old)               # it lives again, with its history
+                    old.miss = 0
+                    old.reacquired += 1
+                    old.update(c, now, maxSpeed)
+                    live.append(old)
 
-            def drawHud(canvas):
-                cv2.putText(canvas, hud, (10, 22),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
-                (tw, _th), _ = cv2.getTextSize(clock, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-                cv2.putText(canvas, clock, (canvas.shape[1] - tw - 10, 22),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+            if show or writer is not None:
+                marked = crop.copy()
+                cv2.line(marked, (0, yTop), (W, yTop), (255, 255, 0), 1)
+                cv2.line(marked, (0, yBottom), (W, yBottom), (255, 255, 0), 1)
+                for t in live:
+                    if t.miss > 0:
+                        continue                     # never draw a coasting ghost
+                    p = (int(round(t.pos[0])), int(round(t.pos[1])))
+                    if len(t.points) < CONFIRM_POINTS:
+                        cv2.circle(marked, p, 2, (120, 120, 120), -1)    # unconfirmed: a dot
+                        continue
+                    v = t.recentSpeed(spacing)
+                    plausible = v is not None and SCREEN_MIN <= v <= SCREEN_MAX
+                    if v is None:
+                        colour = (160, 160, 160)                 # not enough points yet
+                    elif plausible:
+                        colour = (0, 255, 0)                     # plausible fall
+                    elif v < 0:
+                        colour = (255, 120, 0)                   # rising
+                    else:
+                        colour = (0, 0, 255)                     # too fast
+                    cv2.circle(marked, p, 9, colour, 1)
+                    if plausible:
+                        cv2.putText(marked, "%.2f gr/s" % v, (p[0] + 16, p[1] - 3),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                    if t.tBottom is not None:                    # measured: freeze it
+                        done = (0, 255, 0) if t.legal else (0, 0, 255)
+                        cv2.circle(marked, p, 13, done, 1)
+                        cv2.putText(marked, "%.2f s" % t.seconds,
+                                    (p[0] + 16, p[1] + 13),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, done, 1)
+                    elif t.tTop is not None:                     # clock is running
+                        cv2.circle(marked, p, 13, (0, 255, 255), 1)
+                        cv2.putText(marked, "%.1f s" % (now - t.tTop),
+                                    (p[0] + 16, p[1] + 13),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+                nTracked = sum(1 for t in live
+                               if t.miss == 0 and len(t.points) >= CONFIRM_POINTS)
+                hud = "tracked %d   falls %d   legal %d" % (
+                    nTracked, len(falls), sum(1 for f in falls if f.legal))
+                secs = int(now - (firstT or 0))
+                clock = "%d:%02d:%02d" % (secs // 3600, secs // 60 % 60, secs % 60)
 
-            # The window shows the WHOLE frame the apparatus sent, with the ROI
-            # pasted back in place.  Cropping to the ROI hid the `V:` readout the
-            # operator balances against, and left the clock in the middle of the
-            # window instead of its corner.  The recording stays ROI-sized: that is
-            # the measured region and the shape every artefact so far has.
-            plain = marked.copy() if show else None
-            drawHud(marked)
-            inWindow = (videoFrom is None or videoFrom <= n) and (videoTo is None or n <= videoTo)
-            if writer is not None and inWindow:
-                writer.write(marked)      # track over a wide span, record a narrow one
-            if show:
-                display = frame.copy()
-                display[Y:Y + H, X:X + W] = plain
-                cv2.rectangle(display, (X, Y), (X + W, Y + H), (0, 160, 0), 1)
-                drawHud(display)
-                cv2.imshow("Droplets", display)
-                if src.isLive:
-                    delay = 1           # a camera sets its own pace; never wait on it
+                def drawHud(canvas):
+                    cv2.putText(canvas, hud, (10, 22),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
+                    (tw, _th), _ = cv2.getTextSize(clock, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+                    cv2.putText(canvas, clock, (canvas.shape[1] - tw - 10, 22),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+
+                # The window shows the WHOLE frame the apparatus sent, with the ROI
+                # pasted back in place.  Cropping to the ROI hid the `V:` readout the
+                # operator balances against, and left the clock in the middle of the
+                # window instead of its corner.  The recording stays ROI-sized: that is
+                # the measured region and the shape every artefact so far has.
+                plain = marked.copy() if show else None
+                drawHud(marked)
+                inWindow = (videoFrom is None or videoFrom <= n) and (videoTo is None or n <= videoTo)
+                if writer is not None and inWindow:
+                    writer.write(marked)      # track over a wide span, record a narrow one
+                if show:
+                    display = frame.copy()
+                    display[Y:Y + H, X:X + W] = plain
+                    cv2.rectangle(display, (X, Y), (X + W, Y + H), (0, 160, 0), 1)
+                    drawHud(display)
+                    cv2.imshow("Droplets", display)
+                    if src.isLive:
+                        delay = 1           # a camera sets its own pace; never wait on it
+                    else:
+                        targetTime = start + n / fps
+                        delay = max(1, int(round((targetTime - time.perf_counter()) * 1000)))
+                    if cv2.waitKey(delay) == ord("q"):
+                        print("Stopped at frame", n)
+                        break
+            if not show and n % 3000 == 0:
+                if toFrame:
+                    print("  frame %d/%d (%.0f%%)  live %d  falls %d"
+                          % (n, toFrame,
+                             100.0 * (n - fromFrame) / max(1, toFrame - fromFrame),
+                             len(live), len(falls)), flush = True)
                 else:
-                    targetTime = start + n / fps
-                    delay = max(1, int(round((targetTime - time.perf_counter()) * 1000)))
-                if cv2.waitKey(delay) == ord("q"):
-                    print("Stopped at frame", n)
-                    break
-        if not show and n % 3000 == 0:
-            if toFrame:
-                print("  frame %d/%d (%.0f%%)  live %d  falls %d"
-                      % (n, toFrame,
-                         100.0 * (n - fromFrame) / max(1, toFrame - fromFrame),
-                         len(live), len(falls)), flush = True)
-            else:
-                print("  %.0f s  %d frames  live %d  falls %d"
-                      % (now - (firstT or 0), n, len(live), len(falls)), flush = True)
+                    print("  %.0f s  %d frames  live %d  falls %d"
+                          % (now - (firstT or 0), n, len(live), len(falls)), flush = True)
 
+    except KeyboardInterrupt:
+        print("\nInterrupted at frame", n)
     src.close()
     if writer is not None:
         writer.release()
@@ -1411,10 +1420,19 @@ def analyze(videoPath = VIDEO, binding = None, show = False, saveVideo = False):
 
 def main(argv):
     if len(argv) > 1 and argv[1] == "live":
-        spec = "cam:" + (argv[2] if len(argv) > 2 else "0")
+        # --blind runs with no window.  For a benchmark against a human with a
+        # stopwatch that is not a convenience: the overlay prints elapsed seconds,
+        # speed in grid/s and colours the verdict green or red, so an operator who
+        # can see it is copying the answer rather than taking an independent one.
+        # The apparatus has its own monitor, which is what the manual method uses.
+        blind = "--blind" in argv[1:]
+        rest = [a for a in argv[2:] if not a.startswith("-")]
+        spec = "cam:" + (rest[0] if rest else "0")
         outDir = outDirFor(spec)
-        print("Live session -> %s\nPress q in the window to stop.\n" % outDir)
-        report(trackAll(spec, show = True, saveVideo = True, outDir = outDir),
+        print("Live session -> %s" % outDir)
+        print("Stop with %s" % ("Ctrl+C  (no window in --blind mode)" if blind
+                                else "q in the window"))
+        report(trackAll(spec, show = not blind, saveVideo = True, outDir = outDir),
                outDir, spec)
         return
     if len(argv) > 1 and argv[1] == "preview":
