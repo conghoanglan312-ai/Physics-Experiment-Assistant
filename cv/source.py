@@ -131,8 +131,20 @@ class LiveSource(FrameSource):
 
     isLive = True
 
+    # The dongle's own default mode is 640x480, which gives 41 px per grid division
+    # -- below the 43-93 range the detector was validated on -- and a frame narrow
+    # enough that autoROI sees only the nominal 10 divisions, losing the widened
+    # observation area. Asking for 1280x720 reproduces the geometry the acceptance
+    # baselines were measured at: 61.0 px/division and a 14.9-division ROI, matching
+    # clip 8 to a pixel. Measured on the bench, 2026-09-03, across every mode the
+    # device offers. A device that cannot do it ignores the request and hands back
+    # whatever it has, which is what would have happened anyway.
+    DEFAULT_SIZE = (1280, 720)
+
     def __init__(self, index = 0, width = None, height = None, fps = None,
                  backend = None, warmupS = 1.0):
+        if width is None and height is None:
+            width, height = self.DEFAULT_SIZE
         if backend is None and sys.platform == "win32":
             backend = cv2.CAP_DSHOW      # the default backend on Windows is slow to open
         cap = cv2.VideoCapture(index, backend) if backend else cv2.VideoCapture(index)
