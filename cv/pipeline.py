@@ -218,11 +218,21 @@ def allDigitsAlike(cell):
     if not lines:
         return None
     a, b = lines[0]
+    # BEST across the ladder, not the first rung that returns anything.  Stopping at
+    # the first scorable segmentation let a WRONG one block the right one: on the raw
+    # dongle feed a `0` splits into two 8 px strokes, and at 0.40 the window
+    # [V-fragment, colon, half-zero, half-zero] passes the like-sized test and scores
+    # about 0, so the rung that merges the zeros was never reached.  Measured on a
+    # panel reading +0000V: 13 of 139 frames scored above 0.5, under the 15% the
+    # field-off vote needs, so a field that was plainly off was reported as on.
+    # Taking the maximum can only raise a score, and a fragmented segmentation scores
+    # near zero while a correct one scores near 1 -- the two do not compete.
+    best = None
     for joinFactor in JOIN_LADDER:
         score = scoreGlyphs(glyphs(cell[a:b, :], joinFactor))
         if score is not None:
-            return score
-    return None
+            best = score if best is None else max(best, score)
+    return best
 
 
 def fieldOffFromCells(cells):
@@ -360,6 +370,20 @@ class RollingBackground:
     """Median of the frames sampled over the last `windowS` seconds."""
 
     def __init__(self, windowS, fps, samples = BG_SAMPLES):
+        # Belt and braces.  A non-positive fps silently collapses every interval
+        # below to 1, which is not a degraded background but a different algorithm:
+        # the window stops spanning `windowS` and the median rebuilds every frame.
+        # The source is supposed to guarantee this; assert it rather than clamp.
+        if not fps or fps <= 0:
+            raise ValueError("RollingBackground needs a positive fps, got %r. "
+                             "A live source must supply a sane nominalFps." % (fps,))
+        # Belt and braces.  A non-positive fps silently collapses every interval
+        # below to 1, which is not a degraded background but a different algorithm:
+        # the window stops spanning `windowS` and the median rebuilds every frame.
+        # The source guarantees this; assert it rather than quietly clamp.
+        if not fps or fps <= 0:
+            raise ValueError("RollingBackground needs a positive fps, got %r. "
+                             "A live source must supply a sane nominalFps." % (fps,))
         self.every = max(1, int(round(windowS * fps / samples)))
         # Never sample on a whole number of seconds.  The panel carries a `t:`
         # readout and the display has its own refresh beat, both close to 1 Hz;
@@ -572,10 +596,42 @@ def drawROI(fullBackground, roi, name):
     return canvas
 
 
+# Otsu splits whatever histogram it is handed, including one with no bright class in
+# it at all.  On the recorded clips the difference image is bimodal -- near-zero noise,
+# droplets far above -- and Otsu lands around 38.  The raw dongle feed carries bursts
+# of single-frame impulse speckle (measured 2026-09-03: no pixel is bright in more than
+# one of fifteen consecutive frames), which fills the low range, and Otsu then splits
+# INSIDE the noise at 3.1 -- yielding 221 detections a frame against clip 8's 6.7, and
+# thousands of phantom tracks.
+#
+# Pre-filtering cannot fix this and was measured doing the opposite: a 3x3 median took
+# it to 327/frame, a 5x5 to 376, a 3-frame temporal median to 237.  Cleaning the input
+# lowers the variance, Otsu drops its split to match, and the same blobs come back.
+# The threshold itself has to have a floor.
+#
+# The floor is the frame's own robust noise scale, so it costs nothing where Otsu is
+# already sane.  6 is the SMALLEST multiple that removes the speckle, and it was chosen
+# by sweeping against the reference clips rather than picked: at 6 the live feed goes
+# 221.5 -> 0.1 detections a frame while clip 8 (6.7), clip 7 (3.0) and clip 1 (8.9) are
+# unchanged to the decimal.  At 9 clip 7 starts to lose detections, so this is also the
+# largest value that leaves every reference untouched.  Validated on live frames with
+# droplets actually present: a burst frame went 163 -> 3 while a real droplet, which
+# reaches 100-191 against a floor near 13, survived.
+NOISE_FLOOR_MAD = 6.0
+
+
 def detectDroplets(gray, background, s, allAreas = None):
     diff = cv2.absdiff(gray, background)
     blurred = cv2.GaussianBlur(diff, (5, 5), sigmaX = 0)
-    levelOtsu, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    levelOtsu, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    # Subsampled: a median over every 16th pixel estimates the same scale and keeps
+    # this off the per-frame budget, which matters on a live source.
+    coarse = blurred[::4, ::4].astype(np.float32)
+    med = float(np.median(coarse))
+    mad = float(np.median(np.abs(coarse - med)))
+    level = max(float(levelOtsu), med + NOISE_FLOOR_MAD * max(mad, 1.0))
+    _, thresh = cv2.threshold(blurred, level, 255, cv2.THRESH_BINARY)
+    levelOtsu = level                    # report what was actually used
     opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, s["kernel"])
     cleaned = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, s["kernel"])
     contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -1040,8 +1096,16 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     falls.append(finished)
                     print("  frame %6d  id %-5d  %6.2f s  %6.3f grid/s  %s"
                           % (n, t.id, t.seconds, FALL_DIVISIONS / t.seconds,
+                             # fieldOff is TRI-STATE and this line used to flatten it:
+                             # anything kinematically legal printed as "field ON",
+                             # whether the panel was read and showed volts (False) or
+                             # was never readable at all (None).  Those need different
+                             # actions -- one is the operator's, one is ours.
                              "LEGAL" if t.legal else
-                             ("field ON - rejected" if t.kinematicLegal else "rejected")),
+                             ("field ON - rejected" if t.kinematicLegal
+                              and t.fieldOff is False else
+                              "panel UNREADABLE - rejected" if t.kinematicLegal
+                              else "rejected")),
                           flush = True)
             else:
                 t.miss += 1
@@ -1119,21 +1183,36 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     cv2.putText(marked, "%.1f s" % (now - t.tTop),
                                 (p[0] + 16, p[1] + 13),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            shown = sum(1 for t in live
-                        if t.miss == 0 and len(t.points) >= CONFIRM_POINTS)
-            cv2.putText(marked, "tracked %d   falls %d   legal %d"
-                        % (shown, len(falls), sum(1 for f in falls if f.legal)),
-                        (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
+            nTracked = sum(1 for t in live
+                           if t.miss == 0 and len(t.points) >= CONFIRM_POINTS)
+            hud = "tracked %d   falls %d   legal %d" % (
+                nTracked, len(falls), sum(1 for f in falls if f.legal))
             secs = int(now - (firstT or 0))
             clock = "%d:%02d:%02d" % (secs // 3600, secs // 60 % 60, secs % 60)
-            (tw, _th), _ = cv2.getTextSize(clock, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-            cv2.putText(marked, clock, (W - tw - 10, 22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
-            if writer is not None and (videoFrom is None or videoFrom <= n) \
-               and (videoTo is None or n <= videoTo):
+
+            def drawHud(canvas):
+                cv2.putText(canvas, hud, (10, 22),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
+                (tw, _th), _ = cv2.getTextSize(clock, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+                cv2.putText(canvas, clock, (canvas.shape[1] - tw - 10, 22),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+
+            # The window shows the WHOLE frame the apparatus sent, with the ROI
+            # pasted back in place.  Cropping to the ROI hid the `V:` readout the
+            # operator balances against, and left the clock in the middle of the
+            # window instead of its corner.  The recording stays ROI-sized: that is
+            # the measured region and the shape every artefact so far has.
+            plain = marked.copy() if show else None
+            drawHud(marked)
+            inWindow = (videoFrom is None or videoFrom <= n) and (videoTo is None or n <= videoTo)
+            if writer is not None and inWindow:
                 writer.write(marked)      # track over a wide span, record a narrow one
             if show:
-                cv2.imshow("Droplets", marked)
+                display = frame.copy()
+                display[Y:Y + H, X:X + W] = plain
+                cv2.rectangle(display, (X, Y), (X + W, Y + H), (0, 160, 0), 1)
+                drawHud(display)
+                cv2.imshow("Droplets", display)
                 if src.isLive:
                     delay = 1           # a camera sets its own pace; never wait on it
                 else:
@@ -1193,7 +1272,11 @@ def report(falls, outDir = None, path = None):
     if falls:
         print("\n%6s %10s %9s %11s %8s" % ("id", "start", "time(s)", "speed(gr/s)", "legal"))
         for f in sorted(falls, key = lambda f: -f.seconds)[:25]:
-            start = "%.0f" % f.fTop if f.fTop is not None else "%.1fs" % f.tTop
+            # A live fall has no frame index, and tTop can be absent too, which
+            # crashed report() at the end of every live session -- after the run,
+            # before falls.csv was written, so the whole session was lost.
+            start = ("%.0f" % f.fTop if f.fTop is not None else
+                     "%.1fs" % f.tTop if f.tTop is not None else "-")
             print("%6d %10s %9.2f %11.3f %8s"
                   % (f.id, start, f.seconds, FALL_DIVISIONS / f.seconds, f.legal))
     csvPath = artefact(outDir, path, "falls.csv") if outDir and path \
