@@ -72,7 +72,8 @@ class FileSource(FrameSource):
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
             raise IOError("OpenCV could not open %s -- codec or permissions?" % path)
-        self.nominalFps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        _fps = cap.get(cv2.CAP_PROP_FPS)
+        self.nominalFps = _fps if _fps and _fps > 0 else 30.0
         self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.frameCount = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -161,12 +162,35 @@ class LiveSource(FrameSource):
         self._cap = cap
         # Some devices hand back a few malformed frames while exposure settles.
         # Read them now rather than letting autoROI see them.
+        #
+        # This also waits for the mode change above to take effect.  Asked for a size
+        # immediately after release by a previous session, this dongle reports -1x-1
+        # and delivers nothing, and the session then died 30 s later inside
+        # learnBackground with "returned no frames" -- long after the real failure.
+        # Keep reading until a frame actually arrives, and take the dimensions from
+        # that frame rather than from cap.get(), which reports the stale handle.
         until = time.perf_counter() + warmupS
-        while time.perf_counter() < until:
-            cap.read()
-        self.nominalFps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        self.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        good = None
+        while time.perf_counter() < until or good is None:
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                good = frame
+            elif time.perf_counter() > until + 5.0:
+                cap.release()
+                raise IOError("camera %s opened but delivered no frames in %.0f s. "
+                              "Another application may still hold it; close it and "
+                              "retry." % (index, warmupS + 5.0))
+        # `or 30.0` does not catch this: CAP_DSHOW returns -1.0 for a device that
+        # will not declare a rate, and -1.0 is truthy.  A negative nominal fps then
+        # reaches RollingBackground, where `windowS * fps / samples` goes negative
+        # and clamps to 1 -- so the 300 s window becomes 61 consecutive frames and
+        # the median rebuilds every frame instead of every 5 s.  Measured on the
+        # bench 2026-09-03: 2.51 fps delivered, and the droplets on screen ended up
+        # inside their own background.  Advisory only, so a wrong-but-positive value
+        # is survivable; a non-positive one is not.
+        _fps = cap.get(cv2.CAP_PROP_FPS)
+        self.nominalFps = _fps if _fps and _fps > 0 else 30.0
+        self.height, self.width = good.shape[:2]
         self._t0 = None
 
     def _stamp(self):
