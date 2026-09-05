@@ -11,7 +11,8 @@ CLI:
     python -m cv.pipeline <clip>            window, playing a recorded clip
     python -m cv.pipeline live [index]      window, from a camera or capture dongle
     python -m cv.pipeline live [index] --blind
-                                            no window -- for benchmarking against a
+                                            window showing the RAW apparatus picture and
+                                            nothing else -- for benchmarking against a
                                             human, who must not see the overlay
     python -m cv.pipeline survey <clip>     headless, writes falls.csv
     python -m cv.pipeline all [pattern]     every clip in MILLIKAN_FOOTAGE
@@ -38,9 +39,11 @@ except ImportError:                     # greedy fallback, same gates
     HAVE_SCIPY = False
 
 try:
-    from .source import openSource, isCameraSpec
+    from .source import openSource, isCameraSpec, FRAMES_PREFIX
+    from . import charge as chargeMath
 except ImportError:                     # run as a loose script rather than a package
-    from source import openSource, isCameraSpec
+    from source import openSource, isCameraSpec, FRAMES_PREFIX
+    import charge as chargeMath
 
 # No machine-specific defaults.  Point these at your own footage with an argument
 # or an environment variable.  A missing clip raises: quietly returning an empty
@@ -61,6 +64,13 @@ def resolveClip(path):
     if not path:
         raise ValueError("No clip given. Pass a path, or set MILLIKAN_CLIP.")
     if isCameraSpec(path):              # "cam:0" never touches the filesystem
+        return path
+    # "frames:DIR" is a directory of raw per-frame PNGs, not a file.  Still checked:
+    # a mistyped fixture name must fail here rather than three minutes into a run.
+    if str(path).lower().startswith(FRAMES_PREFIX):
+        folder = str(path)[len(FRAMES_PREFIX):].strip()
+        if not os.path.isdir(folder):
+            raise NotADirectoryError(folder)
         return path
     if not os.path.exists(path):
         raise FileNotFoundError(path)
@@ -570,12 +580,17 @@ def autoROI(fullBackground):
             "rows": rows,
             "spacing": spacing,
             "border": rightBorder,
-            # Interior verticals to mask, in full-frame coords.  Only trusted once the
-            # ROI was widened: the `w - 5 * spacing` heuristic in buildSettings puts a
-            # line at the middle of a NOMINAL 10-division box, which is exactly right
-            # there and meaningless once the width changes.  Keeping it wherever it
-            # already worked leaves every Aug_25 result untouched.
-            "cols": vLines if widened else None}
+            # Interior verticals to mask, in full-frame coords.  These used to be
+            # returned only when the ROI had been widened, to leave the Aug_25 results
+            # untouched -- but that left the production path masking a line that does
+            # not exist.  Measured on one_droplet_slow (2026-09-05): the real verticals
+            # are at x = 18, 392 and 809, while buildSettings' fallback of
+            # `w - 5 * spacing` puts its single mask at x = 603, which is empty space.
+            # So all three lines went unprotected and 21.9% of all detections landed
+            # within 6 px of one, strung down the verticals exactly as the operator
+            # described.  Detected lines are now used whenever there are at least two;
+            # the heuristic survives only for footage where detection finds nothing.
+            "cols": vLines if len(vLines) >= 2 else None}
 
 
 def drawROI(fullBackground, roi, name):
@@ -622,6 +637,36 @@ def drawROI(fullBackground, roi, name):
 # reaches 100-191 against a floor near 13, survived.
 NOISE_FLOOR_MAD = 6.0
 
+# A droplet cannot pass a 0.80 circularity gate at any size it actually has.
+# `contourArea` measures the polygon through pixel CENTRES while `arcLength`
+# measures its perimeter, so 4*pi*A/P^2 is biased low on small blobs: a perfect
+# synthetic disc scores 0.785 at r=2 px, 0.674 at r=3, 0.763 at r=5, and does not
+# reach 0.80 until r=8 -- larger than any droplet in this apparatus.  So the old
+# 0.80 admitted a droplet only when noise happened to inflate its area or shorten
+# its perimeter, which is a coin flip per frame.  Measured on 706 raw dongle frames
+# (2026-09-04): at 0.80 a droplet was present in 77% of frames and never for more
+# than 62 consecutive (2.6 s); no track survives PROBATION_S = 0.2 s on that, so
+# falls never became confirmed tracks and were never timed.  Swept: continuity
+# reaches 100% and stays there at 0.52 and below, so 0.50 is the knee with margin.
+# Cost is 3.7 -> 14.2 detections a frame, still far under the 123/frame that the
+# noise floor exists to stop.
+#
+# Sixth constant to be calibrated on one capture path and silently mis-fit another
+# (see NEXT_SESSION.md rule 6). H.264 blurs blobs rounder and larger, which is why
+# the recorded clips never showed this.
+#
+# HELD AT 0.80 ANYWAY, 2026-09-04.  Loosening it does fix detection -- continuity
+# went to 100% and the overlay stayed on droplets that used to blink out -- but it
+# raises detections from 3.7 to 14.2 a frame, and the extra blobs spawn DUPLICATE
+# tracks that steal the blob from the real one.  That turns a missing measurement
+# into a WRONG one: the live run at 0.50 reported two traverses of 4.6 s where the
+# operator had dropped a single droplet once, and clip 8 came back with 34.10,
+# 34.17 and 34.30 where one fall exists.  A benchmark can survive a missed fall; it
+# cannot survive a confident wrong number.  The gate is not the real fix -- the
+# duplicate-track suppression is -- so this stays at 0.80 until that is built.
+# Everything measured above still stands and is why 0.80 is a stopgap, not correct.
+CIRCULARITY_MIN = 0.80
+
 
 def detectDroplets(gray, background, s, allAreas = None):
     diff = cv2.absdiff(gray, background)
@@ -647,7 +692,7 @@ def detectDroplets(gray, background, s, allAreas = None):
         if perimeter == 0 or cArea < s["areaMin"] or cArea > s["areaMax"]:
             continue
         circularity = 4 * np.pi * cArea / (perimeter ** 2)
-        if circularity < 0.8:
+        if circularity < CIRCULARITY_MIN:
             continue
         M = cv2.moments(cnt)
         cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
@@ -672,6 +717,7 @@ def buildSettings(roi, spacing):
             # noise through on small ones.
             "areaFloor": 20 * mag ** 2,
             "gridClear": 4 * mag, "edgeClear": 20 * mag,
+            "dupPx": DUPLICATE_PX * mag,
             "maxStep": 12 * mag,        # px between consecutive frames at 30 fps
             # The same limit as a SPEED, which is what it was always trying to say.
             # A gate in px-per-frame silently means something different on a camera
@@ -720,6 +766,48 @@ def previewAll(folder = None, outDir = None):
 # are recovered.  Runaway predictions are held back by the velocity clamp in
 # Track.update and by global assignment, not by these.
 MAX_COAST_S = 3.0          # how long a CONFIRMED track may be predicted through a blackout
+# How close a new detection may be to a track that already exists before we refuse
+# to spawn on it.  Measured on clip 8 (2026-09-05) with the gate loosened to 0.52:
+# 868 of 2814 spawned tracks -- 31% -- were born within 12 px of a live track, which
+# is where the duplicate falls came from (34.10 / 34.17 / 34.30 for one droplet).
+# Two genuinely different CONFIRMED droplets are that close only 0.596% of the time:
+# their separation is 10.3 px at p0.5 and 18.1 px at p1, so 12 px sits between the
+# two and costs almost nothing.  Expressed pre-magnification: 14 * mag = 11.9 px at
+# spacing 61.
+DUPLICATE_PX = 14
+
+# TRIED 2026-09-05 AND REJECTED -- kept because the finding behind it is real and
+# someone will otherwise propose it again.
+#
+# The idea: a new track may only start on a detection that ALSO appeared in the
+# previous frame.
+# The apparatus emits bursts of single-frame speckle whenever the operator has hands
+# on it -- zoom, focus, voltage -- and the tracker was chaining those unrelated one-
+# frame blobs into tracks that carried physically plausible velocities.  Stepping
+# through three consecutive frames at 4:18 of one_droplet_slow shows it plainly: every
+# circle is somewhere new, nothing persists, and the HUD still read `tracked 33`.
+#
+# Speckle is uncorrelated between frames; a droplet is not.  Measured over that whole
+# session: requiring a neighbour within 6 px in the previous frame removes 87% of the
+# detections during the noisy minutes (54.1/frame -> 7.1 at minute 4, 48.3 -> 5.6 at
+# minute 19) while a real droplet corroborates about 70% of the time -- and 70% is
+# plenty, because this gates SPAWNING ONLY.  An established track keeps being fed by
+# assign() whether or not this frame's blob was corroborated, so a fall in progress
+# is untouched.  7 * mag = 6.0 px at spacing 61, the radius the measurement used.
+#
+# It does not work.  On one_droplet_slow at gate 0.52 it took the result from 5 of the
+# operator's 5 timed falls down to 3, while saving only one spurious traverse.  The
+# 70% corroboration rate is an average over ALL detections, and the moments that
+# actually matter are the spawn instants -- a droplet that fails to corroborate in the
+# one frame where its track would have started never gets a track at all, and the
+# whole fall is lost.  Averages do not gate; instants do.
+#
+# The underlying observation stands and still needs a fix: the apparatus emits bursts
+# of single-frame speckle whenever the operator has hands on it, and those get chained
+# into tracks carrying plausible velocities.  Whatever solves it must not depend on
+# any single frame's detection surviving.
+CORROBORATE_PX = 7              # unused; see above
+
 CONFIRM_POINTS = 6         # seen this many times before a track is believed;
                            # 8 loses the 17.83 s legal fall, 6 keeps both and
                            # cuts peak live tracks from 604 to 52
@@ -957,7 +1045,7 @@ def fallDrift(t, spacing):
 
 def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health = None,
              fromFrame = 0, toFrame = None, bgWindowS = BG_WINDOW_S,
-             bgFromRange = False, videoFrom = None, videoTo = None):
+             bgFromRange = False, videoFrom = None, videoTo = None, blind = False):
     """bgWindowS = None keeps the whole-clip background, i.e. every result produced
     before 2026-08-28.  A number switches to a rolling window of that many seconds."""
     path = resolveClip(path)
@@ -1006,8 +1094,16 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     if saveVideo:
         writer = cv2.VideoWriter(artefact(outDir, path, "annotated_multi.mp4"),
                                  cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
+    # The apparatus has ONE video out and it now feeds the dongle, so the lab monitor
+    # is dark and this window is the only picture the operator has.  Make it resizable
+    # for a blind run: they are watching a droplet cross a line on it.
     if show:
-        cv2.namedWindow("Droplets")
+        cv2.namedWindow("Droplets",
+                        cv2.WINDOW_NORMAL if blind else cv2.WINDOW_AUTOSIZE)
+    # In a blind session this line IS the answer -- elapsed seconds and LEGAL/rejected,
+    # printed the instant the fall completes.  A terminal in the corner of the operator's
+    # eye is not a blind benchmark.  Swallow it; falls.csv still records everything.
+    sayFall = (lambda *a, **k: None) if blind else print
 
     roller = None
     if bgWindowS:
@@ -1101,7 +1197,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                 if src.isLive else fieldWasOff(path, box, t.fTop, t.fBottom)
                             t.legal = bool(t.fieldOff)
                         falls.append(finished)
-                        print("  frame %6d  id %-5d  %6.2f s  %6.3f grid/s  %s"
+                        sayFall("  frame %6d  id %-5d  %6.2f s  %6.3f grid/s  %s"
                               % (n, t.id, t.seconds, FALL_DIVISIONS / t.seconds,
                                  # fieldOff is TRI-STATE and this line used to flatten it:
                                  # anything kinematically legal printed as "field ON",
@@ -1138,12 +1234,25 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
             # So do not spawn where a confirmed live track is already predicting.
             coasting = [(t.predict(now), t) for t in live
                         if t.miss > 0 and len(t.points) >= CONFIRM_POINTS]
+            # ...and the same argument applies to a track that IS being fed this frame.
+            # The guard above only covered coasters, which was enough while detections
+            # were scarce.  Loosen the circularity gate and they triple, and a noise
+            # blob landing beside a healthy track spawns a twin that then splits the
+            # droplet's blobs with it -- both survive, both complete, and one droplet
+            # is reported as two or three falls.  So refuse to spawn anywhere a live
+            # track already is or is about to be, confirmed or not.
+            shadow = [(t.pos, t.predict(now)) for t in live]
+            dup2 = s["dupPx"] ** 2
             for j, c in enumerate(centres):
                 if j in claimed:
                     continue
                 if any((c[0] - aim[0]) ** 2 + (c[1] - aim[1]) ** 2 <= maxStep ** 2
                        for aim, _t in coasting):
                     continue                     # belongs to a coaster; do not duplicate
+                if any((c[0] - p[0]) ** 2 + (c[1] - p[1]) ** 2 <= dup2
+                       or (c[0] - a[0]) ** 2 + (c[1] - a[1]) ** 2 <= dup2
+                       for p, a in shadow):
+                    continue                     # a live track is already on this
                 old = reacquire(morgue, c, now, s)
                 if old is None:
                     live.append(Track(c, now))
@@ -1209,16 +1318,22 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 # operator balances against, and left the clock in the middle of the
                 # window instead of its corner.  The recording stays ROI-sized: that is
                 # the measured region and the shape every artefact so far has.
-                plain = marked.copy() if show else None
+                plain = marked.copy() if (show and not blind) else None
                 drawHud(marked)
                 inWindow = (videoFrom is None or videoFrom <= n) and (videoTo is None or n <= videoTo)
                 if writer is not None and inWindow:
                     writer.write(marked)      # track over a wide span, record a narrow one
                 if show:
-                    display = frame.copy()
-                    display[Y:Y + H, X:X + W] = plain
-                    cv2.rectangle(display, (X, Y), (X + W, Y + H), (0, 160, 0), 1)
-                    drawHud(display)
+                    if blind:
+                        # Exactly what the lab monitor would have shown.  The apparatus
+                        # burns the grid and the V:/t: panel into the signal itself, so
+                        # the untouched frame IS that picture.  Nothing of ours on it.
+                        display = frame
+                    else:
+                        display = frame.copy()
+                        display[Y:Y + H, X:X + W] = plain
+                        cv2.rectangle(display, (X, Y), (X + W, Y + H), (0, 160, 0), 1)
+                        drawHud(display)
                     cv2.imshow("Droplets", display)
                     if src.isLive:
                         delay = 1           # a camera sets its own pace; never wait on it
@@ -1380,7 +1495,8 @@ def survey(videoPath = VIDEO, health = None, show = False, saveVideo = False,
     return [fallRecord(f) for f in falls]
 
 
-def analyze(videoPath = VIDEO, binding = None, show = False, saveVideo = False):
+def analyze(videoPath = VIDEO, binding = None, voltages = None,
+            show = False, saveVideo = False):
     """One measurement session: health, droplets, and each droplet's falls.
 
     `binding` groups fall ids into droplets, e.g. [[51143, 51890], [60011]].
@@ -1389,6 +1505,11 @@ def analyze(videoPath = VIDEO, binding = None, show = False, saveVideo = False):
     droplet yields several ids.  Only the operator knows.  Guessing it would file
     two droplets as one and the resulting charge would look perfectly normal.
     With no binding, `droplets` comes back empty and you want survey().
+
+    `voltages` is one balance voltage per droplet, in the same order as `binding`.
+    Given it, the charge maths runs and `charges.csv` is written beside `falls.csv`.
+    q, n and e do NOT enter the returned dict -- they reach the student through that
+    file and nowhere else.  See the seal in cv/charge.py.
     """
     health = {"roiOk": False}
     rows = survey(videoPath, health = health, show = show, saveVideo = saveVideo)
@@ -1413,6 +1534,28 @@ def analyze(videoPath = VIDEO, binding = None, show = False, saveVideo = False):
                          "fallCount": len(falls),
                          "falls": falls})
 
+    # The physics, on disk only.  A CSV is layer-2 output; the returned dict is not.
+    if voltages is not None and droplets:
+        chargeRows, perDroplet, overall = chargeMath.table(droplets, voltages)
+        outDir = outDirFor(videoPath)
+        os.makedirs(outDir, exist_ok = True)
+        csvPath = artefact(outDir, videoPath, "charges.csv")
+        pd.DataFrame([{"droplet": r["label"], "fallId": r["fallId"],
+                       "seconds": r["seconds"], "balanceVoltageV": r["balanceVoltage"],
+                       "radiusM": r["radiusM"], "chargeC": r["chargeC"],
+                       "electrons": r["electrons"], "elementaryC": r["elementaryC"]}
+                      for r in chargeRows]).to_csv(csvPath, index = False)
+        print()
+        print("Wrote", csvPath)
+        for d in perDroplet:
+            print("  %-12s U_n %5.0f V  %d falls  mean e %.4e C  sd %.1f%%  error %+.2f%%"
+                  % (d["label"], d["balanceVoltage"], d["falls"],
+                     d["meanElementaryC"], d["relativeSdPercent"], d["errorPercent"]))
+        if overall:
+            print("  %-12s %11s  %d falls  mean e %.4e C  sd %.1f%%  error %+.2f%%"
+                  % ("ALL", "", overall["falls"], overall["meanElementaryC"],
+                     overall["relativeSdPercent"], overall["errorPercent"]))
+
     return {"contractVersion": 2,
             "roiOk": health.get("roiOk", False),
             "gridSpacingPx": health.get("gridSpacingPx"),
@@ -1431,19 +1574,25 @@ def analyze(videoPath = VIDEO, binding = None, show = False, saveVideo = False):
 
 def main(argv):
     if len(argv) > 1 and argv[1] == "live":
-        # --blind runs with no window.  For a benchmark against a human with a
-        # stopwatch that is not a convenience: the overlay prints elapsed seconds,
-        # speed in grid/s and colours the verdict green or red, so an operator who
-        # can see it is copying the answer rather than taking an independent one.
-        # The apparatus has its own monitor, which is what the manual method uses.
+        # --blind shows the raw frame and nothing else: no reticle lines, no track
+        # circles, no elapsed-seconds label, no green/red verdict, and no per-fall line
+        # in the terminal.  Against a human with a stopwatch that is not a convenience --
+        # an operator who can see the overlay is copying the answer rather than taking an
+        # independent one.
+        #
+        # It cannot just hide the window.  The apparatus has ONE video out; it now feeds
+        # the dongle, so the lab monitor is dark and this window is the operator's only
+        # picture.  Blind means unannotated, not absent.
         blind = "--blind" in argv[1:]
         rest = [a for a in argv[2:] if not a.startswith("-")]
         spec = "cam:" + (rest[0] if rest else "0")
         outDir = outDirFor(spec)
         print("Live session -> %s" % outDir)
-        print("Stop with %s" % ("Ctrl+C  (no window in --blind mode)" if blind
-                                else "q in the window"))
-        report(trackAll(spec, show = not blind, saveVideo = True, outDir = outDir),
+        print("Stop with q in the window, or Ctrl+C")
+        if blind:
+            print("BLIND: the window is the raw apparatus picture -- maximise it.")
+        report(trackAll(spec, show = True, blind = blind, saveVideo = True,
+                        outDir = outDir),
                outDir, spec)
         return
     if len(argv) > 1 and argv[1] == "preview":
