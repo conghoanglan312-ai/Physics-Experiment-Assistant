@@ -975,6 +975,15 @@ PROBATION_S = 0.2          # an unconfirmed track dies this fast; kills one-fram
 AREA_TOLERANCE = 0.7       # a re-found blob may differ this much in area
 SCREEN_MIN, SCREEN_MAX = 0.15, 0.60     # provisional band, deliberately wider than legal
 
+# How long a track must have survived before the overlay draws it.  DISPLAY ONLY --
+# detection, tracking and legality are untouched, and the annotated recording keeps
+# everything.  This exists because the apparatus emits bursts of one-frame speckle
+# that no measurement can separate from a droplet (six signals tried, all failed), so
+# the screen fills with markers on things that are not there.  A real droplet lives
+# for the whole traverse -- 16 s at the very least -- so a second and a half costs
+# nothing and removes almost all of it.
+DRAW_MIN_AGE_S = 1.5
+
 # --- re-acquiring a droplet after the track dies ----------------------------
 #
 #  A track only dies after MAX_COAST_S with no match, so by then the droplet has
@@ -1521,6 +1530,14 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 for t in live:
                     if t.miss > 0:
                         continue                     # never draw a coasting ghost
+                    # Speckle lives for a frame or two; a droplet being measured lives
+                    # for the whole traverse.  Anything younger than DRAW_MIN_AGE_S is
+                    # not worth the operator's attention and is not drawn.  A track
+                    # that has already crossed `0` is always drawn, however young --
+                    # that is the one being timed.
+                    age = now - t.points[0][0] if t.points else 0.0
+                    if age < DRAW_MIN_AGE_S and t.tTop is None:
+                        continue
                     p = (int(round(t.pos[0])), int(round(t.pos[1])))
                     if len(t.points) < CONFIRM_POINTS:
                         cv2.circle(marked, p, 2, (120, 120, 120), -1)    # unconfirmed: a dot
