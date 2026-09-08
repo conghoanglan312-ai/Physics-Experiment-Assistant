@@ -294,14 +294,31 @@ class FramesSource(FrameSource):
         self.paths = sorted(glob.glob(os.path.join(folder, "f*.png")))
         if not self.paths:
             raise IOError("no f*.png frames in %s" % folder)
+        # times.npy is written during a clean shutdown; times.txt is flushed every
+        # frame.  A capture that was killed has only the latter, and losing a whole
+        # session to a missing index file is not acceptable -- it happened once.
         stamps = os.path.join(folder, "times.npy")
-        if not os.path.exists(stamps):
-            raise IOError("%s has frames but no times.npy -- the capture clock is "
-                          "not optional, timing runs on it" % folder)
-        self.times = np.load(stamps)
+        log = os.path.join(folder, "times.txt")
+        if os.path.exists(stamps):
+            self.times = np.load(stamps)
+        elif os.path.exists(log):
+            self.times = np.array([float(v) for v in open(log) if v.strip()])
+            print("  %s: recovered %d timestamps from times.txt (the capture did not "
+                  "shut down cleanly)" % (os.path.basename(folder), len(self.times)))
+        else:
+            raise IOError("%s has frames but no times.npy or times.txt -- the capture "
+                          "clock is not optional, timing runs on it" % folder)
         if len(self.times) != len(self.paths):
-            raise IOError("%s: %d frames but %d timestamps"
-                          % (folder, len(self.paths), len(self.times)))
+            # A killed capture can leave one more frame than timestamp, or the
+            # reverse.  Trim to the shorter rather than refuse the whole fixture.
+            keep = min(len(self.times), len(self.paths))
+            if abs(len(self.times) - len(self.paths)) > 5:
+                raise IOError("%s: %d frames but %d timestamps -- too far apart to "
+                              "be a shutdown race"
+                              % (folder, len(self.paths), len(self.times)))
+            print("  %s: %d frames, %d timestamps; using %d"
+                  % (os.path.basename(folder), len(self.paths), len(self.times), keep))
+            self.paths, self.times = self.paths[:keep], self.times[:keep]
         first = cv2.imread(self.paths[0], cv2.IMREAD_GRAYSCALE)
         if first is None:
             raise IOError("could not read %s" % self.paths[0])
