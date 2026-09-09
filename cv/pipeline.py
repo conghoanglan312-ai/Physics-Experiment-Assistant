@@ -25,11 +25,13 @@ the median and is subtracted away for the rest of the session.
 
 import cv2
 import numpy as np
+import threading
 import time
 import collections
 import pandas as pd
 
 import os
+import csv
 import glob
 import sys
 try:
@@ -95,6 +97,56 @@ MIN_SPEED, MAX_SPEED = 0.2, 0.5        # grid divisions per second
 TARGET_DROPLETS = 3                    # IV.4: at least 3 droplets...
 TARGET_FALLS_PER_DROPLET = 5           # ...and at least 5 falls each
 
+# How near in x two traverses must be to be the same droplet.
+#
+# Measured on bench_0908, across each droplet's own five falls:
+#
+#     droplet 1   x = 239 248 223 264 250     spread 41 px
+#     droplet 2   x = 747 746 768 778 779     spread 33 px
+#     droplet 3   x = 647 650 651 654 606     spread 48 px
+#
+# So a droplet wanders far more between falls than within one -- the 5-6 px figure is
+# the drift DURING a traverse, and the operator re-catches it slightly off-centre every
+# time.  25 px split droplet 2 into two groups of fewer than five and lost it entirely.
+SAME_DROPLET_X_PX = 60.0
+
+# ...but 60 px is wide enough to swallow a stray that happens to fall in the same
+# column, and on that same session three did.  Position gets the grouping close;
+# DURATION finishes it.  A droplet re-dropped five times repeats itself to 2-4%, while
+# the strays sharing its column were 10-18% away:
+#
+#     droplet 3 + strays   28.09 27.63 27.89 27.75 28.12  |  25.12 22.87 19.96 16.12
+#
+# Trimming to the falls within 5% of the cluster's median duration separates them
+# cleanly and leaves exactly three droplets of five falls each.
+SAME_DROPLET_DURATION_TOL = 0.05
+
+# --- knowing when the hunt is over ------------------------------------------------
+#
+# The banner and the candidate rings exist to pick a droplet out of a crowd.  Once the
+# operator has one, they are noise on top of the measurement: they compete with the
+# fall clock for attention and can ring some other droplet mid-timing.  The operator
+# asked for them to switch off, and it is not something they should have to declare --
+# the pipeline can see it happen.
+#
+# A droplet counts as CHOSEN when any of these is true of a live track:
+#   * its clock is running -- it has crossed `0` and not yet reached `16`;
+#   * it already has a completed fall to its name;
+#   * it has sat inside BALANCED_MAX for CHOSEN_BALANCED_S, which is what balancing
+#     one looks like.
+#
+# What is remembered is the COLUMN, not the track.  Track identity does not survive a
+# lift -- two live sessions gave 7 and 9 ids for 9 and 10 falls -- so remembering the
+# track would restart the hunt between every drop.  Ⅳ.4 re-drops the same droplet five
+# times and the hunt must stay quiet across all five.
+CHOSEN_BALANCED_S = 3.0
+
+# How long the column may be empty before the hunt resumes.  Longer than the gap
+# between one droplet's falls -- measured at 75-108 s on 2026-09-09, lift included --
+# and far shorter than the gap between droplets, which was 515 s in the same session.
+# A spray releases it immediately regardless: that is the operator starting over.
+CHOSEN_RELEASE_S = 150.0
+
 # How far a fall's duration may sit from its droplet's running mean and still be the
 # same droplet.  A droplet's mass does not change between drops, so neither does its
 # terminal velocity: the five falls of one droplet in one_droplet_slow ran 33.44 to
@@ -138,8 +190,8 @@ FIELD_MIN_FRACTION = 0.15  # readable all-alike reads needed to call the field o
 
 
 def bands(profile, floor):
-    hot = profile > floor
     out, start = [], None
+    hot = profile > floor
     for i, v in enumerate(hot):
         if v and start is None:
             start = i
@@ -725,6 +777,69 @@ NOISE_FLOOR_MAD = 6.0
 # Everything measured above still stands and is why 0.80 is a stopgap, not correct.
 CIRCULARITY_MIN = 0.52
 
+# The upper size gate, in px^2 at spacing 71.5, scaled by mag^2 in buildSettings.
+#
+# It was 100 -- 72.8 px^2 at spacing 61 -- until 2026-09-08, and on that morning it
+# threw away FOURTEEN of the fifteen falls the operator timed by hand.  Not a tracking
+# failure and not a threshold failure: the droplet is on the path in every sampled
+# frame of all fifteen, round and obvious, and "area>max" is the gate that discards it.
+# Median apparent area, per droplet, over the five falls each:
+#
+#     droplet 1   62- 73 px^2        droplet 2  113-148        droplet 3  115-175
+#
+# Those three fall in 30.6 s, 29.2 s and 28.0 s, so by (1-13) their radii are 0.677,
+# 0.690 and 0.705 um -- 4% apart, while their apparent areas are a factor of 2.8
+# apart.  The apparent size is not the droplet.  At 1 px = 3.28 um (l = 1.60e-3 m
+# across 8 divisions of 61 px) a 30 s droplet is 0.41 px wide: every pixel of every
+# blob here is scattering halo, and its extent is set by the illumination and by where
+# the operator left the focus -- which moves between droplets and during them.  An
+# absolute cap in px^2 measures the focus knob, and the only fall that survived was
+# the one whose halo happened to fragment under it often enough to hold a track.
+#
+# So put the gate where it can only catch a gross bloom.  Sampling 501 frames across
+# the whole session, past every other gate, the cost of raising it is almost nothing:
+# 5.79 blobs a frame at 100, 9.13 at 300, 9.52 at 900 and 9.54 with no cap at all --
+# past 300 the curve is flat, because what lies above is a handful of grid-line flares
+# that bloom to 700-3800 px^2 and are already rejected on circularity (0.03-0.51,
+# against 0.58 at p1 for the droplets) or for sitting on a column.  900 * mag^2 is
+# 655 px^2, a blob 29 px across: 2.9x the widest droplet in the fifteen (228 px^2),
+# so a refocus cannot walk out of it, and still an order of magnitude below a bloom.
+AREA_MAX_PX = 900
+
+
+REJECTS = {}                # gate -> count, for the run-end census
+NEAR_MISSES = []            # (area, circularity) of contours that failed ONLY the
+                            # shape test, which is where a flickering droplet lives
+
+
+def _reject(why, area = None, circ = None):
+    REJECTS[why] = REJECTS.get(why, 0) + 1
+    if why == "circularity" and len(NEAR_MISSES) < 20000:
+        NEAR_MISSES.append((float(area), float(circ)))
+
+
+def rejectCensus():
+    """What the gates threw away this run, commonest first."""
+    if not REJECTS:
+        return "no contours were rejected"
+    total = sum(REJECTS.values())
+    out = ["%-16s %8s %7s" % ("gate", "count", "share")]
+    for why, count in sorted(REJECTS.items(), key = lambda kv: -kv[1]):
+        out.append("%-16s %8d %6.1f%%" % (why, count, 100.0 * count / total))
+    if NEAR_MISSES:
+        import numpy as _np
+        a = _np.array(NEAR_MISSES)
+        near = a[a[:, 1] >= CIRCULARITY_MIN - 0.10]
+        out.append("")
+        out.append("failed ONLY on circularity: %d, of which %d were within 0.10 of "
+                   "the %.2f gate" % (len(a), len(near), CIRCULARITY_MIN))
+        if len(near):
+            out.append("  those near-misses: area p50 %.0f p90 %.0f, circularity "
+                       "p50 %.2f p90 %.2f"
+                       % (_np.percentile(near[:, 0], 50), _np.percentile(near[:, 0], 90),
+                          _np.percentile(near[:, 1], 50), _np.percentile(near[:, 1], 90)))
+    return "\n".join(out)
+
 
 def detectDroplets(gray, background, s, allAreas = None):
     diff = cv2.absdiff(gray, background)
@@ -747,24 +862,91 @@ def detectDroplets(gray, background, s, allAreas = None):
         if allAreas is not None:
             allAreas.append(cArea)
         perimeter = cv2.arcLength(cnt, True)
-        if perimeter == 0 or cArea < s["areaMin"] or cArea > s["areaMax"]:
+        if perimeter == 0:
+            _reject("degenerate")
+            continue
+        if cArea < s["areaMin"]:
+            _reject("area<min")
+            continue
+        if cArea > s["areaMax"]:
+            _reject("area>max")
             continue
         circularity = 4 * np.pi * cArea / (perimeter ** 2)
         if circularity < CIRCULARITY_MIN:
+            _reject("circularity", cArea, circularity)
             continue
         M = cv2.moments(cnt)
         cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
+        mask = s.get("staticMask")
+        if mask is not None:
+            iy, ix = int(round(cy)), int(round(cx))
+            if 0 <= iy < mask.shape[0] and 0 <= ix < mask.shape[1] and mask[iy, ix]:
+                _reject("static mark")
+                continue                # sitting on something the apparatus drew
         if min(abs(cy - r) for r in s["gridRows"]) > s["gridClear"] \
            and min(abs(cx - c) for c in s["gridCols"]) > s["gridClear"] \
+           and cx < s["roiW"] - s["panelClear"] \
            and min(cx, cy, s["roiW"] - cx, s["roiH"] - cy) > s["edgeClear"]:
             centres.append((cx, cy, cArea))
+        else:
+            if min(abs(cy - r) for r in s["gridRows"]) <= s["gridClear"]:
+                _reject("grid row")
+            elif s["gridCols"] and min(abs(cx - c) for c in s["gridCols"]) <= s["gridClear"]:
+                _reject("grid col")
+            elif cx >= s["roiW"] - s["panelClear"]:
+                _reject("panel margin")
+            else:
+                _reject("frame edge")
     return centres, levelOtsu, len(contours)
+
+
+# What counts as "permanently bright" in the learned background, as a percentile of
+# it, and how far that is grown to cover the blur around each mark.
+#
+# Otsu was the first choice and it is wrong here: on a frame that is mostly empty field
+# it lands at 92 of 255 and masks 17% of the picture, swallowing droplets.  The reticle
+# is far brighter than that -- the background reads mean 37, p99 189, max 211 -- so the
+# furniture is the top percent or so, not the top forty.
+# The apparatus draws marks into the video that are not droplets and never move: the
+# `0` and `1.6` reticle labels, the `V:`/`t:` panel text.  They are permanently in the
+# picture, so they are in the learned background -- and a droplet is by definition the
+# thing that is not.  Noise on their high-contrast edges still produces detections, and
+# an operator watched rings latch onto the `0` glyph and onto `t:`.
+#
+# Masking everything bright was tried and is far too blunt: Otsu lands at 92 of 255 and
+# masks 17% of the picture, a 99th-percentile cut misses the labels entirely because
+# the glyphs are thin, and masking static EDGES costs 20% because the grid lines are
+# long.  All three swallow droplets to catch two small marks.
+#
+# The lines already have gridClear.  What is left is compact: a glyph fits inside a
+# grid division, a rule does not.  Selecting bright components smaller than a division
+# in both axes masks 0.41% of the frame and covers every label on the picture.
+STATIC_MASK_MIN = 60.0       # grey level, floored against the field's own p90
+STATIC_MASK_MAX_DIV = 1.2    # a mark wider or taller than this is a rule, not a glyph
+STATIC_MASK_GROW = 7         # a blob can overlap a mark its centre clears
+
+
+def staticMask(background, spacing):
+    """Pixels holding a mark the apparatus drew, which no droplet can be."""
+    level = max(STATIC_MASK_MIN, float(np.percentile(background, 90)))
+    hot = (background > level).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(hot, 8)
+    compact = np.zeros_like(hot)
+    limit = STATIC_MASK_MAX_DIV * spacing
+    for i in range(1, count):
+        _x, _y, w, h, _area = stats[i]
+        if w < limit and h < limit:
+            compact[labels == i] = 1
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                  (STATIC_MASK_GROW, STATIC_MASK_GROW))
+    return cv2.dilate(compact, k) > 0
+
 
 
 def buildSettings(roi, spacing):
     mag = spacing / 71.5           # px/division on 150V_1, where these were measured
     return {"kernel": cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
-            "areaMin": 8 * mag ** 2, "areaMax": 100 * mag ** 2,
+            "areaMin": 8 * mag ** 2, "areaMax": AREA_MAX_PX * mag ** 2,
             # AREA_TOLERANCE is a RELATIVE test, which is brutal on small blobs: a
             # droplet measured at 10 px one frame and 18 the next differs by 80%,
             # and that is ordinary threshold noise on a 5-pixel object, not a
@@ -775,6 +957,20 @@ def buildSettings(roi, spacing):
             # noise through on small ones.
             "areaFloor": 20 * mag ** 2,
             "gridClear": 4 * mag, "edgeClear": 20 * mag,
+            # The panel's leftmost characters -- the `V:` and `t:` labels -- fall
+            # INSIDE the ROI, about 21 px from its right edge, which is just
+            # outside edgeClear's 17.  They are bright, round and permanent, so
+            # they pass every shape gate and never move; one was ringed as a
+            # balanced droplet and announced as "holding at 250 V".
+            #
+            # The charge test cannot save us and in fact endorses them: the panel
+            # DIGITS change when the operator turns the knob, so a track sitting
+            # on the readout sees different motion at different voltages, which is
+            # precisely the signature of a charged droplet.
+            #
+            # 40 * mag = 34 px at spacing 61, past the labels and still well right
+            # of the last grid column at x = 809.
+            "panelClear": 40 * mag,
             "dupPx": DUPLICATE_PX * mag,
             "maxStep": 12 * mag,        # px between consecutive frames at 30 fps
             # The same limit as a SPEED, which is what it was always trying to say.
@@ -824,6 +1020,23 @@ def previewAll(folder = None, outDir = None):
 # are recovered.  Runaway predictions are held back by the velocity clamp in
 # Track.update and by global assignment, not by these.
 MAX_COAST_S = 3.0          # how long a CONFIRMED track may be predicted through a blackout
+
+# ...and how long one whose CLOCK IS RUNNING may be, which is a different question.
+# A track that has crossed `0` and not yet reached `16` carries a measurement no other
+# track can replace: lose it and the fall is gone, while losing an ordinary track costs
+# a duplicate at worst.  It also fails in a predictable place -- gridClear blanks every
+# detection within 4 * mag px of a row, and `16` IS a row, so the droplet is guaranteed
+# invisible exactly where the measurement completes.
+#
+# Two live sessions lost a fall this way: 2026-09-08 at 16.2 s of a 17.2 s fall, and
+# 2026-09-09 at 28.2 s of a 33.5 s one, 5.3 s from the bottom.  Both were legal, both
+# were verified by the operator's own stopwatch afterwards.
+#
+# The risk of coasting longer is a wrong re-acquisition, and it is bounded: the
+# crossing is interpolated between the last point above the line and the first below,
+# so a longer gap costs accuracy only if the droplet changed speed while invisible --
+# and a droplet in free fall at terminal velocity does not.
+MEASURING_COAST_S = 6.0
 # How close a new detection may be to a track that already exists before we refuse
 # to spawn on it.  Measured on clip 8 (2026-09-05) with the gate loosened to 0.52:
 # 868 of 2814 spawned tracks -- 31% -- were born within 12 px of a live track, which
@@ -968,6 +1181,10 @@ def spraySpans(times, counts, factor = None, minAbs = None, minSeconds = None,
     return [(round(a, 2), round(b, 2)) for a, b in merged
             if b - a >= minSeconds]
 
+# How far a droplet must travel back UP before the run in progress is abandoned.
+# In grid divisions; see updateCrossings for why this is a direction and not a height.
+RISE_VOID_DIVISIONS = 0.5
+
 CONFIRM_POINTS = 6         # seen this many times before a track is believed;
                            # 8 loses the 17.83 s legal fall, 6 keeps both and
                            # cuts peak live tracks from 604 to 52
@@ -983,6 +1200,20 @@ SCREEN_MIN, SCREEN_MAX = 0.15, 0.60     # provisional band, deliberately wider t
 # for the whole traverse -- 16 s at the very least -- so a second and a half costs
 # nothing and removes almost all of it.
 DRAW_MIN_AGE_S = 1.5
+
+# ...and it must have BEEN somewhere.  Age alone only removes speckle that dies fast;
+# a speck that persists and sits still is drawn, and the screen fills with markers on
+# things that are not there.  Six signals were measured to separate spray from
+# droplets and none of them worked, but "has it moved in its whole life" is not a
+# separation of spray from droplets -- it is the difference between a thing and a
+# nothing, and it costs no measurement because DISPLAY is all it touches.
+#
+# A fifth of a division.  Small enough that a droplet caught and held still is drawn
+# on the strength of the fall that brought it there, large enough that jitter on a
+# fixed speck never reaches it.  Started at a third and loosened on the operator's
+# call, to keep the gate well clear of anything they might actually want to see --
+# it costs nothing to be generous here, because this only decides what is DRAWN.
+DRAW_MIN_TRAVEL_DIV = 0.2
 
 # --- re-acquiring a droplet after the track dies ----------------------------
 #
@@ -1020,6 +1251,11 @@ class Track:
         self.points = [(float(t), float(centre[1]))]
         self.xs = [float(centre[0])]        # parallel to points; only fallDrift reads it
         self.reacquired = 0                 # times this fall was stitched across a gap
+        self.byVolts = {}                   # bucketed plate voltage -> descent rates
+        self.alerted = False                # the operator has been told about this one
+        self.lastRow = None                 # (time, index) of the last grid line crossed
+        self.divisionSeconds = None         # ...and how long the division before it took
+        self.yDeepest = None                # lowest point reached since tTop
         self.tTop = None                    # capture time at the `0` crossing
         self.tBottom = None
         self.fTop = None                    # frame index of the same, files only
@@ -1044,6 +1280,106 @@ class Track:
         self.lastT = float(t)
         self.points.append((float(t), float(centre[1])))
         self.xs.append(float(centre[0]))
+
+    def observeVoltage(self, volts, spacing):
+        """Record how fast this droplet is descending, at the plate voltage given.
+
+        Keyed on the VOLTAGE, not on whether the field is on.  The operator's low-end
+        method toggles 平衡/提升, which is field-on at both ends and 210 V apart, so a
+        field on/off flag never changes during it and a charge test built on that flag
+        can never fire.  A voltage is the thing that actually changed.
+
+        Bucketed to 10 V so the supply wandering by a volt does not scatter one hold
+        across a dozen keys.  Cheap on purpose: update() already maintains the
+        velocity, so this is a dict append.
+        """
+        if volts is None or len(self.points) < CONFIRM_POINTS or spacing <= 0:
+            return
+        key = int(round(volts / 10.0)) * 10
+        bucket = self.byVolts.setdefault(key, [])
+        bucket.append(float(self.vel[1]) / spacing)
+        if len(bucket) > 200:               # a couple of minutes is plenty of history
+            del bucket[0]
+
+    def chargeState(self):
+        """True if this droplet answers to the field, False if not, None if unknown.
+
+        False covers two physical cases the operator does not need told apart: a
+        neutral droplet that ignores the field, and one the field pushes DOWN.  Neither
+        can be balanced, so neither is worth chasing.
+
+        Answered off the two furthest-apart voltages this droplet has been seen at,
+        which makes it work for either toggle -- 0V/工作 or 平衡/提升 -- without
+        knowing or caring which the operator used.
+        """
+        usable = [(v, rates) for v, rates in self.byVolts.items()
+                  if len(rates) >= CHARGE_MIN_SAMPLES]
+        if len(usable) < 2:
+            return None
+        usable.sort()
+        loV, loRates = usable[0]
+        hiV, hiRates = usable[-1]
+        if hiV - loV < CHARGE_MIN_STEP_V:
+            return None
+        # More volts must mean less falling.  A droplet that descends just as fast at
+        # 360 V as at 150 V is not charged, whatever else it is doing.
+        return (float(np.median(loRates))
+                - float(np.median(hiRates))) >= CHARGE_MIN_SEPARATION
+
+    def balanceVoltageEstimate(self):
+        """(low, high) volts that would balance this droplet, or None.
+
+        From two plate voltages it has already been seen at.  With
+        v = v_free (1 - U/U_b) at each,
+
+            U_b = (v1 U2 - v2 U1) / (v1 - v2)
+
+        and v_free cancels, which is what makes this usable: the operator's low-end
+        method toggles 平衡/提升 and never visits 0 V, so anything needing a free-fall
+        reading would never fire during it.  Any two voltages far enough apart will do.
+
+        The band comes from the spread of the readings themselves -- the estimate is
+        computed at each combination of the two buckets' quartiles and the extremes
+        kept -- rather than from a made-up tolerance.
+        """
+        usable = [(v, rates) for v, rates in self.byVolts.items()
+                  if len(rates) >= CHARGE_MIN_SAMPLES]
+        if len(usable) < 2:
+            return None
+        usable.sort()
+        (u1, r1), (u2, r2) = usable[0], usable[-1]
+        if u2 - u1 < CHARGE_MIN_STEP_V:
+            return None
+        out = []
+        for a in np.percentile(r1, [25, 75]):
+            for b in np.percentile(r2, [25, 75]):
+                if abs(a - b) < 1e-6:
+                    continue                # no response: uncharged, not balanceable
+                ub = (a * u2 - b * u1) / (a - b)
+                if SUGGEST_MIN_V <= ub <= SUGGEST_MAX_V:
+                    out.append(ub)
+        if len(out) < 2:
+            return None
+        return min(out), max(out)
+
+    def windowFit(self, spacing, now, seconds = None):
+        """(grid/s, rms residual px, divisions fallen) over the last few seconds.
+
+        Returns None until there is enough of the window to fit.  The residual is the
+        part recentSpeed() never reported and the part that actually separates a fall
+        from a coincidence.
+        """
+        seconds = CANDIDATE_FIT_S if seconds is None else seconds
+        pts = [p for p in self.points if now - p[0] <= seconds]
+        if len(pts) < 20 or spacing <= 0:
+            return None
+        ts = np.array([p[0] for p in pts], dtype = float)
+        ys = np.array([p[1] for p in pts], dtype = float)
+        if ts[-1] - ts[0] < seconds * 0.6:
+            return None
+        m, c = np.polyfit(ts, ys, 1)
+        resid = float(np.sqrt(np.mean((ys - (m * ts + c)) ** 2)))
+        return float(m) / spacing, resid, float(ys[-1] - ys[0]) / spacing
 
     def recentSpeed(self, spacing, window = 30):
         # provisional speed in grid divisions per second, from the last ~1 s of points.
@@ -1101,6 +1437,30 @@ def assign(tracks, centres, maxStep, areaFloor, now, xGate):
     # one global assignment, so two tracks can never claim the same blob
     if not tracks or not centres:
         return {}
+    # ...but not all tracks are equal.  A track whose clock is running holds a
+    # measurement nothing else can reproduce, and it competes here against strays that
+    # cost a duplicate at worst.  On 2026-09-09 a bright fast blob crossed near a
+    # droplet 5 s from finishing its fall and the fall was lost.
+    #
+    # So resolve the measuring tracks against every blob FIRST, take those blobs off
+    # the table, and let everything else compete for what is left.  Two optimal
+    # assignments over disjoint sets, not one over the union -- which is exactly the
+    # priority the physics asks for and costs one extra solve of a much smaller matrix.
+    measuring = [i for i, t in enumerate(tracks)
+                 if t.tTop is not None and t.tBottom is None]
+    if measuring and len(measuring) < len(tracks):
+        first = assign([tracks[i] for i in measuring], centres, maxStep, areaFloor,
+                       now, xGate)
+        pairs = {measuring[r]: c for r, c in first.items()}
+        taken = set(pairs.values())
+        restI = [i for i in range(len(tracks)) if i not in set(measuring)]
+        restC = [j for j in range(len(centres)) if j not in taken]
+        if restI and restC:
+            second = assign([tracks[i] for i in restI], [centres[j] for j in restC],
+                            maxStep, areaFloor, now, xGate)
+            for r, c in second.items():
+                pairs[restI[r]] = restC[c]
+        return pairs
     BIG = 1e6
     cost = np.full((len(tracks), len(centres)), BIG)
     for i, t in enumerate(tracks):
@@ -1156,6 +1516,500 @@ def assign(tracks, centres, maxStep, areaFloor, now, xGate):
     return pairs
 
 
+# --------------------------------------------------------------------------------
+#  THE HUNT
+#
+#  Ⅳ.2 tells the operator to "select the one with a falling speed of 0.2~0.5 grid/s"
+#  by eye, on a crowded screen, seconds after a spray.  That is the step this section
+#  mechanises, and it is where the operator's time actually goes: on 2026-09-08 the
+#  fifteen timed falls were 7.5 minutes of a 40-minute session.  Timing was never the
+#  expensive part.  Hunting was.
+#
+#  Nothing here decides anything.  It draws on the screen and it beeps; legality,
+#  timing and charge are untouched by every line of it.
+# --------------------------------------------------------------------------------
+
+# Seconds of track the candidate fit runs over.  A line fit's slope error falls as
+# about T^-1.5, so 1 s -> 3 s cuts it roughly fivefold, and a fall is straight over 3 s
+# so nothing is lost to curvature.  The cost is latency, and there is room for it: from
+# mid-screen to the edge is ~4 divisions, which at 0.2-0.5 grid/s is 8-20 s of warning.
+CANDIDATE_FIT_S = 3.0
+
+# Straightness, as the rms departure from that fitted line.  This is the discriminator
+# that speed alone lacks: junk which happens to average into the legal band scatters,
+# while a real fall is a line.  Measured over the alert trial on bench_0908, the six
+# tracks that went on to complete a legal traverse fitted at 0.49-2.99 px.
+CANDIDATE_MAX_RESIDUAL_PX = 3.0
+
+# ...and it must have actually gone somewhere.  A track wobbling in place can fit a
+# slope; one that has descended most of a division has not.
+CANDIDATE_MIN_DIVISIONS = 0.8
+CANDIDATE_MIN_AGE_S = 3.0          # never judge a track younger than its own fit window
+
+# How near the bottom of the picture a candidate must be before the operator is told to
+# catch it.  In seconds of remaining travel, not pixels: a droplet at 0.2 grid/s has
+# five times the grace of one at 0.5.
+EDGE_WARN_S = 8.0
+
+# Deciding whether a droplet is charged at all -- Ⅳ.2's FIRST stage, which nothing has
+# automated until now.  An uncharged droplet passes the speed test and is useless: it
+# cannot be balanced, so it can never yield a voltage.  Measured on bench_0908 over
+# tracks seen in both field states, a charged droplet reads about -0.3 grid/s with the
+# field on and +0.2 with it off, while an uncharged one reads the same either way
+# (0.300 against 0.277, or 0.003 against 0.024).  A tenth of a division per second sits
+# far below that gap and far above the noise.
+#
+# The sign matters as much as the size.  A droplet the field pushes DOWN is charged and
+# equally unusable, and an earlier version of this test called it "no response" because
+# it only looked at the magnitude.  What the operator needs is "can this be balanced",
+# which means the field must slow it or lift it.
+CHARGE_MIN_SEPARATION = 0.10       # grid/s between field-off and field-on descent
+
+# How many observations in EACH field state before the question is answerable.  This
+# was 12, which assumed the operator would hold each side of the toggle for a couple of
+# seconds.  They do not, and cannot: at 150-250 V most of a fresh spray leaves the
+# field of view within a second, so the real toggle interval is 0.5-1 s.  At ~23 fps
+# that is 12-23 frames per side, and demanding 12 made the test unanswerable exactly
+# when it was being used properly.
+CHARGE_MIN_SAMPLES = 5
+
+# How slowly a droplet must drift, with the field ON, to be worth chasing.  Direction
+# does not matter -- only that the two forces nearly cancel, because that is what makes
+# a droplet balanceable with a modest turn of the knob.
+#
+# Derived.  At plate voltage U the net force is mg(1 - U/U_b), so the terminal drift is
+#
+#     |v| = v_free * |U_b - U| / U_b
+#
+# which for U_b = 200 V gives:
+#
+#     off balance by     5 V    10 V    30 V    70 V   210 V
+#     v_free = 0.2    0.005   0.010   0.030   0.070   0.210
+#     v_free = 0.5    0.013   0.025   0.075   0.175   0.525
+#
+# This was 0.20 at first, from taking the most permissive corner of that table -- the
+# widest voltage error AND the fastest free fall.  Read the other way, 0.20 admits a
+# slow droplet TWO HUNDRED volts off balance, which is 提升 almost exactly: an operator
+# watched it ring droplets that were rising under the lift toggle and call them nearly
+# balanced.
+#
+# 0.05 admits 20 V of error on a fast droplet and 50 V on a slow one, which is the
+# range the operator actually closes by hand.  Anything further off is a knob turn
+# away from being worth looking at, not a candidate.
+SLOW_DRIFT_MAX = 0.10              # grid/s, either direction, with the field on
+
+# Below this the droplet is BALANCED, not drifting, and telling the operator to change
+# the voltage is wrong.  Same relation as above: |v| / v_free = ΔU / U, so 0.02 grid/s
+# against a 0.2-0.5 free fall is a balance good to 4-10%, i.e. within about 10-20 V --
+# already inside what the operator can read off the panel.  Brownian motion alone
+# measures 0.00x-0.01x grid/s on a balanced droplet, so this sits just above the noise.
+#
+# It also has to bypass the direction filter.  A balanced droplet wobbles across zero,
+# so half its frames drift "the wrong way" and a rule that keys on the sign drops it
+# every other frame -- which is exactly what an operator saw: a droplet balanced in
+# front of them, never ringed.
+BALANCED_MAX = 0.02                # grid/s
+
+# The one-division drop test.  Balancing a droplet does not make it measurable: it
+# still has to fall at 0.2-0.5 grid/s with the field off, and the operator's quick
+# check for that is to drop it wherever it happens to be -- not at the very bottom --
+# and time it across a single grid line.  A full 8-division traverse takes 16-40 s; one
+# division takes an eighth of that, so
+#
+#     1 / MAX_SPEED = 2 s   ...  1 / MIN_SPEED = 5 s
+#
+# which is exactly the 2-5 s the operator uses by eye.  Nothing new is being decided
+# here -- Ⅳ.2's band, divided by eight -- it just says it forty seconds sooner.
+DIVISION_MIN_S = 1.0 / MAX_SPEED
+DIVISION_MAX_S = 1.0 / MIN_SPEED
+
+# How much of the answer the pipeline hands over.
+#
+#   "range"      "RAISE 30-50 V"     -- a band from the measured scatter
+#   "direction"  "RAISE the voltage" -- which way, nothing more
+#   "exact"      "set 183 V"         -- the number itself
+#   "off"        no suggestion at all
+#
+# Set to "range" on 2026-09-09.  Rubric 三.1.4 requires the student's analysis ability
+# to be exercised rather than replaced, and where a voltage estimate sits against that
+# is a judgement for the team, not for this file -- so it is one constant and the
+# demotion to "direction" is a one-word edit.  Nothing downstream reads the estimate:
+# it is drawn on the overlay and discarded, exactly like the fall clock.
+SUGGEST_MODE = "range"
+
+# An estimate is refused outside this band.  Ⅴ.5 puts a usable balance voltage at
+# 150-250 V and the supply reaches about 450; anything outside that is arithmetic
+# noise from two nearly-equal drift readings, not a voltage worth showing.
+SUGGEST_MIN_V, SUGGEST_MAX_V = 40.0, 500.0
+
+# Which way the operator is working, inferred from the voltage they are sitting at.
+# Below the low mark they are hunting slow fallers and will raise the voltage; above
+# the high mark, slow risers they will bring down.  Between the two, both populations
+# are worth showing, and the banner says which way each one needs to go.
+HUNT_LOW_V = 190.0
+HUNT_HIGH_V = 210.0
+
+# 平衡/提升 adds a fixed step to the working voltage -- 210 V on this apparatus,
+# give or take the volt the supply wanders by.  Seeing that step is how the pipeline
+# knows a balance/rise toggle happened rather than a knob turn.
+RISE_STEP_V = 210.0
+RISE_STEP_TOL_V = 6.0
+
+# Two voltage readings must differ by at least this much before the difference in how
+# a droplet moves between them means anything.  Both toggles the operator uses clear it
+# easily: 0V/工作 changes by the whole working voltage, 平衡/提升 by 210 V.
+CHARGE_MIN_STEP_V = 50.0
+
+# The charge history is kept per COLUMN of the picture, not per track.
+#
+# Answering "does this droplet respond to the field" needs it observed at two voltages,
+# and the moment the voltage changes is the moment the track is most likely to die: the
+# droplet reverses, the tracker loses it, and the replacement starts with no history at
+# the old voltage.  So the verdict stayed None, and None is not a rejection -- an
+# operator watched it ring dust that plainly ignored the field.
+#
+# The same lesson as binding: identity does not survive the manoeuvre, position does.
+# A column this wide holds one droplet's wander comfortably (measured at up to 48 px
+# across a droplet's own five falls) without merging neighbours, which sat hundreds of
+# pixels apart.
+CHARGE_COLUMN_PX = 30.0
+
+# ...and only what happened in it RECENTLY.  A column is a 30 px strip of the picture,
+# not a droplet: over a session everything in the field drifts through it, and without
+# a window the medians being compared come from a mixture of droplets rather than the
+# one in front of the operator.  Long enough to span a toggle and let the droplet
+# settle, short enough that the last droplet through cannot vote on this one.
+CHARGE_WINDOW_S = 30.0
+
+# Update the window this many frames apart.  The picture only has to be legible to a
+# human watching droplets move at half a grid line a second; what it must not do is
+# spend the frame budget.  cv2.waitKey(1) costs 14.1 ms of a 42.4 ms budget on this
+# machine -- a third of it, waiting for nothing -- and the live run of 2026-09-08 lost
+# frames it did not need to.
+# Set to 3 on 2026-09-09 to claw back the 14.1 ms cv2.waitKey(1) costs of a 42.4 ms
+# frame budget, and put straight back to 1 the moment an operator saw it: on Windows
+# it is waitKey that pumps the repaint, so a third of the frames repainted means an
+# 8 fps picture however fast everything else runs. It looked broken with an EMPTY
+# chamber, before anything was even sprayed.
+#
+# The budget was the wrong thing to optimise. The window is what the operator hunts
+# with -- there is one BNC out and it feeds this laptop, so this picture is the only
+# view of the droplets that exists. A saving that makes it unusable buys nothing.
+# The frame drops it was meant to cure cost track continuity; a choppy display costs
+# the operator the experiment.
+SHOW_EVERY = 1
+
+# How long the banner sticks to the droplet it is already naming.  Without this it
+# re-ranks every frame and the instruction flickers: measured over a ten-minute window
+# it changed 1152 times, about twice a second, alternating between two candidates and
+# blinking out between them.  Unreadable, and an unreadable alert is worse than none.
+#
+# So the named candidate keeps its place until it stops qualifying, and the numbers
+# beside it refresh at a rate a person can actually read.  The one thing allowed to
+# interrupt is a candidate whose charge has been CONFIRMED while the current one is
+# still unknown, because that is a strictly better thing for the operator to look at.
+CANDIDATE_STICKY_S = 2.0        # grace before a vanished candidate is given up on
+CANDIDATE_REFRESH_S = 0.5       # how often the numbers in the banner are redrawn
+
+
+class Fall:
+    """One completed `0` -> `16` traverse, frozen at the moment it completed.
+
+    `falls` used to hold the Track itself, which was sound only while a track could
+    complete at most once.  Now that a lifted droplet is measured again on the same
+    track, appending the track would leave every row of that track pointing at one
+    mutable object -- five rows in falls.csv, all carrying the fifth fall's numbers.
+    So copy, and take the drift here too, while `points` still ends at tBottom.
+
+    `id` is the TRACK id and repeats across the falls of one droplet.  That is
+    useful rather than a defect: rows sharing an id were the same droplet, which is
+    exactly what `binding` is otherwise left to infer from timings alone.
+    """
+
+    FIELDS = ("id", "fTop", "fBottom", "tTop", "tBottom", "seconds", "legal",
+              "kinematicLegal", "fieldOff", "balanceVoltage", "reacquired")
+
+    def __init__(self, t, spacing):
+        for name in self.FIELDS:
+            setattr(self, name, getattr(t, name, None))
+        self.fallDrift, self.fallDirection = fallDrift(t, spacing)
+        # Where the droplet was, across the measured traverse.  Track identity does
+        # not survive the lift -- two live sessions produced 7 and 9 ids for 9 and 10
+        # falls -- but POSITION does: a droplet drifts 5-6 px sideways across a whole
+        # traverse and the operator re-drops the same one down the same column, while
+        # two different droplets sit hundreds of pixels apart.  This is what binding
+        # is grouped on.
+        xs = [x for (ts, _y), x in zip(t.points, t.xs)
+              if t.tTop is not None and t.tBottom is not None
+              and t.tTop <= ts <= t.tBottom]
+        self.xPx = float(np.median(xs)) if xs else None
+
+
+def noteColumnVoltage(columns, t, volts, spacing):
+    """Record how fast a droplet in this column descends, at this plate voltage."""
+    if volts is None or len(t.points) < CONFIRM_POINTS or spacing <= 0:
+        return
+    key = int(round(float(t.pos[0]) / CHARGE_COLUMN_PX))
+    hist = columns.setdefault(key, {})
+    bucket = hist.setdefault(int(round(volts / 10.0)) * 10, [])
+    bucket.append((float(t.lastT), float(t.vel[1]) / spacing))
+    if len(bucket) > 600:
+        del bucket[0]
+
+
+def columnChargeState(columns, x, now):
+    """True / False / None for the column a droplet is in.  See CHARGE_COLUMN_PX."""
+    key = int(round(float(x) / CHARGE_COLUMN_PX))
+    hist = {}
+    for k in (key - 1, key, key + 1):          # a droplet may straddle a boundary
+        for v, rates in columns.get(k, {}).items():
+            hist.setdefault(v, []).extend(rates)
+    fresh = {v: [rate for ts, rate in r if now - ts <= CHARGE_WINDOW_S]
+             for v, r in hist.items()}
+    usable = [(v, r) for v, r in fresh.items() if len(r) >= CHARGE_MIN_SAMPLES]
+    if len(usable) < 2:
+        return None
+    usable.sort()
+    (loV, loR), (hiV, hiR) = usable[0], usable[-1]
+    if hiV - loV < CHARGE_MIN_STEP_V:
+        return None
+    return (float(np.median(loR)) - float(np.median(hiR))) >= CHARGE_MIN_SEPARATION
+
+
+def candidates(live, spacing, now, roiH, volts = None, quiet = False, columns = None):
+    """The tracks worth the operator's attention, best first.
+
+    Ⅳ.2 SELECTS IN TWO STAGES AND SO DOES THIS.  Getting that wrong is not a tuning
+    error, it inverts the answer:
+
+      field ON (150-250 V)   the target is a droplet the field is HOLDING or lifting
+                             gently -- the manual's "temporary target oil droplet".
+      field OFF              among those, the target is the one falling at
+                             0.2-0.5 grid/s -- the manual's "final target".
+
+    The first version tested the falling band in both states, and an operator watching
+    it said every circled droplet was one that ignored the field.  Of course it was:
+    with the field on, a droplet descending steadily at 0.2-0.5 grid/s is BY
+    DEFINITION one the field is not holding.  The rule was guaranteed to pick exactly
+    the droplets that cannot be balanced.
+
+    The remaining filters exist because something without each of them fires on
+    nothing: charge (an uncharged droplet passes every kinematic test and can never be
+    balanced), straightness (junk that averages into the band scatters; a fall does
+    not), displacement (a wobble in place can fit a legal slope), and quiet (nothing is
+    worth saying mid-spray, and the operator is not hunting yet).
+
+    Recall matters less than precision here, which is the opposite of the measurement
+    path: a missed fall is lost data, but an alert that cries wolf gets ignored and is
+    then worse than no alert at all.
+    """
+    # `quiet` is kept as a parameter and no longer used to silence anything.  It
+    # suppressed candidates while detections ran above four times the session's quiet
+    # rate, which sounded reasonable and was never measured: the quiet rate is often 0
+    # or 1 a frame, so the threshold lands at three detections, and ANY spray clears
+    # that for minutes.  The operator hunts in the minute after a spray, so the gate
+    # muted the feature precisely when it was wanted.  The shape, straightness,
+    # movement-history and charge tests are what reject junk; this only rejected the
+    # job.
+    if volts is None:
+        # Which of Ⅳ.2's two stages we are in is decided by the field, so with the
+        # panel unreadable there is no way to know which test to apply.  `if fieldOn:`
+        # treated that as "off" and told an operator to balance a droplet that was
+        # falling through a live 150 V field.  Say nothing instead.
+        return []
+    fieldOn = volts > 0
+    out = []
+    for t in live:
+        if t.miss or len(t.points) < CONFIRM_POINTS:
+            continue
+        if now - t.points[0][0] < CANDIDATE_MIN_AGE_S:
+            continue
+        # A free rejection before an expensive one.  windowFit is a least-squares fit
+        # over ~70 points and this runs over every live track; after a spray that is
+        # hundreds of them, and doing it every frame took a live session from 23 fps to
+        # about 5.  t.vel is already maintained by update(), so this costs nothing and
+        # throws out almost everything.  The band is deliberately loose -- half the
+        # lower limit to twice the upper -- because the fit, not this, is the test.
+        rough = float(t.vel[1]) / spacing
+        if fieldOn:
+            if abs(rough) > SLOW_DRIFT_MAX * 2.0:
+                continue
+        elif not (MIN_SPEED * 0.5 <= rough <= MAX_SPEED * 2.0):
+            continue
+        got = t.windowFit(spacing, now)
+        if got is None:
+            continue
+        speed, resid, fell = got
+        if resid > CANDIDATE_MAX_RESIDUAL_PX:
+            continue
+        action = None
+        if fieldOn:
+            # Nearly balanced, whichever way it happens to be drifting.  Direction is
+            # not a filter, it is the instruction: down means raise the voltage, up
+            # means lower it.
+            if abs(speed) > SLOW_DRIFT_MAX:
+                continue
+            if abs(speed) <= BALANCED_MAX:
+                action = "BALANCED"        # no direction, and no filtering by one
+            else:
+                # Only the direction that fits where the operator is working.  At the
+                # low end they are climbing towards a balance and want slow fallers; at
+                # the high end they are coming down and want slow risers.  Showing both
+                # everywhere made the ring latch onto whatever was plausible instead of
+                # whatever was useful.
+                if volts < HUNT_LOW_V and speed < 0:
+                    continue
+                if volts > HUNT_HIGH_V and speed > 0:
+                    continue
+                action = "RAISE" if speed > 0 else "LOWER"
+            # ...but it must have BEEN somewhere.  Dropping the displacement test here
+            # was wrong: "not moving" describes a droplet the field is holding and it
+            # equally describes a speckle that never moved in its life, and within a
+            # minute of going live the banner was pointing at one of those, ringed
+            # green, calling it HELD.
+            #
+            # A droplet the field holds was falling before the field was applied, so
+            # its track carries that history.  An artefact carries none.  The range is
+            # taken over the whole life rather than the fit window, because by the time
+            # it is being held the recent window is flat by definition.
+            ys = [p[1] for p in t.points[::5]]
+            if max(ys) - min(ys) < CANDIDATE_MIN_DIVISIONS * spacing:
+                continue
+        else:
+            # Stage two: the measurable band, and it must have actually travelled.
+            if not (MIN_SPEED <= speed <= MAX_SPEED):
+                continue
+            if fell < CANDIDATE_MIN_DIVISIONS:
+                continue
+        # The column's history first -- it survives the track dying at the toggle,
+        # which the track's own history does not.  Fall back to the track for a
+        # droplet in a column nothing else has been seen in.
+        charged = (columnChargeState(columns, t.pos[0], now) if columns is not None
+                   else None)
+        if charged is None:
+            charged = t.chargeState()
+        if charged is False:
+            continue                        # cannot be balanced; not a target
+        vy = float(t.vel[1])
+        toEdge = (roiH - t.pos[1]) / vy if vy > 1e-6 else None
+        out.append({"track": t, "id": t.id, "speed": speed, "residual": resid,
+                    "divisions": fell, "charged": charged, "secondsToEdge": toEdge,
+                    "fieldOn": fieldOn, "action": action, "volts": volts,
+                    "divisionSeconds": t.divisionSeconds,
+                    "balanceEstimate": t.balanceVoltageEstimate(),
+                    "pos": (float(t.pos[0]), float(t.pos[1]))})
+    # Confirmed-charged first.  Then, with the field on, the slowest drift -- that is
+    # the droplet nearest to balancing and so the cheapest to finish.  With the field
+    # off the speed is the measurement, so the straightest fit wins instead.
+    out.sort(key = lambda c: (c["charged"] is not True,
+                              abs(c["speed"]) if c["fieldOn"] else c["residual"]))
+    # Once ANY candidate is confirmed charged, the unknowns stop being shown.  An
+    # uncharged droplet jiggles, and jiggling is what the drift test rewards -- so with
+    # everything unknown the ranking put specks first.  Evidence beats the absence of
+    # it: if the operator has toggled and something answered, only that is worth a ring.
+    if any(c["charged"] is True for c in out):
+        out = [c for c in out if c["charged"] is True]
+    return out
+
+
+def divisionVerdict(seconds):
+    """How a one-division drop reads: (text, colour), or None if it has not happened.
+
+    The operator's own shortcut, and the fastest question the pipeline can answer.
+    Balancing a droplet does not make it measurable -- it still has to fall at
+    0.2-0.5 grid/s with the field off -- so they drop it wherever it sits and watch it
+    cross one line.  2-5 s is Ⅳ.2's band divided by eight.
+    """
+    if not seconds:
+        return None
+    if seconds < DIVISION_MIN_S:
+        return "1 div %.1fs TOO FAST" % seconds, (0, 140, 255)
+    if seconds > DIVISION_MAX_S:
+        return "1 div %.1fs TOO SLOW" % seconds, (0, 140, 255)
+    return "1 div %.1fs USABLE" % seconds, (0, 255, 0)
+
+
+def candidateBanner(best, volts):
+    """One line of instruction, or None.  What to DO, not what was measured.
+
+    Three regimes, because the operator hunts in three:
+
+      field on, low end    a slow FALLER is nearly balanced from below -> raise
+      field on, high end   a slow RISER is nearly balanced from above  -> lower
+      field off            the drop test, then the 0.2-0.5 band
+
+    SUGGEST_MODE picks how much of the answer the voltage estimate hands over --
+    naming the volts, naming a range, or naming only the direction.  Where that sits
+    against rubric 三.1.4 is a judgement for the team, so it is one constant.
+    """
+    if best is None:
+        return None, (0, 220, 255)
+    t, sp = best["track"], best["speed"]
+    edge = best["secondsToEdge"]
+    if edge is not None and edge <= EDGE_WARN_S and t.tTop is None:
+        act = "press 提升 (LIFT)" if sp > 0 else "cut to 0V"
+        return ("CATCH IT -- id %d leaving in %.0f s, %s" % (best["id"], edge, act),
+                (0, 140, 255))
+    charged = best["charged"]
+    if best["fieldOn"]:
+        way = "down" if sp > 0 else "up"
+        if best["action"] == "BALANCED":
+            return ("BALANCED -- id %d holding at %d V. Cut to 0V and time it"
+                    % (best["id"], volts or 0), (0, 255, 0))
+        if charged is None:
+            return ("id %d drifting %s %.3f gr/s -- TOGGLE to check it is charged"
+                    % (best["id"], way, abs(sp)), (0, 220, 255))
+        est = best["balanceEstimate"]
+        if SUGGEST_MODE != "direction" and est is not None and volts:
+            lo, hi = sorted((est[0] - volts, est[1] - volts), key=abs)
+            if SUGGEST_MODE == "exact":
+                tail = "set about %d V" % round((est[0] + est[1]) / 2.0)
+            else:
+                tail = "%s %d-%d V" % (best["action"], abs(round(lo)), abs(round(hi)))
+            return ("id %d charged, drifting %s %.3f gr/s -- %s"
+                    % (best["id"], way, abs(sp), tail), (0, 255, 0))
+        return ("%s the voltage -- id %d charged, drifting %s %.3f gr/s"
+                % (best["action"], best["id"], way, abs(sp)), (0, 255, 0))
+    # Field off.  The drop test first: it answers the question the operator actually
+    # has, and forty seconds sooner than a full traverse.
+    div = divisionVerdict(best["divisionSeconds"])
+    if div is not None:
+        return ("id %d falling %.2f gr/s -- %s" % (best["id"], sp, div[0]), div[1])
+    if charged is None:
+        return ("id %d falling %.2f gr/s -- switch to 工作 to see if it holds"
+                % (best["id"], sp), (0, 220, 255))
+    return ("TARGET id %d -- %.2f gr/s, charged, drop it to time"
+            % (best["id"], sp), (0, 255, 0))
+
+
+
+def updateDivision(t, gridRows):
+    """Time the droplet across ONE grid line, the moment it crosses the next.
+
+    The operator's own shortcut: drop a balanced droplet wherever it sits and watch it
+    cross a single line.  2-5 s is Ⅳ.2's 0.2-0.5 grid/s band divided by eight, so this
+    answers "is it measurable" in a few seconds instead of a full 16-40 s traverse.
+
+    Only ADJACENT lines count.  A droplet that goes dark and reappears two divisions
+    down would otherwise report a legal-looking time for twice the distance.
+    """
+    if len(t.points) < 2 or not gridRows:
+        return
+    (t0, y0), (t1, y1) = t.points[-2], t.points[-1]
+    if y1 == y0:
+        return
+    for k, row in enumerate(gridRows):
+        if (y0 < row <= y1) or (y1 < row <= y0):
+            crossed = t0 + (row - y0) / (y1 - y0) * (t1 - t0)
+            was = t.lastRow
+            t.lastRow = (crossed, k)
+            if was is not None and abs(was[1] - k) == 1:
+                gap = abs(crossed - was[0])
+                if gap > 0:
+                    t.divisionSeconds = gap
+            return
+
+
 def updateCrossings(t, yTop, yBottom, spacing):
     """Returns the track when it has just completed a full `0` -> `16` traverse.
 
@@ -1171,9 +2025,51 @@ def updateCrossings(t, yTop, yBottom, spacing):
     if t.tTop is None:
         if y0 < yTop <= y1:
             t.tTop = t0 + (yTop - y0) / (y1 - y0) * (t1 - t0)
+            t.yDeepest = y1
         return None
-    if y1 < yTop - 0.5 * spacing:            # drifted back up above `0`; that run is void
-        t.tTop = None
+    t.yDeepest = y1 if t.yDeepest is None else max(t.yDeepest, y1)
+    if y1 < t.yDeepest - RISE_VOID_DIVISIONS * spacing:
+        # Going back UP, judged against the deepest point this run reached rather
+        # than against an absolute height.
+        #
+        # It used to read `y1 < yTop - 0.5 * spacing`: the droplet had to be SEEN
+        # above y = yTop - 30 px.  edgeClear suppresses every detection within
+        # 20 * mag px of the ROI edge, which leaves about 30 px of the picture in
+        # which that test can fire, and a droplet being lifted crosses it in well
+        # under a second.  Miss it and tTop survives the lift.  That is what
+        # happened to droplet 3's first fall on 2026-09-08: the clock started at
+        # 2093.6 s while the operator was still walking the droplet onto the line,
+        # never voided, and the fall came out as a 75.78 s traverse -- whose bottom
+        # crossing was within 0.7 s of the operator's, so the measurement was right
+        # and only its start was stale.
+        #
+        # Rising is not a height, it is a direction, so test the direction.  Half a
+        # division of upward travel cannot be noise: the centroid of one of these
+        # blobs is steady to about a pixel, and assign() will not hand a track a
+        # detection more than 4 px above where it already is, even on the widened
+        # coasting gate.  A real fall never does it; a lift does it immediately.
+        #
+        # Back above `0`.  Either the run was void, or -- far more often -- the
+        # operator has just done what IV.4 says to: switch to 提升, lift the droplet
+        # to the top of the screen, switch back to 平衡, and drop it again.  Five
+        # falls, one droplet, and if the track survives the lift, ONE TRACK.
+        #
+        # Clearing only tTop left tBottom set from the previous fall, so the
+        # completion test below could never fire again for the life of that track:
+        # it measured the first fall and then silently measured nothing, while the
+        # overlay held that first duration frozen through all five.  The operator
+        # saw the frozen label on 2026-09-08.  It went unnoticed until then because
+        # the track almost never survived the lift -- with the old areaMax the
+        # droplet was barely detected at all, so a new track, with clean state,
+        # picked up each fall.  Fixing detection is what exposed this.
+        #
+        # Everything about the finished run is already snapshotted into `falls`, so
+        # clear the lot, reacquired included: its docstring says "times THIS FALL
+        # was stitched", and gaps belonging to the previous fall or to the lift are
+        # not this one's.
+        t.tTop = t.tBottom = t.seconds = t.legal = None
+        t.fTop = t.fBottom = t.yDeepest = None
+        t.reacquired = 0
         return None
     if t.tBottom is None and y0 < yBottom <= y1:
         t.tBottom = t0 + (yBottom - y0) / (y1 - y0) * (t1 - t0)
@@ -1219,6 +2115,12 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     before 2026-08-28.  A number switches to a rolling window of that many seconds."""
     path = resolveClip(path)
     outDir = outDirFor(path) if outDir is None else outDir
+    # Before anything is measured, not after.  A missing folder used to surface as
+    # an OSError inside report()'s to_csv, i.e. after the entire clip had been
+    # tracked, and it took the annotated video with it -- cv2.VideoWriter cannot
+    # open a file in a folder that is not there and says nothing about it.
+    os.makedirs(outDir, exist_ok = True)
+    fallLog = FallLog(outDir, path)
     src = openSource(path)
     fps = src.nominalFps            # advisory: naming, pacing and progress only
     total = src.frameCount
@@ -1250,10 +2152,19 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     spacing = roi["spacing"]
     s = buildSettings(roi, spacing)
     background = fullBackground[Y:Y+H, X:X+W]
+    # Built from the LEARNED background, before any droplet has been sprayed, so it
+    # holds only what the apparatus draws.  Rebuilding it from the rolling background
+    # later would risk baking in a droplet that sat still.
+    s["staticMask"] = staticMask(background, spacing)
     yTop, yBottom = s["gridRows"][LINE_TOP], s["gridRows"][LINE_BOTTOM]
     box = readoutBox(roi)
     maxSpeed = s["maxSpeed"]            # px per second; the per-frame gate is this x dt
-    panelEvery = max(1, int(round(fps / 3.0)))      # live: ~3 panel reads a second
+    # ~10 panel reads a second, not 3.  The charge test compares how a droplet moves
+    # either side of a toggle the operator holds for 0.5-1 s, and at 3 Hz the field
+    # state could be stale by 330 ms -- a third of the toggle, smearing the two states
+    # into each other.  The read is a threshold over a small crop and profiled at
+    # under a millisecond, so the extra rate is nearly free.
+    panelEvery = max(1, int(round(fps / 10.0)))
     print("%s\n  ROI %d,%d,%d,%d  spacing %.1f  `0` y=%d  `16` y=%d  %d divisions"
           % (os.path.basename(path) if isinstance(path, str) else src.describe(),
              X, Y, W, H, spacing, yTop, yBottom,
@@ -1295,6 +2206,23 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
               flush = True)
 
     live, morgue, falls, n = [], [], [], fromFrame
+    volts = None                    # last plate voltage read off the `V:` line
+    steadyVolts = None              # ...voted over ~1 s, for deciding the hunt mode
+    panelAlign = None               # digit positions, found once and reused
+    alignCells = collections.deque(maxlen = 8)      # median to align and read from
+    # Short windows on purpose.  These lag the knob: the median is taken over the
+    # last few samples and the mode over the last second, so a long window shows a
+    # voltage the operator has already turned away from.  At 10 panel reads a second
+    # this settles in well under a second while still outvoting a stray misread.
+    voltHistory = collections.deque(maxlen = 5)
+    bestNow = None                  # the candidate the operator is being told about
+    bestId, bestSeen, bannerAt = None, 0.0, 0.0
+    ranked = []                     # last computed candidate list, reused between frames
+    columnVolts = {}                # column -> {plate voltage: [descent rates]}
+    voltsFailedAt = None            # when the `V:` line first refused to read
+    chosenX = None                  # the column the operator has settled on
+    chosenSeen = 0.0                # when a track was last alive in it
+    banner, bannerColour = None, (0, 220, 255)
     detections = 0
     detSeries = []                  # (t, count) per frame, for spraySpans
     detRates = []                   # detections/frame, for the quiet level
@@ -1355,6 +2283,81 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 elif rolled is not None and len(roller.buf) >= roller.samples:
                     background, rollerReady = rolled, True
             if src.isLive and n % panelEvery == 0:
+                # The same crop the field-off check uses, read once a frame instead of
+                # once a fall.  A droplet's response to the field is the FIRST half of
+                # Ⅳ.2's selection and nothing automated it before.
+                vCell = cv2.cvtColor(frame[box[1]:box[3], box[0]:box[2]],
+                                     cv2.COLOR_BGR2GRAY)
+                # Zero is read WITHOUT the digit templates.  `+0000V` is four identical
+                # glyphs, so there is nothing to tell the four digit runs from the `+`
+                # and the `V`, and an alignment found on it lands on the wrong columns
+                # -- which read 0 V back as 101 V.  allDigitsAlike answers "are all four
+                # the same" directly and needs no alignment at all, which is exactly the
+                # question zero asks.
+                allZero = fieldOffFromCells([vCell])
+                if allZero:
+                    # Zero needs no digit reader.  `+0000V` is four identical glyphs,
+                    # so nothing distinguishes the digit runs from the `+` and the `V`
+                    # and any alignment found on it is wrong; allDigitsAlike answers
+                    # the question directly instead.
+                    volts = 0
+                else:
+                    # Align and read the SAME median, every sample.  A carried-over
+                    # alignment belongs to whatever digits produced it -- a `1` is half
+                    # the width of a `0` -- so 0130's alignment read 0083 as 183.  And
+                    # the window is short so the reading follows the knob instead of
+                    # lagging a second behind it.
+                    alignCells.append(vCell)
+                    if len(alignCells) >= alignCells.maxlen:
+                        med = np.median(np.stack(alignCells),
+                                        axis = 0).astype(np.uint8)
+                        was = usingTemplates("v")
+                        panelAlign = panelAlignment(med)
+                        got = readPanelVolts(med, panelAlign) if panelAlign else None
+                        usingTemplates(was)
+                        if got is not None:
+                            volts = got
+                if volts is not None:
+                    voltHistory.append(volts)
+                    # The mode over the last few reads, so one misread cannot move it.
+                    # The RAW value is what feeds observeVoltage: the charge test has
+                    # to see a 0.5 s toggle, which smoothing would erase.
+                    steadyVolts = collections.Counter(
+                        voltHistory).most_common(1)[0][0]
+
+                # Whatever goes wrong, keep the evidence.  A live run records only
+                # the ROI, so a panel that will not read leaves nothing to look at --
+                # three restarts were spent guessing at `V ?` from the outside.
+                if steadyVolts is None or steadyVolts == 0:
+                    if voltsFailedAt is None:
+                        voltsFailedAt = now
+                    elif now - voltsFailedAt > 20.0:
+                        voltsFailedAt = now + 1e9          # once per session
+                        try:
+                            folder = os.path.join(outDir, "panel_refused")
+                            os.makedirs(folder, exist_ok = True)
+                            cv2.imwrite(os.path.join(folder, "v_line.png"), vCell)
+                            if alignCells:
+                                cv2.imwrite(
+                                    os.path.join(folder, "v_line_median.png"),
+                                    np.median(np.stack(alignCells),
+                                              axis = 0).astype(np.uint8))
+                            was = usingTemplates("v")
+                            text = (readPanelDigits(vCell, panelAlign)
+                                    if panelAlign else None)
+                            usingTemplates(was)
+                            with open(os.path.join(folder, "v_line.txt"), "w") as f:
+                                f.write("cell %s\n" % (vCell.shape,))
+                                f.write("allDigitsAlike -> %s\n"
+                                        % (fieldOffFromCells([vCell]),))
+                                f.write("alignment: %s\n" % (panelAlign,))
+                                f.write("readPanelDigits: %r\n" % (text,))
+                                f.write("align window held %d frames\n"
+                                        % len(alignCells))
+                            print("  the `V:` line will not read -- crops saved to "
+                                  "panel_refused/v_line*.png", flush = True)
+                        except Exception as exc:
+                            print("  could not save it: %s" % exc, flush = True)
                 panel.append((now, cv2.cvtColor(frame[box[1]:box[3], box[0]:box[2]],
                                                 cv2.COLOR_BGR2GRAY)))
                 if latchBox is not None:
@@ -1432,6 +2435,9 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     if t.miss > 0 and np.hypot(c[0] - aim[0], c[1] - aim[1]) > maxStep:
                         t.reacquired += 1
                     t.update(c, now, maxSpeed)
+                    t.observeVoltage(volts, spacing)
+                    noteColumnVoltage(columnVolts, t, volts, spacing)
+                    updateDivision(t, s["gridRows"])
                     finished = updateCrossings(t, yTop, yBottom, spacing)
                     if finished is not None:
                         if not src.isLive:      # a frame index to seek back to, files only
@@ -1452,11 +2458,23 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # its median is sharp; the V: line changes and its median is
                         # smeared.  Aligning off V: read 609 V and 749 V on a fixture
                         # where neither is a possible balance voltage.
+                        panelReport = {}
                         t.balanceVoltage = readLatchedVolts(
                             [cell for ct, cell in latched
-                             if t.tTop <= ct <= t.tBottom]) \
+                             if t.tTop <= ct <= t.tBottom],
+                            report = panelReport) \
                             if src.isLive else None
-                        falls.append(finished)
+                        # A live run records only the ROI, so when the panel
+                        # cannot be read there is otherwise nothing left to
+                        # look at: four of nine legal falls came back with no
+                        # voltage on 2026-09-08 and the diagnosis had to be
+                        # guesswork.  Keep the crop and the vote spread.
+                        if (src.isLive and t.balanceVoltage is None
+                                and t.kinematicLegal):
+                            saveRefusedPanel(outDir, t.tTop, panelReport)
+                        t.completedFalls = getattr(t, "completedFalls", 0) + 1
+                        falls.append(Fall(finished, spacing))
+                        fallLog.add(falls[-1])
                         sayFall("  frame %6d  id %-5d  %6.2f s  %6.3f grid/s  %s"
                               % (n, t.id, t.seconds, FALL_DIVISIONS / t.seconds,
                                  # fieldOff is TRI-STATE and this line used to flatten it:
@@ -1476,8 +2494,11 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
             probationS = max(PROBATION_S, 2 * dt)    # never shorter than two frames
             for t in live:
                 waited = now - t.lastT
-                if waited <= (MAX_COAST_S if len(t.points) >= CONFIRM_POINTS
-                              else probationS):
+                measuring = t.tTop is not None and t.tBottom is None
+                allowed = (MEASURING_COAST_S if measuring and len(t.points) >= CONFIRM_POINTS
+                           else MAX_COAST_S if len(t.points) >= CONFIRM_POINTS
+                           else probationS)
+                if waited <= allowed:
                     keep.append(t)
                 elif len(t.points) >= CONFIRM_POINTS:
                     buried.append(t)                 # only confirmed tracks are worth keeping
@@ -1501,11 +2522,52 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
             # droplet's blobs with it -- both survive, both complete, and one droplet
             # is reported as two or three falls.  So refuse to spawn anywhere a live
             # track already is or is about to be, confirmed or not.
+            # A track that is MID-MEASUREMENT owns the corridor it is falling down.
+            #
+            # The guard below refuses to spawn within maxStep of a coaster's
+            # prediction, which is a circle about 10 px across.  That is the right
+            # size for a track that missed one frame and far too small for one that
+            # has been dark for two seconds -- and the droplet goes dark for exactly
+            # as long as it overlaps a grid line, because gridClear suppresses every
+            # detection within 4 * mag px of a row.  The `16` line IS a row.  So the
+            # one moment in the whole traverse where the droplet is guaranteed
+            # invisible is the moment the measurement completes.
+            #
+            # Seen on 2026-09-08, live: a fall 16.2 s in, the droplet sitting on
+            # `1.6`, went dark for 2.5 s -- inside MAX_COAST_S, so the track was
+            # still alive and still aiming at it -- and a NEW track spawned on the
+            # blob when it reappeared below the line.  The new one had no tTop, the
+            # old one was starved by the global assignment, and a legal fall one
+            # second from completing was lost.  The operator timed it at 17.20 s.
+            #
+            # So while tTop is set and tBottom is not, reserve the whole corridor the
+            # droplet can plausibly be in, using the same asymmetric shape assign()
+            # already uses to take it back: tight in x, because a fall drifts 5-6 px
+            # sideways across a whole traverse, and elapsed-scaled in y, because that
+            # is the only axis it is moving along.  This costs nothing anywhere else
+            # -- a track not being timed reserves nothing.
+            # Reserve only what assign() could actually have taken.  The first
+            # version of this guard matched assign()'s wide gate in x and y but NOT
+            # its area test, so a blob whose area had drifted failed assign, was
+            # then refused a track of its own here, and was orphaned for good --
+            # never assigned, never spawned.  That turned a stitch into a
+            # starvation: one_droplet_slow lost the two falls that needed
+            # reacquisition (reacq 5 and reacq 1) while keeping the three that did
+            # not.  Caught by check.py, which is the entire reason it exists.
+            measuring = [(t.pos, t.predict(now), t.area) for t in live
+                         if t.miss > 0 and len(t.points) >= CONFIRM_POINTS
+                         and t.tTop is not None and t.tBottom is None and t.vel[1] > 0]
             shadow = [(t.pos, t.predict(now)) for t in live]
             dup2 = s["dupPx"] ** 2
             for j, c in enumerate(centres):
                 if j in claimed:
                     continue
+                if any(abs(c[0] - p[0]) <= s["reidX"]
+                       and p[1] - 4.0 <= c[1] <= a[1] + max(4.0,
+                                                            REID_Y_SLACK * abs(a[1] - p[1]))
+                       and abs(c[2] - ar) / max(ar, s["areaFloor"]) <= AREA_TOLERANCE
+                       for p, a, ar in measuring):
+                    continue                     # a fall in progress owns this blob
                 if any((c[0] - aim[0]) ** 2 + (c[1] - aim[1]) ** 2 <= maxStep ** 2
                        for aim, _t in coasting):
                     continue                     # belongs to a coaster; do not duplicate
@@ -1527,9 +2589,141 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 marked = crop.copy()
                 cv2.line(marked, (0, yTop), (W, yTop), (255, 255, 0), 1)
                 cv2.line(marked, (0, yBottom), (W, yBottom), (255, 255, 0), 1)
+                # Nothing here decides anything, so it runs at the rate the screen
+                # updates rather than the rate frames arrive.  A spray floods the field
+                # and the operator is not hunting yet, so say nothing then either --
+                # same test the background watcher uses, this session's own quiet rate
+                # and never an absolute number.
+                if n % SHOW_EVERY == 0:
+                    noisy = (quietLevel is not None
+                             and len(centres) > max(3.0, STALE_FACTOR * quietLevel))
+
+                    ranked = candidates(live, spacing, now, H, volts = steadyVolts,
+                                        quiet = noisy, columns = columnVolts)
+
+                    # Has the operator settled on one?  Decided AFTER the candidate
+                    # list, so it inherits every test in it.  An earlier version asked
+                    # only "has this track sat still for three seconds", which is also
+                    # a description of dust: it fired with nothing tracked at all and
+                    # replaced the hunt with `MEASURING -- 0 of 5`.
+                    def measuring(t):
+                        # A clock running is not enough on its own.  Any speck that
+                        # crosses `0` starts one, and one did: it was ringed at
+                        # 0.20 gr/s and had accelerated to 0.64 three seconds later,
+                        # having taken the whole screen with it.  A fall already
+                        # outside the legal band is not a measurement worth clearing
+                        # the display for.
+                        if getattr(t, "completedFalls", 0) > 0:
+                            return True
+                        if t.tTop is None or t.tBottom is not None:
+                            return False
+                        fit = t.windowFit(spacing, now)
+                        return fit is not None and MIN_SPEED <= fit[0] <= MAX_SPEED
+
+                    settledTrack = next(
+                        (t for t in live
+                         if not t.miss and len(t.points) >= CONFIRM_POINTS
+                         and measuring(t)), None)
+                    balanced = next((c for c in ranked
+                                     if c["action"] == "BALANCED"
+                                     and c["charged"] is True), None)
+                    # PIN the column when it is first chosen; do not follow the
+                    # droplet.  Following it slides the 60 px window sideways as the
+                    # droplet drifts, so falls counted a minute ago fall outside it and
+                    # the tally goes DOWN -- an operator watched it read 2 of 5 and
+                    # then 1 of 5 three seconds later.
+                    if settledTrack is not None:
+                        if chosenX is None:
+                            chosenX = float(settledTrack.pos[0])
+                        chosenSeen = now
+                    elif balanced is not None:
+                        if chosenX is None:
+                            chosenX = balanced["pos"][0]
+                        chosenSeen = now
+                    elif chosenX is not None and any(
+                            abs(float(t.pos[0]) - chosenX) <= SAME_DROPLET_X_PX
+                            for t in live if not t.miss):
+                        chosenSeen = now           # still occupied, between drops
+                    if chosenX is not None and (noisy or now - chosenSeen > CHOSEN_RELEASE_S):
+                        chosenX = None             # sprayed, or the column emptied
+                    if chosenX is not None:
+                        ranked = []
+                # Stick with the droplet already named unless it stops qualifying, or
+                # one with a CONFIRMED charge turns up while this one is still unknown.
+                    held = next((c for c in ranked if c["id"] == bestId), None)
+                    upgrade = (held is not None and held["charged"] is not True
+                               and any(c["charged"] is True for c in ranked))
+                    if held is not None and not upgrade:
+                        bestNow, bestSeen = held, now
+                    elif upgrade or bestNow is None or now - bestSeen > CANDIDATE_STICKY_S:
+                        # Only now is the held droplet really gone.  The grace has to cover
+                        # a dropout while OTHER candidates still qualify -- that is the
+                        # common case, and applying it only when the list went empty left
+                        # the banner alternating between two droplets every couple of
+                        # seconds.
+                        if ranked:
+                            bestNow, bestId, bestSeen = ranked[0], ranked[0]["id"], now
+                        else:
+                            bestNow, bestId = None, None
+                    if bestNow is None or now - bannerAt >= CANDIDATE_REFRESH_S:
+                        banner, bannerColour = candidateBanner(bestNow, steadyVolts)
+                        bannerAt = now
+                    if chosenX is not None:
+                        # Measuring, not hunting.  One line of progress, and the fall
+                        # clock on the droplet itself is already drawn.
+                        # LEGAL falls only.  `falls` holds every completed
+                        # traverse, and a droplet dropped too fast still crosses both
+                        # lines -- so counting traverses made the tally climb on every
+                        # downward move rather than on every measurement.
+                        done = sum(1 for f in falls
+                                   if f.legal and getattr(f, "xPx", None) is not None
+                                   and abs(f.xPx - chosenX) <= SAME_DROPLET_X_PX)
+                        banner = "MEASURING -- %d of %d falls" % (
+                            done, TARGET_FALLS_PER_DROPLET)
+                        bannerColour = (200, 200, 200)
+                        bestNow, bestId = None, None
+                    if bestNow is not None and not bestNow["track"].alerted:
+                        bestNow["track"].alerted = True
+                        _beep()
+                # Every candidate gets a thin ring; only the best gets the banner.
+                # Holding the banner steady costs recall if it is the only signal --
+                # measured, naming one droplet at a time took 6 of 6 legal traverses
+                # down to 5 of 6, because the second one was never mentioned while the
+                # first was being shown.  Ringing them all puts that back without
+                # reintroducing the flicker: the operator sees every candidate and is
+                # TOLD about one.
+                for cand in ranked:
+                    cp = (int(round(cand["pos"][0])), int(round(cand["pos"][1])))
+                    if bestNow is not None and cand["id"] == bestNow["id"]:
+                        continue
+                    cv2.circle(marked, cp, 16, (0, 200, 200), 1)
+                if bestNow is not None:
+                    bp = (int(round(bestNow["pos"][0])), int(round(bestNow["pos"][1])))
+                    cv2.circle(marked, bp, 20, bannerColour, 2)
                 for t in live:
                     if t.miss > 0:
                         continue                     # never draw a coasting ghost
+                    if (chosenX is not None and t.tTop is None
+                            and abs(float(t.pos[0]) - chosenX) > SAME_DROPLET_X_PX):
+                        # Measuring, not hunting.  Everything outside the chosen
+                        # column is clutter competing with the fall clock, and the
+                        # operator watched hunt-phase rings glitch through their
+                        # measurement.
+                        #
+                        # `t.tTop is None` is not optional.  Without it this suppressed
+                        # a track that had ALREADY crossed `0` and was being timed,
+                        # purely for being in another column -- and the exemption
+                        # fifteen lines below, "a track that has already crossed `0` is
+                        # always drawn", never ran, because this `continue` came first.
+                        #
+                        # It cost a fall on 2026-09-09.  At HUD 11:08 the operator's
+                        # droplet crossed `0` at x=691 while chosenX was pinned at
+                        # x=853; 162 px is past the 60 px window, so nothing was drawn
+                        # for 4.9 s while the clock ran.  Seeing no ring, the operator
+                        # concluded it had not been detected, lifted it, and the rise
+                        # void cleared tTop -- so a fall the pipeline had measured
+                        # correctly was never written, and cost 20 s to redo.
+                        continue
                     # Speckle lives for a frame or two; a droplet being measured lives
                     # for the whole traverse.  Anything younger than DRAW_MIN_AGE_S is
                     # not worth the operator's attention and is not drawn.  A track
@@ -1538,6 +2732,26 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     age = now - t.points[0][0] if t.points else 0.0
                     if age < DRAW_MIN_AGE_S and t.tTop is None:
                         continue
+                    if t.tTop is None and len(t.points) > 4:
+                        ys = [p[1] for p in t.points[::3]]
+                        if max(ys) - min(ys) < DRAW_MIN_TRAVEL_DIV * spacing:
+                            continue             # never went anywhere; not a droplet
+                        # ...and it must have gone there in a LINE.  Travel alone does
+                        # not separate a droplet from chained speckle: the tracker
+                        # strings unrelated one-frame blobs together and the result
+                        # carries a plausible velocity and a large apparent travel --
+                        # an operator counted thirteen of them 43 s into a run.  A
+                        # droplet falls straight; noise stitched out of different
+                        # specks does not.  Same residual the candidate rule uses.
+                        # Fitted over DRAW_MIN_AGE_S, not the candidate window.  The
+                        # first version asked windowFit for its default three seconds
+                        # while a track needs only 1.5 to be drawn, so everything
+                        # younger than three seconds got None back and skipped the test
+                        # -- which is exactly where speckle lives.  A track too short
+                        # to fit at all is not drawn either: unmeasurable is not a pass.
+                        fit = t.windowFit(spacing, now, DRAW_MIN_AGE_S)
+                        if fit is None or fit[1] > CANDIDATE_MAX_RESIDUAL_PX:
+                            continue
                     p = (int(round(t.pos[0])), int(round(t.pos[1])))
                     if len(t.points) < CONFIRM_POINTS:
                         cv2.circle(marked, p, 2, (120, 120, 120), -1)    # unconfirmed: a dot
@@ -1569,14 +2783,21 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
                 nTracked = sum(1 for t in live
                                if t.miss == 0 and len(t.points) >= CONFIRM_POINTS)
-                hud = "tracked %d   falls %d   legal %d" % (
-                    nTracked, len(falls), sum(1 for f in falls if f.legal))
+                hud = "tracked %d   falls %d   legal %d   V %s" % (
+                    nTracked, len(falls), sum(1 for f in falls if f.legal),
+                    "?" if steadyVolts is None else "%d" % steadyVolts)
                 secs = int(now - (firstT or 0))
                 clock = "%d:%02d:%02d" % (secs // 3600, secs // 60 % 60, secs % 60)
 
                 def drawHud(canvas):
                     cv2.putText(canvas, hud, (10, 22),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
+                    if banner:
+                        h = canvas.shape[0]
+                        cv2.rectangle(canvas, (0, h - 34), (canvas.shape[1], h),
+                                      (0, 0, 0), -1)
+                        cv2.putText(canvas, banner, (12, h - 11),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, bannerColour, 2)
                     (tw, _th), _ = cv2.getTextSize(clock, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
                     cv2.putText(canvas, clock, (canvas.shape[1] - tw - 10, 22),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
@@ -1591,7 +2812,13 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 inWindow = (videoFrom is None or videoFrom <= n) and (videoTo is None or n <= videoTo)
                 if writer is not None and inWindow:
                     writer.write(marked)      # track over a wide span, record a narrow one
-                if show:
+                # cv2.waitKey(1) costs 14.1 ms of a 42.4 ms frame budget on Windows,
+                # where its resolution is the system timer rather than the millisecond
+                # asked for.  A third of the budget, spent waiting.  Showing every third
+                # frame gives the operator ~8 updates a second -- ample for a droplet
+                # crossing half a grid line a second -- and hands the rest back.  A file
+                # source still shows every frame, because there waitKey IS the pacing.
+                if show and (not src.isLive or n % SHOW_EVERY == 0):
                     if blind:
                         # Exactly what the lab monitor would have shown.  The apparatus
                         # burns the grid and the V:/t: panel into the signal itself, so
@@ -1628,6 +2855,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
         writer.release()
     if show:
         cv2.destroyAllWindows()
+    fallLog.close()
 
     elapsed = (lastT - firstT) if (firstT is not None and lastT is not None) else 0
     measuredFps = (n - fromFrame - 1) / elapsed if elapsed > 0 else 0.0
@@ -1652,9 +2880,81 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                        "backgroundResyncs": resyncs,
                        "spraySpans": spraySpans([t for t, _c in detSeries],
                                                 [c for _t, c in detSeries])})
-    for f in falls:
-        f.fallDrift, f.fallDirection = fallDrift(f, spacing)
     return falls
+
+
+def _beep():
+    """A short tone, on the platforms that have one, and nothing anywhere else.
+
+    The operator's hands and eyes are on the toggles and the voltage knob while a
+    candidate is falling.  A banner they are not looking at is not an alert.
+    """
+    # On a thread, always.  winsound.Beep BLOCKS for its full duration, and 120 ms
+    # inside the frame loop stalls three frames -- which would spend more budget than
+    # the waitKey change just saved, to announce that the budget matters.
+    def ring():
+        try:
+            import winsound
+            winsound.Beep(880, 120)
+        except Exception:
+            pass                            # no sound device, or not Windows
+    try:
+        threading.Thread(target = ring, daemon = True).start()
+    except Exception:
+        pass
+
+
+FALL_COLUMNS = ["id", "startFrame", "startTime", "seconds", "speedGridPerSec",
+                "xPx", "reacquired", "kinematicLegal", "fieldOff", "balanceVoltageV",
+                "legal"]
+
+
+def fallRow(f):
+    return {"id": f.id, "startFrame": f.fTop, "startTime": f.tTop,
+            "seconds": f.seconds,
+            "speedGridPerSec": FALL_DIVISIONS / f.seconds,
+            "xPx": getattr(f, "xPx", None),
+            "reacquired": getattr(f, "reacquired", 0),
+            "kinematicLegal": getattr(f, "kinematicLegal", f.legal),
+            "fieldOff": getattr(f, "fieldOff", None),
+            "balanceVoltageV": getattr(f, "balanceVoltage", None),
+            "legal": f.legal}
+
+
+class FallLog:
+    """falls.csv, written a row at a time as the falls complete.
+
+    It used to be written once, by report(), after the last frame.  Everything a
+    session measured therefore lived only in memory until then, and three sessions
+    have now been lost that way: two live runs on 2026-09-08 that the operator
+    stopped, and a 56,543-frame replay that ran to completion and then died in
+    to_csv because outDir did not exist.  Forty minutes of measurement, discarded
+    at the write.
+
+    So write as we go and flush every row.  report() rewrites the same file at the
+    end from the same fallRow(), so a run that finishes is unchanged; a run that
+    does not keeps every fall it had found.
+    """
+
+    def __init__(self, outDir, path):
+        self.path = artefact(outDir, path, "falls.csv")
+        self.file = None
+
+    def add(self, f):
+        try:
+            if self.file is None:
+                self.file = open(self.path, "w", encoding = "utf-8", newline = "")
+                self.writer = csv.DictWriter(self.file, fieldnames = FALL_COLUMNS)
+                self.writer.writeheader()
+            self.writer.writerow(fallRow(f))
+            self.file.flush()
+        except Exception as exc:                 # never let bookkeeping kill a session
+            print("  could not append to %s: %s" % (self.path, exc), flush = True)
+
+    def close(self):
+        if self.file is not None:
+            self.file.close()
+            self.file = None
 
 
 def report(falls, outDir = None, path = None):
@@ -1676,16 +2976,18 @@ def report(falls, outDir = None, path = None):
                   % (f.id, start, f.seconds, FALL_DIVISIONS / f.seconds, f.legal))
     csvPath = artefact(outDir, path, "falls.csv") if outDir and path \
         else (os.path.join(outDir, "falls.csv") if outDir else "falls.csv")
-    pd.DataFrame([{"id": f.id, "startFrame": f.fTop, "startTime": f.tTop,
-                   "seconds": f.seconds,
-                   "speedGridPerSec": FALL_DIVISIONS / f.seconds,
-                   "reacquired": getattr(f, "reacquired", 0),
-                   "kinematicLegal": getattr(f, "kinematicLegal", f.legal),
-                   "fieldOff": getattr(f, "fieldOff", None),
-                   "balanceVoltageV": getattr(f, "balanceVoltage", None),
-                   "legal": f.legal}
-                  for f in falls]).to_csv(csvPath, index = False)
+    os.makedirs(os.path.dirname(os.path.abspath(csvPath)), exist_ok = True)
+    pd.DataFrame([fallRow(f) for f in falls],
+                 columns = FALL_COLUMNS).to_csv(csvPath, index = False)
     print("\nWrote", csvPath)
+    try:
+        census = rejectCensus()
+        print("\nwhat the gates rejected:\n%s" % census)
+        with open(os.path.join(os.path.dirname(os.path.abspath(csvPath)),
+                               "rejects.txt"), "w") as f:
+            f.write(census + "\n")
+    except Exception as exc:
+        print("  could not write the reject census: %s" % exc)
     return sum(1 for f in falls if f.legal), len(falls)
 
 
@@ -1841,15 +3143,12 @@ def analyze(videoPath = VIDEO, binding = None, voltages = None,
 
     # The physics, on disk only.  A CSV is layer-2 output; the returned dict is not.
     if voltages is not None and droplets:
-        chargeRows, perDroplet, overall = chargeMath.table(droplets, voltages)
+        chargeRows, perDroplet, overall = chargeMath.csvRows(droplets, voltages)
         outDir = outDirFor(videoPath)
         os.makedirs(outDir, exist_ok = True)
         csvPath = artefact(outDir, videoPath, "charges.csv")
-        pd.DataFrame([{"droplet": r["label"], "fallId": r["fallId"],
-                       "seconds": r["seconds"], "balanceVoltageV": r["balanceVoltage"],
-                       "radiusM": r["radiusM"], "chargeC": r["chargeC"],
-                       "electrons": r["electrons"], "elementaryC": r["elementaryC"]}
-                      for r in chargeRows]).to_csv(csvPath, index = False)
+        pd.DataFrame(chargeRows,
+                     columns = chargeMath.CSV_COLUMNS).to_csv(csvPath, index = False)
         print()
         print("Wrote", csvPath)
         for d in perDroplet:
@@ -1931,13 +3230,44 @@ def main(argv):
 #  numbers; a failure returns None and the operator's notes remain the record.
 # --------------------------------------------------------------------------------
 
+# What fraction of the readable frames must agree before a latched voltage is
+# believed.  Not a tuning knob: the latched line holds ONE value for the whole fall,
+# so every frame of that fall is a repeat measurement of the same constant, and two
+# frames disagreeing means a glyph was misread -- there is nothing else it can mean.
+# Measured over all fifteen falls of bench_0908, voting across each fall's own
+# frames: the ten reads that are right agree 97-100% of the time, seven of them
+# unanimously.  The four that are wrong agree 51%, 55%, 62% and 88%.  Nothing sits
+# between 0.88 and 0.97, so 0.9 separates them with room on both sides -- and the
+# separation is not a coincidence of this session, it is what a constant being read
+# repeatedly has to look like.
+#
+# The apparatus's `2` is what fails, against templates cut from voltage_sweep_0907.
+# Fixing that needs more labelled panel footage, not a cleverer matcher: zero-mean
+# NCC, a common vertical cut and a binarised match were all tried on 2026-09-08 and
+# all three still read 0700.  Until then this returns None, which is the documented
+# contract -- the operator's notes carry the balance voltage and nothing downstream
+# reads this.
+LATCHED_AGREEMENT = 0.9
+
 DIGIT_SIZE = (24, 22)      # canonical (rows, cols) every glyph is normalised into
 _DIGITS = None
+_DIGITS_V = None
+# Which set _digitTemplates() hands back.  The `V:` line and the latched line sit in
+# different bands of the panel and do not render identically -- the latched-line set
+# read 133 V as 733 on the live line, and an operator watching the HUD spotted it
+# before any test did.  Two sets, one switch, chosen by whichever line is being read.
+_ACTIVE_TEMPLATES = "latched"
 
 
 def latchedBox(roi):
     """The panel cell holding the latched balance voltage, one band below V:/t:."""
     return (roi["x"] + roi["w"], roi["rows"][1], roi["border"], roi["rows"][2])
+
+
+def _templateFile():
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(here, "panel_digits_v.npz" if _ACTIVE_TEMPLATES == "v"
+                        else "panel_digits.npz")
 
 
 def _digitTemplates():
@@ -1947,15 +3277,19 @@ def _digitTemplates():
     them contain every digit.  Fixed font in a fixed place, so this is template
     matching -- no learning, nothing to tune.
     """
-    global _DIGITS
-    if _DIGITS is None:
+    global _DIGITS, _DIGITS_V
+    cached = _DIGITS_V if _ACTIVE_TEMPLATES == "v" else _DIGITS
+    if cached is None:
         try:
-            z = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                     "panel_digits.npz"))
-            _DIGITS = {k[1:]: z[k].astype(np.float32) for k in z.files}
+            z = np.load(_templateFile())
+            cached = {k[1:]: z[k].astype(np.float32) for k in z.files}
         except Exception:
-            _DIGITS = {}
-    return _DIGITS
+            cached = {}
+        if _ACTIVE_TEMPLATES == "v":
+            _DIGITS_V = cached
+        else:
+            _DIGITS = cached
+    return cached
 
 
 def _unit(a):
@@ -2003,7 +3337,19 @@ def _glyphBand(line):
             runs.append((first, a))
             first = b
     runs.append((first, rows[-1]))
-    lo, hi = max(runs, key = lambda r: r[1] - r[0])
+    # The TOPMOST text run, not the biggest.  readoutBox spans a whole grid band and
+    # that band carries two lines: `V:` above, `t:` below.  Taking the largest picked
+    # whichever happened to be taller, and an idle timer reads 00.00S -- four zeros --
+    # so the plate voltage came back as 0 V while the plates were at 129.  It went
+    # unnoticed for as long as it did because allDigitsAlike takes readoutLines()[0]
+    # and so was always looking at the right line, and everything else only ever asked
+    # whether the panel read zero, which both lines do when the field is off.
+    #
+    # Height still filters: a run shorter than 60% of the tallest is an artefact -- a
+    # fragment of a rule, a speck -- not a line of text.  On a single-line crop like
+    # the latched readout the first run IS the tallest, so nothing changes there.
+    tallest = max(r[1] - r[0] for r in runs)
+    lo, hi = next(r for r in runs if (r[1] - r[0]) >= 0.6 * tallest)
     if hi - lo < 4:
         return None
     band = inner[int(lo):int(hi) + 1, :]
@@ -2182,7 +3528,53 @@ def readPanelDigits(line, alignment):
     return text
 
 
-def readLatchedVolts(cells, alignCells = None):
+def usingTemplates(which):
+    """Read the next panel line with the template set cut from that line."""
+    global _ACTIVE_TEMPLATES
+    was = _ACTIVE_TEMPLATES
+    _ACTIVE_TEMPLATES = which
+    return was
+
+
+def voltageLine(cell):
+    """Just the `V:` row of the readout cell, or None.
+
+    readoutBox spans a whole grid band, which holds TWO lines: `V:` on top and `t:`
+    below it.  Everything before this only ever asked "are all four digits alike", and
+    when the field is off both lines are zeros -- so picking the wrong one still gave
+    the right answer, and the bug sat there invisibly.  Reading the VALUE is different:
+    an idle timer shows 00.00S, which is four zeros, and the panel reported 0 V while
+    the plates were at 129.
+    """
+    try:
+        runs = readoutLines(cell)
+        if not runs:
+            return None
+        top, bottom = runs[0]                # `V:` is the upper line
+        return cell[int(top):int(bottom) + 1, :]
+    except Exception:
+        return None
+
+
+def readPanelVolts(cell, alignment):
+    """The number on the `V:` line, or None.  NEVER RAISES.
+
+    Separate from fieldOffFromCells, which only ever needed to know whether the line
+    read zero.  The hunt needs the value: the operator's low-end method toggles
+    平衡/提升, which is field-on at both ends and 210 V apart, and a yes/no cannot see
+    that at all.
+    """
+    was = usingTemplates("v")
+    try:
+        text = readPanelDigits(cell, alignment)
+        return int(text) if text and len(text) == 4 else None
+    except Exception:
+        return None
+    finally:
+        usingTemplates(was)
+
+
+def readLatchedVolts(cells, alignCells = None, report = None):
     """Majority-vote the balance voltage over many crops of the latched line.
 
     `alignCells` are crops of the V:/t: line from the same session.  The two lines are
@@ -2193,25 +3585,90 @@ def readLatchedVolts(cells, alignCells = None):
     Returns volts as an int, or None.  NEVER RAISES.
     """
     if not cells:
+        if report is not None:
+            report["why"] = "no panel crops were kept for this fall"
         return None
     try:
         if not _digitTemplates():
+            if report is not None:
+                report["why"] = "no digit templates are loaded"
             return None
         source = list(alignCells) if alignCells else list(cells)
         shapes = set(c.shape for c in source)
         median = (np.median(np.stack(source), axis = 0).astype(np.uint8)
                   if len(shapes) == 1 else source[len(source) // 2])
         alignment = panelAlignment(median)
+        if report is not None:
+            report["median"] = median
+            report["alignment"] = alignment
         if alignment is None:
+            if report is not None:
+                report["why"] = "could not find four digit runs on the latched line"
             return None
         votes = {}
         for cell in cells:
             text = readPanelDigits(cell, alignment)
             if text and len(text) == 4:
                 votes[text] = votes.get(text, 0) + 1
-        return int(max(votes, key = votes.get)) if votes else None
-    except Exception:
+        total = sum(votes.values())
+        if report is not None:
+            report["votes"] = dict(votes)
+            report["frames"] = total
+        if total < 5:                    # too few readable frames to check agreement
+            if report is not None:
+                report["why"] = "only %d frames produced four digits" % total
+            return None
+        best = max(votes, key = votes.get)
+        if votes[best] < LATCHED_AGREEMENT * total:
+            if report is not None:
+                report["why"] = ("frames disagree: %s won %d of %d, under %.0f%%"
+                                 % (best, votes[best], total, 100 * LATCHED_AGREEMENT))
+            return None                  # the frames disagree, so the glyphs are wrong
+        volts = int(best)
+        if report is not None and volts <= 0:
+            report["why"] = "latched line read +0000V, which is not a balance voltage"
+        # A droplet cannot be balanced by no field, so a latched +0000V is not a
+        # balance voltage that happens to be zero -- it is the latch not holding one.
+        # It read that way, unanimously, through droplet 3's third fall on
+        # 2026-09-08, and charge() would reject it anyway (it raises on U <= 0).
+        return volts if volts > 0 else None
+    except Exception as exc:
+        if report is not None:
+            report["why"] = "raised %s" % (exc,)
         return None
+
+
+def saveRefusedPanel(outDir, tTop, report):
+    """Keep the evidence when a balance voltage could not be read.
+
+    A live run records only the ROI, so on 2026-09-08 four of nine legal falls came
+    back with no voltage and there was NOTHING to look at afterwards -- the panel is
+    outside the recorded crop and the frames are gone the moment they are tracked.
+    The whole diagnosis had to be guesswork about which digits were thin in the
+    template set.
+
+    So keep the one crop that matters: the median of the latched line over the fall,
+    which is what the matcher actually saw, plus the vote spread that made it refuse.
+    A few kB per refusal, written only for falls that passed the kinematic test,
+    because those are the ones anyone will ask about.
+    """
+    try:
+        folder = os.path.join(outDir, "panel_refused")
+        os.makedirs(folder, exist_ok = True)
+        stem = os.path.join(folder, "t%08.1f" % tTop)
+        median = report.get("median")
+        if median is not None:
+            cv2.imwrite(stem + ".png", median)
+        with open(stem + ".txt", "w") as f:
+            f.write("start %.2f s on the capture clock\n" % tTop)
+            f.write("why: %s\n" % report.get("why", "unknown"))
+            f.write("alignment: %s\n" % (report.get("alignment"),))
+            f.write("frames that produced four digits: %s\n" % report.get("frames"))
+            for text, count in sorted(report.get("votes", {}).items(),
+                                      key = lambda kv: -kv[1]):
+                f.write("   %s  %d\n" % (text, count))
+    except Exception as exc:            # diagnostics must never kill a session
+        print("  could not save the refused panel crop: %s" % exc, flush = True)
 
 
 if __name__ == "__main__":
