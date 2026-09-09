@@ -431,3 +431,46 @@ after the fact. Spending 11 ms a frame to keep it is the right trade.
 
 **Worth knowing anyway:** if a future run ever does need the full frame rate, the
 writer is the thing to drop, not `assign()`.
+
+---
+
+## 20. The circularity near-misses are noise, and the sweep proves it
+
+**Problem.** The reject census on a live run showed 17,855 contours failing *only* the
+shape test while sitting at circularity 0.50 against a 0.52 gate, at area p50 42 --
+droplet-sized, and just barely out. That population had been the standing suspect for
+every droplet the operator thought was missed, and lowering the gate to 0.45 was
+proposed, tried and reverted twice because nobody had measured what it cost over a
+whole session.
+
+**Measured.** `bench_0908` -- 56,547 frames, the current apparatus, raw, fifteen falls
+the operator timed by hand -- run three times end to end, with only the constant
+changed:
+
+```
+CIRCULARITY_MIN    contours rejected on shape    traverses    hand falls found / legal
+   0.52                  1,153,865                  260              15 / 15
+   0.48                    997,526                  261              15 / 15
+   0.45                    884,979                  259              15 / 15
+```
+
+Admitting 269,000 more contours produced **no additional fall**, identical durations to
+the hundredth of a second, and one traverse fewer. The near-miss population is noise
+sitting under the gate, not droplets being turned away.
+
+**Chose:** keep 0.52. It is the tighter gate, it does strictly less work, and the
+question is now settled by measurement rather than deferred again.
+
+**Worth stating plainly:** the census counted *contours*, not droplets, and a count
+that large is persuasive in the wrong direction -- 17,855 near-misses sounds like a
+lot of lost droplets and is in fact a lot of lost noise. A rejection census says what
+a gate removes; only a run against known falls says whether that mattered.
+
+**A second baseline, corrected the same night.** `one_droplet_slow` had been failing
+its traverse bar at 43 against 46. Disabling `panelClear` and `staticMask` together
+restored exactly 46, so those two gates account for all three traverses and nothing
+else did. The kinematic-legal count is 16 in every configuration and all five
+reference falls survive in every configuration, so the three that go are traverses no
+droplet could have made. The bar was re-baselined to 43 with that table recorded
+beside it -- the 46 predated both gates and had never been re-measured against the
+code that ships.
