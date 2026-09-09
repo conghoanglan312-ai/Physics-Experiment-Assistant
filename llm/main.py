@@ -2,16 +2,55 @@ from llm.AI_model.gemini import GeminiLLM
 from llm.AI_model.zai import ZaiLLM
 
 from .app.timeoutLLM import TimeoutLLM
+from .app.userQueryLimiter import UserQueryLimiter
+from .AI_model.base import LLMEvent
 from .memory.conversation import ConversationMemory
-from .app.generateSystemPrompt import generateSystemPromptFromUserQuery
+from .util.generateSystemPrompt import generateSystemPromptFromUserQuery
+from .util.generateModelMessage import *
+from uuid import uuid4
 
 memory = ConversationMemory()
 
+
+def validated_query_or_error(user_query):
+    return UserQueryLimiter(user_query).validate()
+
+
+def _session_id(session_id):
+    """Use an isolated session when a caller does not supply one."""
+    return session_id if session_id is not None else str(uuid4())
+
+def getSafeDropletData(sessionID):
+    from cv.api import sample, llm_context
+
+    memory.updateDropletSessionData(sessionID, sample())
+
+    data = memory.getDropletSessionData(sessionID)
+    safe_data = llm_context(data)
+
+    return safe_data
+
 def getResponseFromGemini(userQuery, sessionID = None):
-    system_prompt = generateSystemPromptFromUserQuery(userQuery)
+    valid, error = validated_query_or_error(userQuery)
+    if not valid:
+        yield LLMEvent(type="error", data=error)
+        return
+
+    sessionID = _session_id(sessionID)
+
+    # Check if session is active or not 
+    if (memory.isSessionActive(sessionID)): 
+        yield generateErrorMessage("More than one input detected. Please wait for the current response to finish before sending another query.")
+        return
+    
+    memory.startSession(sessionID)
+
+    safeDropletData = getSafeDropletData(sessionID)
+    system_prompt = generateSystemPromptFromUserQuery(userQuery, safeDropletData)
     model = TimeoutLLM(GeminiLLM())
 
-    previousID = memory.getLastID(sessionID)
+    # Get Previous ID used for stateful conversation
+    previousID = memory.getLastInteractionID(sessionID)
 
     stream = model.stream(
         userQuery=userQuery, 
@@ -26,23 +65,43 @@ def getResponseFromGemini(userQuery, sessionID = None):
             memory.setInteractionID(sessionID, event.data)
         elif event.type == "text":
             chatBotResponse += event.data
+        elif event.type == "done" or event.type == "error":
+            memory.terminateSession(sessionID)
 
         yield event
 
-    memory.add_message(sessionID, "user", userQuery)
-    memory.add_message(sessionID, "assistant", chatBotResponse)
-    print(memory.get_history(sessionID), "\n\n")
+    memory.addUserMessage(sessionID, userQuery)
+    memory.addAssistantMessage(sessionID, chatBotResponse)
 
 
 def getResponseFromZai(userQuery, sessionID = None):
-    system_prompt = generateSystemPromptFromUserQuery(userQuery)
+    valid, error = validated_query_or_error(userQuery)
+    if not valid:
+        yield LLMEvent(type="error", data=error)
+        return
 
-    memory.add_message(sessionID, "system", system_prompt)
+    sessionID = _session_id(sessionID)
+
+    # Check if session is active or not
+    if (memory.isSessionActive(sessionID)): 
+        yield generateErrorMessage("More than one input detected. Please wait for the current response to finish before sending another query.")
+        return
+        
+    memory.startSession(sessionID)
+    
+    safeDropletData = getSafeDropletData(sessionID)
+    system_prompt = generateSystemPromptFromUserQuery(userQuery, safeDropletData)
+
+    # The provider receives the current system prompt separately from
+    # conversation history. Do not persist it in user conversation memory.
+    memory.addUserMessage(sessionID, userQuery)
+
+    # Initialize the model (ZhiPu AI)
     model = TimeoutLLM(ZaiLLM())
 
-    memory.add_message(sessionID, "user", userQuery)
-    history = memory.get_history(sessionID)
-    print(history, '\n\n\n')
+    # Fetch History from memory used for stateful conversation
+    history = memory.getInteractionHistory(sessionID)
+
     stream = model.stream(
             userQuery=userQuery, 
             system_prompt=system_prompt,
@@ -55,11 +114,12 @@ def getResponseFromZai(userQuery, sessionID = None):
             memory.setInteractionID(sessionID, event.data)
         elif event.type == "text":
             chatBotResponse += event.data
-    
+        elif event.type == "done" or event.type == "error":
+            memory.terminateSession(sessionID)
+
         yield event
-    
-    memory.add_message(sessionID, "assistant", chatBotResponse)
-    print(memory.get_history(sessionID), "\n\n")
+
+    memory.addAssistantMessage(sessionID, chatBotResponse)
 
 if __name__ == "__main__":
     queries = [
@@ -71,7 +131,7 @@ if __name__ == "__main__":
     "What physical quantity is measured in the Millikan Oil Drop Experiment?"]
 
     for userQuery in queries:
-        print("User Input: ", userQuery)
+        print("\nUser Input: ", userQuery)
 
         print("Chat Bot Response: ")
         stream = getResponseFromGemini(userQuery)
