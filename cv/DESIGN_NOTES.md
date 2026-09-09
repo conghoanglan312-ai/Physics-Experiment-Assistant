@@ -474,3 +474,17 @@ reference falls survive in every configuration, so the three that go are travers
 droplet could have made. The bar was re-baselined to 43 with that table recorded
 beside it -- the 46 predated both gates and had never been re-measured against the
 code that ships.
+
+For scale, the same fixture on the pre-session pipeline gives **33 traverses and 7
+kinematic-legal**, also keeping 5 of 5. So 43 is not a fall from 46: it is 33 raised to
+46 by this session's area cap, ownership and coast work, then trimmed by three
+deliberate ones.
+
+**Still open.** Kinematic-legal went from 7 to 16 on that fixture. Those extras are
+either other droplets in a real chamber -- the operator only ever timed their target --
+or noise stitched into something that lands in the 16-40 s band. The 2026-09-05
+artifacts already carried seven such extras, so they predate this session and are not a
+new fault, but nothing has confirmed what they are. On `bench_0908` the equivalent six
+untimed legal falls all sit in the gaps *between* the operator's droplets, which is
+where other droplets would be, and position-and-duration binding excludes them from any
+charge. That is reassuring, not conclusive.
