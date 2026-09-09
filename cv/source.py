@@ -23,6 +23,8 @@ failure this project keeps running into.
     src.close()
 """
 
+import glob
+import os
 import sys
 import time
 
@@ -30,6 +32,7 @@ import cv2
 import numpy as np
 
 CAMERA_PREFIXES = ("cam:", "camera:", "dongle:", "uvc:")
+FRAMES_PREFIX = "frames:"
 
 
 class FrameSource(object):
@@ -265,6 +268,76 @@ class LiveSource(FrameSource):
             self._cap = None
 
 
+class FramesSource(FrameSource):
+    """A directory of lossless per-frame PNGs, with the REAL capture timestamps.
+
+    The reason this exists: an H.264 copy of a session cannot stand in for the
+    session.  Re-running detection over a window capture of a known 32 s legal fall
+    found zero traverses (2026-09-04), because the codec destroys isolated spatial
+    detail and a droplet is nothing but that.  Any threshold tuned on such a copy is
+    tuned to the codec.
+
+    `test/tools/raw_capture.py` writes these.  The frames are already ROI-cropped and
+    `times.npy` holds the capture clock, so replaying one reproduces a live run
+    exactly -- including its irregular frame interval, which is the whole point of
+    measuring on timestamps rather than frame counts.
+
+    It reports `isLive = True`: every live-only branch in the pipeline must run, or
+    this tests something the bench never does.  Frames are read from disk on demand,
+    never all at once -- a 20 minute fixture is 6 GB.
+    """
+
+    isLive = True
+
+    def __init__(self, folder):
+        self.folder = folder
+        self.paths = sorted(glob.glob(os.path.join(folder, "f*.png")))
+        if not self.paths:
+            raise IOError("no f*.png frames in %s" % folder)
+        stamps = os.path.join(folder, "times.npy")
+        if not os.path.exists(stamps):
+            raise IOError("%s has frames but no times.npy -- the capture clock is "
+                          "not optional, timing runs on it" % folder)
+        self.times = np.load(stamps)
+        if len(self.times) != len(self.paths):
+            raise IOError("%s: %d frames but %d timestamps"
+                          % (folder, len(self.paths), len(self.times)))
+        first = cv2.imread(self.paths[0], cv2.IMREAD_GRAYSCALE)
+        if first is None:
+            raise IOError("could not read %s" % self.paths[0])
+        self.height, self.width = first.shape[:2]
+        self.frameCount = len(self.paths)
+        span = float(self.times[-1] - self.times[0])
+        self.nominalFps = (len(self.times) / span) if span > 0 else 30.0
+
+    def frames(self, first = 0, last = None):
+        last = self.frameCount if last is None else last
+        for i in range(first, min(last, self.frameCount)):
+            g = cv2.imread(self.paths[i], cv2.IMREAD_GRAYSCALE)
+            if g is None:
+                continue
+            yield cv2.cvtColor(g, cv2.COLOR_GRAY2BGR), float(self.times[i])
+
+    def learnBackground(self, samples = 61, seconds = None, first = 0, last = None):
+        """The capture already wrote one, from frames taken before any droplets.
+
+        Re-deriving it from the fixture would be wrong: these frames CONTAIN the
+        droplets, which is exactly the mistake the live path was built to avoid.
+        """
+        saved = os.path.join(self.folder, "background.png")
+        if os.path.exists(saved):
+            g = cv2.imread(saved, cv2.IMREAD_GRAYSCALE)
+            if g is not None:
+                self.learnFrames = [g]
+                return g
+        raise IOError("%s has no background.png" % self.folder)
+
+    def describe(self):
+        return "FramesSource(%s) %dx%d, %d frames @ %.2f fps measured" % (
+            os.path.basename(self.folder), self.width, self.height,
+            self.frameCount, self.nominalFps)
+
+
 def openSource(spec, **kw):
     """Turn a specification into a FrameSource. Explicit, never guessed.
 
@@ -272,6 +345,7 @@ def openSource(spec, **kw):
         openSource(0)            camera index 0
         openSource("cam:1")      camera index 1  (also camera:, dongle:, uvc:)
         openSource("clip.mp4")   a file
+        openSource("frames:DIR")  a directory of raw PNGs written by raw_capture.py
 
     A bare integer means a camera because there is no other sensible reading of it.
     Everything else must say so, so that a mistyped path cannot silently open a
@@ -282,6 +356,8 @@ def openSource(spec, **kw):
     if isinstance(spec, int):
         return LiveSource(spec, **kw)
     text = str(spec)
+    if text.lower().startswith(FRAMES_PREFIX):
+        return FramesSource(text[len(FRAMES_PREFIX):].strip())
     for prefix in CAMERA_PREFIXES:
         if text.lower().startswith(prefix):
             tail = text[len(prefix):].strip()

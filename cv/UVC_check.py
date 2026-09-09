@@ -33,6 +33,13 @@ try:
 except Exception:
     autoROI = None
 
+# The size the pipeline will actually request, so this probes the same mode it will.
+try:
+    from cv.source import LiveSource
+except Exception:                       # keep the bench tool runnable regardless
+    class LiveSource(object):
+        DEFAULT_SIZE = (1280, 720)
+
 # The Windows console defaults to cp1252 and cannot print the label on the
 # apparatus socket; without this the script dies before doing anything useful.
 try:
@@ -45,10 +52,17 @@ SHOTS = "uvc_check"      # sample frames land here
 
 
 def describe(index, measure = True):
-    cap = cv2.VideoCapture(index)
+    # Open exactly the way the pipeline does -- CAP_DSHOW, and ask for the same size.
+    # This script used to open at the device's native mode, and the answer it gave did
+    # not survive: on 2026-09-07 it named device 1 as the one showing the grid, and at
+    # 1280x720 the grid was on device 0.  A bench tool whose index the pipeline cannot
+    # use is worse than no bench tool, because it is believed.
+    cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
     if not cap.isOpened():
         cap.release()
         return None
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, LiveSource.DEFAULT_SIZE[0])
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, LiveSource.DEFAULT_SIZE[1])
     ok, frame = cap.read()
     if not ok or frame is None:
         cap.release()

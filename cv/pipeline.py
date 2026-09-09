@@ -11,7 +11,8 @@ CLI:
     python -m cv.pipeline <clip>            window, playing a recorded clip
     python -m cv.pipeline live [index]      window, from a camera or capture dongle
     python -m cv.pipeline live [index] --blind
-                                            no window -- for benchmarking against a
+                                            window showing the RAW apparatus picture and
+                                            nothing else -- for benchmarking against a
                                             human, who must not see the overlay
     python -m cv.pipeline survey <clip>     headless, writes falls.csv
     python -m cv.pipeline all [pattern]     every clip in MILLIKAN_FOOTAGE
@@ -38,9 +39,11 @@ except ImportError:                     # greedy fallback, same gates
     HAVE_SCIPY = False
 
 try:
-    from .source import openSource, isCameraSpec
+    from .source import openSource, isCameraSpec, FRAMES_PREFIX
+    from . import charge as chargeMath
 except ImportError:                     # run as a loose script rather than a package
-    from source import openSource, isCameraSpec
+    from source import openSource, isCameraSpec, FRAMES_PREFIX
+    import charge as chargeMath
 
 # No machine-specific defaults.  Point these at your own footage with an argument
 # or an environment variable.  A missing clip raises: quietly returning an empty
@@ -61,6 +64,13 @@ def resolveClip(path):
     if not path:
         raise ValueError("No clip given. Pass a path, or set MILLIKAN_CLIP.")
     if isCameraSpec(path):              # "cam:0" never touches the filesystem
+        return path
+    # "frames:DIR" is a directory of raw per-frame PNGs, not a file.  Still checked:
+    # a mistyped fixture name must fail here rather than three minutes into a run.
+    if str(path).lower().startswith(FRAMES_PREFIX):
+        folder = str(path)[len(FRAMES_PREFIX):].strip()
+        if not os.path.isdir(folder):
+            raise NotADirectoryError(folder)
         return path
     if not os.path.exists(path):
         raise FileNotFoundError(path)
@@ -84,6 +94,18 @@ MIN_FALL_S, MAX_FALL_S = 16.0, 40.0    # fall time over 1.6 mm
 MIN_SPEED, MAX_SPEED = 0.2, 0.5        # grid divisions per second
 TARGET_DROPLETS = 3                    # IV.4: at least 3 droplets...
 TARGET_FALLS_PER_DROPLET = 5           # ...and at least 5 falls each
+
+# How far a fall's duration may sit from its droplet's running mean and still be the
+# same droplet.  A droplet's mass does not change between drops, so neither does its
+# terminal velocity: the five falls of one droplet in one_droplet_slow ran 33.44 to
+# 35.41 s, a standard deviation of 0.92 s on a mean of 34.42 -- 2.7%.  10% is a little
+# under four of those, wide enough that ordinary scatter never splits a droplet.
+#
+# What it CANNOT do is separate two droplets whose fall times happen to be within 10%
+# of each other -- 33 s and 36 s would be merged.  So this proposes a grouping; it does
+# not certify one.  groupFalls reports the margin at every boundary precisely so a
+# marginal split is visible rather than silent.
+DROPLET_TIME_TOL = 0.10
 
 
 def isLegalFall(divisions, seconds):
@@ -369,6 +391,29 @@ BG_WINDOW_S = 300.0        # rolling window length.  None restores the old
                            # complete; their union is larger than either.
 
 
+# When the operator changes the FOCUS, the picture's appearance changes but nothing
+# moves.  The rolling background is a median over the last BG_WINDOW_S seconds, so it
+# then holds a blend of two different-looking scenes and disagrees with every frame
+# everywhere -- detections flood the whole ROI and stay there until the last
+# pre-change frame ages out.  Observed live on 2026-09-07: a small focus nudge left
+# the field covered in false detections for several minutes, and the session reached
+# 68,609 fall ids in ten minutes against 2,362 for a healthy one.
+#
+# Detecting the change directly did not work.  The frame-vs-background disagreement
+# does not separate it from a spray (0.31% while manipulating, 0.39% during a spray,
+# 0.41% quiet), and the reticle cannot help either -- it is drawn onto the video by
+# the apparatus's electronics, so its sharpness and spacing are bit-exact through a
+# focus change.
+#
+# So detect the EFFECT instead, which is unambiguous: a spray's burst decays as the
+# droplets settle -- measured on spray_labelled_0907, peak at 43 s and back to
+# baseline by 68 s -- while a stale background stays elevated for the whole window.
+# A rate still far above this session's own quiet level after STALE_S seconds is
+# therefore not a spray, whatever it is, and the background is worth rebuilding.
+STALE_FACTOR = 4.0         # times the session's quiet detection rate
+STALE_S = 45.0             # sustained for this long: longer than any spray settles
+
+
 class RollingBackground:
     """Median of the frames sampled over the last `windowS` seconds."""
 
@@ -405,6 +450,10 @@ class RollingBackground:
                 if self.every - d >= 1 and not onWholeSecond(self.every - d):
                     self.every -= d; break
         self.recompute = max(1, int(round(RECOMPUTE_S * fps)))
+        # Kept so a resync can sample fast until the window refills, then restore.
+        self.normalEvery = self.every
+        self.fastEvery = max(1, int(round(0.25 * fps)))
+        self.fastUntilFull = False
         self.buf = []
         self.samples = samples
         self.bg = None
@@ -431,6 +480,25 @@ class RollingBackground:
         self.buf.append(grayCrop.copy())
         if len(self.buf) > self.samples:
             del self.buf[0]
+        # A resync samples fast to refill quickly; once full, go back to spanning the
+        # real window.  The fast frames then age out normally and the window widens
+        # back to BG_WINDOW_S on its own.
+        if self.fastUntilFull and len(self.buf) >= self.samples:
+            self.every = self.normalEvery
+            self.fastUntilFull = False
+
+    def resync(self, grayCrop):
+        """Throw the window away and rebuild from now.
+
+        Called when the background has been judged stale.  Waiting for a
+        BG_WINDOW_S window to flush itself takes five minutes; this takes about
+        fifteen seconds, because the buffer refills at `fastEvery` until it is full.
+        """
+        self.buf = [grayCrop.copy()]
+        self.bg = None
+        self.lastBuilt = None
+        self.every = self.fastEvery
+        self.fastUntilFull = True
 
     def get(self, n):
         """Rebuild on ABSOLUTE frame boundaries, never relative to where the run
@@ -570,12 +638,17 @@ def autoROI(fullBackground):
             "rows": rows,
             "spacing": spacing,
             "border": rightBorder,
-            # Interior verticals to mask, in full-frame coords.  Only trusted once the
-            # ROI was widened: the `w - 5 * spacing` heuristic in buildSettings puts a
-            # line at the middle of a NOMINAL 10-division box, which is exactly right
-            # there and meaningless once the width changes.  Keeping it wherever it
-            # already worked leaves every Aug_25 result untouched.
-            "cols": vLines if widened else None}
+            # Interior verticals to mask, in full-frame coords.  These used to be
+            # returned only when the ROI had been widened, to leave the Aug_25 results
+            # untouched -- but that left the production path masking a line that does
+            # not exist.  Measured on one_droplet_slow (2026-09-05): the real verticals
+            # are at x = 18, 392 and 809, while buildSettings' fallback of
+            # `w - 5 * spacing` puts its single mask at x = 603, which is empty space.
+            # So all three lines went unprotected and 21.9% of all detections landed
+            # within 6 px of one, strung down the verticals exactly as the operator
+            # described.  Detected lines are now used whenever there are at least two;
+            # the heuristic survives only for footage where detection finds nothing.
+            "cols": vLines if len(vLines) >= 2 else None}
 
 
 def drawROI(fullBackground, roi, name):
@@ -622,6 +695,36 @@ def drawROI(fullBackground, roi, name):
 # reaches 100-191 against a floor near 13, survived.
 NOISE_FLOOR_MAD = 6.0
 
+# A droplet cannot pass a 0.80 circularity gate at any size it actually has.
+# `contourArea` measures the polygon through pixel CENTRES while `arcLength`
+# measures its perimeter, so 4*pi*A/P^2 is biased low on small blobs: a perfect
+# synthetic disc scores 0.785 at r=2 px, 0.674 at r=3, 0.763 at r=5, and does not
+# reach 0.80 until r=8 -- larger than any droplet in this apparatus.  So the old
+# 0.80 admitted a droplet only when noise happened to inflate its area or shorten
+# its perimeter, which is a coin flip per frame.  Measured on 706 raw dongle frames
+# (2026-09-04): at 0.80 a droplet was present in 77% of frames and never for more
+# than 62 consecutive (2.6 s); no track survives PROBATION_S = 0.2 s on that, so
+# falls never became confirmed tracks and were never timed.  Swept: continuity
+# reaches 100% and stays there at 0.52 and below, so 0.50 is the knee with margin.
+# Cost is 3.7 -> 14.2 detections a frame, still far under the 123/frame that the
+# noise floor exists to stop.
+#
+# Sixth constant to be calibrated on one capture path and silently mis-fit another
+# (see NEXT_SESSION.md rule 6). H.264 blurs blobs rounder and larger, which is why
+# the recorded clips never showed this.
+#
+# HELD AT 0.80 ANYWAY, 2026-09-04.  Loosening it does fix detection -- continuity
+# went to 100% and the overlay stayed on droplets that used to blink out -- but it
+# raises detections from 3.7 to 14.2 a frame, and the extra blobs spawn DUPLICATE
+# tracks that steal the blob from the real one.  That turns a missing measurement
+# into a WRONG one: the live run at 0.50 reported two traverses of 4.6 s where the
+# operator had dropped a single droplet once, and clip 8 came back with 34.10,
+# 34.17 and 34.30 where one fall exists.  A benchmark can survive a missed fall; it
+# cannot survive a confident wrong number.  The gate is not the real fix -- the
+# duplicate-track suppression is -- so this stays at 0.80 until that is built.
+# Everything measured above still stands and is why 0.80 is a stopgap, not correct.
+CIRCULARITY_MIN = 0.52
+
 
 def detectDroplets(gray, background, s, allAreas = None):
     diff = cv2.absdiff(gray, background)
@@ -647,7 +750,7 @@ def detectDroplets(gray, background, s, allAreas = None):
         if perimeter == 0 or cArea < s["areaMin"] or cArea > s["areaMax"]:
             continue
         circularity = 4 * np.pi * cArea / (perimeter ** 2)
-        if circularity < 0.8:
+        if circularity < CIRCULARITY_MIN:
             continue
         M = cv2.moments(cnt)
         cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
@@ -672,6 +775,7 @@ def buildSettings(roi, spacing):
             # noise through on small ones.
             "areaFloor": 20 * mag ** 2,
             "gridClear": 4 * mag, "edgeClear": 20 * mag,
+            "dupPx": DUPLICATE_PX * mag,
             "maxStep": 12 * mag,        # px between consecutive frames at 30 fps
             # The same limit as a SPEED, which is what it was always trying to say.
             # A gate in px-per-frame silently means something different on a camera
@@ -720,12 +824,165 @@ def previewAll(folder = None, outDir = None):
 # are recovered.  Runaway predictions are held back by the velocity clamp in
 # Track.update and by global assignment, not by these.
 MAX_COAST_S = 3.0          # how long a CONFIRMED track may be predicted through a blackout
+# How close a new detection may be to a track that already exists before we refuse
+# to spawn on it.  Measured on clip 8 (2026-09-05) with the gate loosened to 0.52:
+# 868 of 2814 spawned tracks -- 31% -- were born within 12 px of a live track, which
+# is where the duplicate falls came from (34.10 / 34.17 / 34.30 for one droplet).
+# Two genuinely different CONFIRMED droplets are that close only 0.596% of the time:
+# their separation is 10.3 px at p0.5 and 18.1 px at p1, so 12 px sits between the
+# two and costs almost nothing.  Expressed pre-magnification: 14 * mag = 11.9 px at
+# spacing 61.
+DUPLICATE_PX = 14
+
+# TRIED 2026-09-05 AND REJECTED -- kept because the finding behind it is real and
+# someone will otherwise propose it again.
+#
+# The idea: a new track may only start on a detection that ALSO appeared in the
+# previous frame.
+# The apparatus emits bursts of single-frame speckle whenever the operator has hands
+# on it -- zoom, focus, voltage -- and the tracker was chaining those unrelated one-
+# frame blobs into tracks that carried physically plausible velocities.  Stepping
+# through three consecutive frames at 4:18 of one_droplet_slow shows it plainly: every
+# circle is somewhere new, nothing persists, and the HUD still read `tracked 33`.
+#
+# Speckle is uncorrelated between frames; a droplet is not.  Measured over that whole
+# session: requiring a neighbour within 6 px in the previous frame removes 87% of the
+# detections during the noisy minutes (54.1/frame -> 7.1 at minute 4, 48.3 -> 5.6 at
+# minute 19) while a real droplet corroborates about 70% of the time -- and 70% is
+# plenty, because this gates SPAWNING ONLY.  An established track keeps being fed by
+# assign() whether or not this frame's blob was corroborated, so a fall in progress
+# is untouched.  7 * mag = 6.0 px at spacing 61, the radius the measurement used.
+#
+# It does not work.  On one_droplet_slow at gate 0.52 it took the result from 5 of the
+# operator's 5 timed falls down to 3, while saving only one spurious traverse.  The
+# 70% corroboration rate is an average over ALL detections, and the moments that
+# actually matter are the spawn instants -- a droplet that fails to corroborate in the
+# one frame where its track would have started never gets a track at all, and the
+# whole fall is lost.  Averages do not gate; instants do.
+#
+# The underlying observation stands and still needs a fix: the apparatus emits bursts
+# of single-frame speckle whenever the operator has hands on it, and those get chained
+# into tracks carrying plausible velocities.  Whatever solves it must not depend on
+# any single frame's detection surviving.
+CORROBORATE_PX = 7              # unused; see above
+
+# --- finding the sprays -----------------------------------------------------------
+#
+# The operator's rule, 2026-09-05, and it is what makes this implementable at all:
+# once a suitable droplet has been chosen there is NO spraying between its falls.  So
+# a spray is never noise inside a droplet's sequence -- it is the boundary between one
+# droplet and the next.  Fewer than five falls before it means the droplet was
+# abandoned; five means they moved on deliberately.
+#
+# That turns spray detection into something with a definition instead of a threshold
+# pulled out of the air: a sustained jump in detections per frame, far above what this
+# session normally runs at, lasting longer than a flicker.
+#
+# `factor` is relative to a trailing median rather than absolute, because the quiet
+# rate is a property of the apparatus and the session -- 5.8 detections a frame on
+# clip 8, 4 on one_droplet_slow, 123 on the noisy 3 Sep unit.  An absolute number
+# calibrated on one of those is meaningless on the others; that mistake has been made
+# five times in this project already.
+# The quiet level is a LOW PERCENTILE of the whole session, not a trailing median.
+# A trailing window cannot see a spray in the first seconds of a run -- its history is
+# the burst itself -- and that is not hypothetical: on the 2026-09-07 labelled capture
+# every trailing-window setting found the spray at 43 s and missed the one at 1 s.
+# spraySpans runs once at the end of a run with the entire series in hand, so it can
+# use a global estimate, and a low percentile is the right one because sprays and
+# their settling tails are always the minority of a session.
+SPRAY_QUIET_PCT = 25       # percentile of detections/frame taken as "quiet"
+SPRAY_MIN_S = 1.5          # shorter than this is a flicker, not a spray
+SPRAY_GAP_S = 3.0          # two bursts closer than this are one spray
+# Measured on test/fixtures/spray_labelled_0907: two sprays, at 1 s and 43 s, with
+# nothing else done to the apparatus, on a unit whose empty-chamber noise is 0.74
+# detections a frame.  Quiet ran 2-4/frame (p25 = 3), the sprays peaked at 19 and 41.
+# factor 3 puts the line at 9, which catches both and nothing between them.
+SPRAY_FACTOR = 3.0
+SPRAY_MIN_ABS = 6.0        # floor, so a very quiet session cannot make 3x trivial
+
+
+def spraySpans(times, counts, factor = None, minAbs = None, minSeconds = None,
+               gapSeconds = None, quietPct = None):
+    """Spans of (start, end) seconds where the detection rate says somebody sprayed.
+
+    Pure function over a recorded series, so it can be swept offline against a capture
+    whose spray moments the operator wrote down, and so the same code decides it for a
+    file and for a live session.
+
+    A frame counts as spray-like when its detection count exceeds both an absolute
+    floor and `factor` times this session's quiet level, taken as its `quietPct`
+    percentile.  Relative rather than absolute because the quiet rate is a property of
+    the apparatus: 5.8 detections a frame on clip 8, 4 on one_droplet_slow, 0.74 on an
+    empty chamber of the 7 Sep unit, 123 on the bad 3 Sep one.  A number calibrated on
+    any one of those means nothing on the others.
+
+    Runs shorter than `minSeconds` are discarded, and runs separated by less than
+    `gapSeconds` are merged, because a spray is several puffs.
+
+    THIS FINDS BURSTS.  IT CANNOT SAY WHAT CAUSED ONE.  Do not use it to mark droplet
+    boundaries.  The operator re-focuses mid-fall when the droplet being timed drifts,
+    so a burst is NOT evidence that no droplet is being measured -- treating one as a
+    boundary would cut a fall in half.
+
+    Measured on zoom_labelled_0907 (2026-09-07), which contains a spray, field changes
+    and several zoom touches in one series.  Five signals were tried and every one of
+    them puts a spray and a hand on the apparatus in the same place:
+
+        detections/frame     spray 9.1     manipulating 15.1 and 10.0
+        burst shape          neither shows the settling decay a spray was expected to
+        near a grid line     spray 40%     manipulating 40% and 47%
+        vertical spread      spray 112 px  manipulating 151 and 147 -- spray LOWEST
+        new confirmed tracks spray 16.6/s  manipulating 19.6/s and 5.3/s
+
+    A sixth, the grid itself, is also dead: the reticle is drawn onto the video by the
+    apparatus's electronics, so its spacing and offset are bit-exact through a zoom
+    change (61.0 and 54.0, sd 0.00).  Issue #7 wanted this to derive `binding`
+    automatically. It cannot, on this evidence. `binding` comes from the operator's
+    notes, checked against groupFalls().
+    """
+    factor = SPRAY_FACTOR if factor is None else factor
+    minAbs = SPRAY_MIN_ABS if minAbs is None else minAbs
+    minSeconds = SPRAY_MIN_S if minSeconds is None else minSeconds
+    gapSeconds = SPRAY_GAP_S if gapSeconds is None else gapSeconds
+    quietPct = SPRAY_QUIET_PCT if quietPct is None else quietPct
+    times, counts = np.asarray(times, float), np.asarray(counts, float)
+    if len(times) < 2 or len(times) != len(counts):
+        return []
+    quiet = float(np.percentile(counts, quietPct))
+    hot = counts > max(minAbs, factor * quiet)
+    spans, start = [], None
+    for i, h in enumerate(hot):
+        if h and start is None:
+            start = i
+        elif not h and start is not None:
+            spans.append((times[start], times[i - 1]))
+            start = None
+    if start is not None:
+        spans.append((times[start], times[-1]))
+    merged = []
+    for a, b in spans:
+        if merged and a - merged[-1][1] <= gapSeconds:
+            merged[-1] = (merged[-1][0], b)
+        else:
+            merged.append((a, b))
+    return [(round(a, 2), round(b, 2)) for a, b in merged
+            if b - a >= minSeconds]
+
 CONFIRM_POINTS = 6         # seen this many times before a track is believed;
                            # 8 loses the 17.83 s legal fall, 6 keeps both and
                            # cuts peak live tracks from 604 to 52
 PROBATION_S = 0.2          # an unconfirmed track dies this fast; kills one-frame strays
 AREA_TOLERANCE = 0.7       # a re-found blob may differ this much in area
 SCREEN_MIN, SCREEN_MAX = 0.15, 0.60     # provisional band, deliberately wider than legal
+
+# How long a track must have survived before the overlay draws it.  DISPLAY ONLY --
+# detection, tracking and legality are untouched, and the annotated recording keeps
+# everything.  This exists because the apparatus emits bursts of one-frame speckle
+# that no measurement can separate from a droplet (six signals tried, all failed), so
+# the screen fills with markers on things that are not there.  A real droplet lives
+# for the whole traverse -- 16 s at the very least -- so a second and a half costs
+# nothing and removes almost all of it.
+DRAW_MIN_AGE_S = 1.5
 
 # --- re-acquiring a droplet after the track dies ----------------------------
 #
@@ -957,7 +1214,7 @@ def fallDrift(t, spacing):
 
 def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health = None,
              fromFrame = 0, toFrame = None, bgWindowS = BG_WINDOW_S,
-             bgFromRange = False, videoFrom = None, videoTo = None):
+             bgFromRange = False, videoFrom = None, videoTo = None, blind = False):
     """bgWindowS = None keeps the whole-clip background, i.e. every result produced
     before 2026-08-28.  A number switches to a rolling window of that many seconds."""
     path = resolveClip(path)
@@ -1006,8 +1263,16 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     if saveVideo:
         writer = cv2.VideoWriter(artefact(outDir, path, "annotated_multi.mp4"),
                                  cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
+    # The apparatus has ONE video out and it now feeds the dongle, so the lab monitor
+    # is dark and this window is the only picture the operator has.  Make it resizable
+    # for a blind run: they are watching a droplet cross a line on it.
     if show:
-        cv2.namedWindow("Droplets")
+        cv2.namedWindow("Droplets",
+                        cv2.WINDOW_NORMAL if blind else cv2.WINDOW_AUTOSIZE)
+    # In a blind session this line IS the answer -- elapsed seconds and LEGAL/rejected,
+    # printed the instant the fall completes.  A terminal in the corner of the operator's
+    # eye is not a blind benchmark.  Swallow it; falls.csv still records everything.
+    sayFall = (lambda *a, **k: None) if blind else print
 
     roller = None
     if bgWindowS:
@@ -1031,9 +1296,31 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
 
     live, morgue, falls, n = [], [], [], fromFrame
     detections = 0
+    detSeries = []                  # (t, count) per frame, for spraySpans
+    detRates = []                   # detections/frame, for the quiet level
+    quietLevel = None               # frozen once, from the first clean stretch
+    staleSince = None               # when the rate first went and stayed high
+    resyncCooldown = 0.0            # no second rebuild while the first is settling
+    resyncs = 0
     # A live run cannot seek back to the panel once a fall has finished, so keep the
     # readout crops as they go past.  Only the last MAX_FALL_S of them can ever matter.
     panel = collections.deque()
+    # ...and crops of the LATCHED line, which keeps showing the balance voltage
+    # after the field is cut.  Read once at the end of a fall, never during it:
+    # nothing about the measurement depends on this number.
+    latched = collections.deque()
+    # The box can fall outside the frame -- a fixture recorded as an ROI crop has no
+    # panel in it at all, and the box then has zero width.  Crop it against the frame
+    # and disable the read rather than letting cvtColor raise on an empty image,
+    # which took down a whole session's tracking the first time it happened.
+    latchBox = latchedBox(roi)
+    frameH, frameW = src.height, src.width
+    latchBox = (max(0, min(latchBox[0], frameW)), max(0, min(latchBox[1], frameH)),
+                max(0, min(latchBox[2], frameW)), max(0, min(latchBox[3], frameH)))
+    if latchBox[2] - latchBox[0] < 20 or latchBox[3] - latchBox[1] < 10:
+        print("  no balance-voltage panel in frame; that column stays empty",
+              flush = True)
+        latchBox = None
     # A file's window is full before the first frame, so it is ready immediately and
     # nothing about the file path changes -- including when prime() came up a sample
     # short.  A live window starts empty, and the median of three frames is not a
@@ -1070,10 +1357,66 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
             if src.isLive and n % panelEvery == 0:
                 panel.append((now, cv2.cvtColor(frame[box[1]:box[3], box[0]:box[2]],
                                                 cv2.COLOR_BGR2GRAY)))
+                if latchBox is not None:
+                    latched.append((now, cv2.cvtColor(
+                        frame[latchBox[1]:latchBox[3], latchBox[0]:latchBox[2]],
+                        cv2.COLOR_BGR2GRAY)))
                 while panel and now - panel[0][0] > MAX_FALL_S + 5.0:
                     panel.popleft()
+                while latched and now - latched[0][0] > MAX_FALL_S + 5.0:
+                    latched.popleft()
             centres, _, _ = detectDroplets(gray, background, s)
             detections += len(centres)
+            detSeries.append((now, len(centres)))
+
+            # Is the background stale?  Compared against this session's own quiet
+            # level, never an absolute number: the quiet rate is a property of the
+            # apparatus and has ranged from 0.74 to 123 detections a frame.
+            #
+            # The reference comes from the session's FIRST clean stretch and is then
+            # frozen.  A rolling window does not work here and the failure is not
+            # subtle: on 2026-09-07 the reference was recomputed after each resync,
+            # refilled during the still-cluttered period that followed, and the
+            # threshold rose to match the clutter.  The detector fired once at 92 s
+            # and then never again while ids climbed to 50,627 -- it had calibrated
+            # itself blind.  What counts as quiet cannot be learned from a stretch
+            # that is not quiet.
+            # The estimate only ever goes DOWN.  Taking it once from the opening
+            # stretch assumes that stretch is quiet, and it usually is not -- the
+            # operator sprays as soon as the background learn ends, and on
+            # zoom_labelled_0907 that put "quiet" at 15.00 a frame when the session's
+            # real floor is 4.  A running minimum cannot be talked upwards by
+            # clutter, so the worst a busy start costs is a late first reading.
+            detRates.append(len(centres))
+            if len(detRates) >= 600:
+                recent = float(np.percentile(detRates, 25))
+                if quietLevel is None or recent < quietLevel:
+                    quietLevel = recent
+                    print("  quiet detection rate: %.2f a frame" % quietLevel,
+                          flush = True)
+                del detRates[:300]
+            if roller is not None and quietLevel is not None and now >= resyncCooldown:
+                if len(centres) > max(3.0, STALE_FACTOR * quietLevel):
+                    if staleSince is None:
+                        staleSince = now
+                    elif now - staleSince >= STALE_S:
+                        # Keep rollerReady True on purpose.  Clearing it would send
+                        # the loop back to the background it was using before, which
+                        # is the stale one this resync exists to discard.  A median
+                        # over a handful of post-change frames is worse than a full
+                        # window and far better than a poisoned one.
+                        roller.resync(gray)
+                        resyncs += 1
+                        staleSince = None
+                        # Long enough for the window to refill and settle, so a
+                        # rebuild is not judged while it is still happening.
+                        resyncCooldown = now + STALE_S
+                        print("  background rebuilt at %.0f s -- detections stayed "
+                              "%.0fx above %.2f/frame for %.0f s, which no spray does"
+                              % (now - (firstT or 0), STALE_FACTOR, quietLevel,
+                                 STALE_S), flush = True)
+                else:
+                    staleSince = None
 
             pairs = assign(live, centres, maxStep, s["areaFloor"], now, s["reidX"])
             for i, t in enumerate(live):
@@ -1100,8 +1443,21 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                 [cell for ct, cell in panel if t.tTop <= ct <= t.tBottom]) \
                                 if src.isLive else fieldWasOff(path, box, t.fTop, t.fBottom)
                             t.legal = bool(t.fieldOff)
+                        # The balance voltage, majority-voted off the latched panel
+                        # line over the whole fall.  RECORDED, NEVER RELIED ON:
+                        # legality is already decided above and nothing below reads
+                        # this.  None when it could not be read.
+                        # Aligned from the latched crops THEMSELVES, not from the V:
+                        # line.  The latched value is constant for the whole fall, so
+                        # its median is sharp; the V: line changes and its median is
+                        # smeared.  Aligning off V: read 609 V and 749 V on a fixture
+                        # where neither is a possible balance voltage.
+                        t.balanceVoltage = readLatchedVolts(
+                            [cell for ct, cell in latched
+                             if t.tTop <= ct <= t.tBottom]) \
+                            if src.isLive else None
                         falls.append(finished)
-                        print("  frame %6d  id %-5d  %6.2f s  %6.3f grid/s  %s"
+                        sayFall("  frame %6d  id %-5d  %6.2f s  %6.3f grid/s  %s"
                               % (n, t.id, t.seconds, FALL_DIVISIONS / t.seconds,
                                  # fieldOff is TRI-STATE and this line used to flatten it:
                                  # anything kinematically legal printed as "field ON",
@@ -1138,12 +1494,25 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
             # So do not spawn where a confirmed live track is already predicting.
             coasting = [(t.predict(now), t) for t in live
                         if t.miss > 0 and len(t.points) >= CONFIRM_POINTS]
+            # ...and the same argument applies to a track that IS being fed this frame.
+            # The guard above only covered coasters, which was enough while detections
+            # were scarce.  Loosen the circularity gate and they triple, and a noise
+            # blob landing beside a healthy track spawns a twin that then splits the
+            # droplet's blobs with it -- both survive, both complete, and one droplet
+            # is reported as two or three falls.  So refuse to spawn anywhere a live
+            # track already is or is about to be, confirmed or not.
+            shadow = [(t.pos, t.predict(now)) for t in live]
+            dup2 = s["dupPx"] ** 2
             for j, c in enumerate(centres):
                 if j in claimed:
                     continue
                 if any((c[0] - aim[0]) ** 2 + (c[1] - aim[1]) ** 2 <= maxStep ** 2
                        for aim, _t in coasting):
                     continue                     # belongs to a coaster; do not duplicate
+                if any((c[0] - p[0]) ** 2 + (c[1] - p[1]) ** 2 <= dup2
+                       or (c[0] - a[0]) ** 2 + (c[1] - a[1]) ** 2 <= dup2
+                       for p, a in shadow):
+                    continue                     # a live track is already on this
                 old = reacquire(morgue, c, now, s)
                 if old is None:
                     live.append(Track(c, now))
@@ -1161,6 +1530,14 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 for t in live:
                     if t.miss > 0:
                         continue                     # never draw a coasting ghost
+                    # Speckle lives for a frame or two; a droplet being measured lives
+                    # for the whole traverse.  Anything younger than DRAW_MIN_AGE_S is
+                    # not worth the operator's attention and is not drawn.  A track
+                    # that has already crossed `0` is always drawn, however young --
+                    # that is the one being timed.
+                    age = now - t.points[0][0] if t.points else 0.0
+                    if age < DRAW_MIN_AGE_S and t.tTop is None:
+                        continue
                     p = (int(round(t.pos[0])), int(round(t.pos[1])))
                     if len(t.points) < CONFIRM_POINTS:
                         cv2.circle(marked, p, 2, (120, 120, 120), -1)    # unconfirmed: a dot
@@ -1209,16 +1586,22 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 # operator balances against, and left the clock in the middle of the
                 # window instead of its corner.  The recording stays ROI-sized: that is
                 # the measured region and the shape every artefact so far has.
-                plain = marked.copy() if show else None
+                plain = marked.copy() if (show and not blind) else None
                 drawHud(marked)
                 inWindow = (videoFrom is None or videoFrom <= n) and (videoTo is None or n <= videoTo)
                 if writer is not None and inWindow:
                     writer.write(marked)      # track over a wide span, record a narrow one
                 if show:
-                    display = frame.copy()
-                    display[Y:Y + H, X:X + W] = plain
-                    cv2.rectangle(display, (X, Y), (X + W, Y + H), (0, 160, 0), 1)
-                    drawHud(display)
+                    if blind:
+                        # Exactly what the lab monitor would have shown.  The apparatus
+                        # burns the grid and the V:/t: panel into the signal itself, so
+                        # the untouched frame IS that picture.  Nothing of ours on it.
+                        display = frame
+                    else:
+                        display = frame.copy()
+                        display[Y:Y + H, X:X + W] = plain
+                        cv2.rectangle(display, (X, Y), (X + W, Y + H), (0, 160, 0), 1)
+                        drawHud(display)
                     cv2.imshow("Droplets", display)
                     if src.isLive:
                         delay = 1           # a camera sets its own pace; never wait on it
@@ -1265,7 +1648,10 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                        "fps": round(measuredFps, 2) if measuredFps else fps,
                        "nominalFps": fps,
                        "droppedFrames": src.dropped,
-                       "framesRead": n})
+                       "framesRead": n,
+                       "backgroundResyncs": resyncs,
+                       "spraySpans": spraySpans([t for t, _c in detSeries],
+                                                [c for _t, c in detSeries])})
     for f in falls:
         f.fallDrift, f.fallDirection = fallDrift(f, spacing)
     return falls
@@ -1296,6 +1682,7 @@ def report(falls, outDir = None, path = None):
                    "reacquired": getattr(f, "reacquired", 0),
                    "kinematicLegal": getattr(f, "kinematicLegal", f.legal),
                    "fieldOff": getattr(f, "fieldOff", None),
+                   "balanceVoltageV": getattr(f, "balanceVoltage", None),
                    "legal": f.legal}
                   for f in falls]).to_csv(csvPath, index = False)
     print("\nWrote", csvPath)
@@ -1380,7 +1767,41 @@ def survey(videoPath = VIDEO, health = None, show = False, saveVideo = False,
     return [fallRecord(f) for f in falls]
 
 
-def analyze(videoPath = VIDEO, binding = None, show = False, saveVideo = False):
+def groupFalls(rows):
+    """Propose which falls belong to which droplet, from the falls alone.
+
+    IV.4 re-drops ONE droplet five times before moving on, so the falls of a droplet
+    are consecutive in time and share a duration -- same mass, same terminal velocity.
+    A new droplet means a new mass, so a step in duration.  Walk the falls in order and
+    start a new droplet when one lands further than DROPLET_TIME_TOL from the running
+    mean of the droplet being built.
+
+    `rows` are survey() rows or falls.csv rows: dicts with `id`, `startTime`,
+    `seconds`.  Returns (groups, margins), where groups is a list of lists of rows and
+    margins is the relative duration step at each boundary -- 0.31 means the first fall
+    of that droplet was 31% away from the previous droplet's mean, so the split is
+    obvious; 0.12 means it barely cleared the tolerance and deserves a look.
+
+    This exists because the alternative was transcribing ids off paper, and a
+    transcription slip silently costs a droplet.  It is a PROPOSAL to check against the
+    operator's notes, not a replacement for them: two droplets within 10% of each
+    other's fall time will be merged and nothing here can tell.
+    """
+    ordered = sorted(rows, key = lambda r: r["startTime"])
+    groups, margins = [], []
+    for r in ordered:
+        if groups:
+            mean = sum(g["seconds"] for g in groups[-1]) / len(groups[-1])
+            if abs(r["seconds"] - mean) <= DROPLET_TIME_TOL * mean:
+                groups[-1].append(r)
+                continue
+            margins.append(abs(r["seconds"] - mean) / mean)
+        groups.append([r])
+    return groups, margins
+
+
+def analyze(videoPath = VIDEO, binding = None, voltages = None,
+            show = False, saveVideo = False):
     """One measurement session: health, droplets, and each droplet's falls.
 
     `binding` groups fall ids into droplets, e.g. [[51143, 51890], [60011]].
@@ -1389,6 +1810,11 @@ def analyze(videoPath = VIDEO, binding = None, show = False, saveVideo = False):
     droplet yields several ids.  Only the operator knows.  Guessing it would file
     two droplets as one and the resulting charge would look perfectly normal.
     With no binding, `droplets` comes back empty and you want survey().
+
+    `voltages` is one balance voltage per droplet, in the same order as `binding`.
+    Given it, the charge maths runs and `charges.csv` is written beside `falls.csv`.
+    q, n and e do NOT enter the returned dict -- they reach the student through that
+    file and nowhere else.  See the seal in cv/charge.py.
     """
     health = {"roiOk": False}
     rows = survey(videoPath, health = health, show = show, saveVideo = saveVideo)
@@ -1413,6 +1839,28 @@ def analyze(videoPath = VIDEO, binding = None, show = False, saveVideo = False):
                          "fallCount": len(falls),
                          "falls": falls})
 
+    # The physics, on disk only.  A CSV is layer-2 output; the returned dict is not.
+    if voltages is not None and droplets:
+        chargeRows, perDroplet, overall = chargeMath.table(droplets, voltages)
+        outDir = outDirFor(videoPath)
+        os.makedirs(outDir, exist_ok = True)
+        csvPath = artefact(outDir, videoPath, "charges.csv")
+        pd.DataFrame([{"droplet": r["label"], "fallId": r["fallId"],
+                       "seconds": r["seconds"], "balanceVoltageV": r["balanceVoltage"],
+                       "radiusM": r["radiusM"], "chargeC": r["chargeC"],
+                       "electrons": r["electrons"], "elementaryC": r["elementaryC"]}
+                      for r in chargeRows]).to_csv(csvPath, index = False)
+        print()
+        print("Wrote", csvPath)
+        for d in perDroplet:
+            print("  %-12s U_n %5.0f V  %d falls  mean e %.4e C  sd %.1f%%  error %+.2f%%"
+                  % (d["label"], d["balanceVoltage"], d["falls"],
+                     d["meanElementaryC"], d["relativeSdPercent"], d["errorPercent"]))
+        if overall:
+            print("  %-12s %11s  %d falls  mean e %.4e C  sd %.1f%%  error %+.2f%%"
+                  % ("ALL", "", overall["falls"], overall["meanElementaryC"],
+                     overall["relativeSdPercent"], overall["errorPercent"]))
+
     return {"contractVersion": 2,
             "roiOk": health.get("roiOk", False),
             "gridSpacingPx": health.get("gridSpacingPx"),
@@ -1431,19 +1879,25 @@ def analyze(videoPath = VIDEO, binding = None, show = False, saveVideo = False):
 
 def main(argv):
     if len(argv) > 1 and argv[1] == "live":
-        # --blind runs with no window.  For a benchmark against a human with a
-        # stopwatch that is not a convenience: the overlay prints elapsed seconds,
-        # speed in grid/s and colours the verdict green or red, so an operator who
-        # can see it is copying the answer rather than taking an independent one.
-        # The apparatus has its own monitor, which is what the manual method uses.
+        # --blind shows the raw frame and nothing else: no reticle lines, no track
+        # circles, no elapsed-seconds label, no green/red verdict, and no per-fall line
+        # in the terminal.  Against a human with a stopwatch that is not a convenience --
+        # an operator who can see the overlay is copying the answer rather than taking an
+        # independent one.
+        #
+        # It cannot just hide the window.  The apparatus has ONE video out; it now feeds
+        # the dongle, so the lab monitor is dark and this window is the operator's only
+        # picture.  Blind means unannotated, not absent.
         blind = "--blind" in argv[1:]
         rest = [a for a in argv[2:] if not a.startswith("-")]
         spec = "cam:" + (rest[0] if rest else "0")
         outDir = outDirFor(spec)
         print("Live session -> %s" % outDir)
-        print("Stop with %s" % ("Ctrl+C  (no window in --blind mode)" if blind
-                                else "q in the window"))
-        report(trackAll(spec, show = not blind, saveVideo = True, outDir = outDir),
+        print("Stop with q in the window, or Ctrl+C")
+        if blind:
+            print("BLIND: the window is the raw apparatus picture -- maximise it.")
+        report(trackAll(spec, show = True, blind = blind, saveVideo = True,
+                        outDir = outDir),
                outDir, spec)
         return
     if len(argv) > 1 and argv[1] == "preview":
@@ -1461,6 +1915,303 @@ def main(argv):
     path = argv[1] if len(argv) > 1 else VIDEO
     outDir = argv[2] if len(argv) > 2 else outDirFor(path)
     report(trackAll(path, outDir = outDir), outDir, path)
+
+
+# --------------------------------------------------------------------------------
+#  Reading the balance voltage off the panel
+#
+#  When the field is cut, `V:` drops to +0000V but a THIRD line keeps showing the
+#  voltage that was balancing the droplet.  That is the right place to read the
+#  balance voltage from, and better than `V:` in three ways: it persists for the whole
+#  fall, it is a different region so it cannot disturb the field-off check which reads
+#  `V:`, and it is latched rather than live, so it does not jitter by a volt the way
+#  the live reading does.  The operator pointed this out on 2026-09-07.
+#
+#  Nothing here is load-bearing.  Detection, tracking and legality never read these
+#  numbers; a failure returns None and the operator's notes remain the record.
+# --------------------------------------------------------------------------------
+
+DIGIT_SIZE = (24, 22)      # canonical (rows, cols) every glyph is normalised into
+_DIGITS = None
+
+
+def latchedBox(roi):
+    """The panel cell holding the latched balance voltage, one band below V:/t:."""
+    return (roi["x"] + roi["w"], roi["rows"][1], roi["border"], roi["rows"][2])
+
+
+def _digitTemplates():
+    """Templates for the apparatus's panel font, built from a labelled sweep.
+
+    test/fixtures/voltage_sweep_0907, held at 0123 / 0145 / 0167 / 0189, which between
+    them contain every digit.  Fixed font in a fixed place, so this is template
+    matching -- no learning, nothing to tune.
+    """
+    global _DIGITS
+    if _DIGITS is None:
+        try:
+            z = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "panel_digits.npz"))
+            _DIGITS = {k[1:]: z[k].astype(np.float32) for k in z.files}
+        except Exception:
+            _DIGITS = {}
+    return _DIGITS
+
+
+def _unit(a):
+    c = np.asarray(a, np.float32) - float(np.mean(a))
+    k = float(np.linalg.norm(c))
+    return c / k if k > 1e-6 else c
+
+
+def _canonical(tight):
+    """Scale a glyph to DIGIT_SIZE by HEIGHT, keeping aspect, centred.
+
+    Never stretched to fill: width is one of the strongest cues this font has -- a `1`
+    is a third the width of an `8` -- and normalising it away made every `1` read as a
+    `7`.  The templates are cut the same way, so matching compares shape, not framing.
+    """
+    h, w = tight.shape[:2]
+    scale = float(DIGIT_SIZE[0]) / max(1, h)
+    nw = max(1, min(DIGIT_SIZE[1], int(round(w * scale))))
+    small = cv2.resize(np.asarray(tight, np.float32), (nw, DIGIT_SIZE[0]))
+    canvas = np.full(DIGIT_SIZE, float(small.min()), np.float32)
+    a = (DIGIT_SIZE[1] - nw) // 2
+    canvas[:, a:a + nw] = small
+    return canvas
+
+
+def _glyphBand(line):
+    """Rows the glyphs occupy, excluding the panel's own horizontal rules.
+
+    The latched line's crop spans a whole grid band, so it contains the rules above
+    and below the text.  Those are bright ACROSS THE FULL WIDTH; a plain "any bright
+    pixel" test includes them, and then every glyph is cropped against a band that
+    starts at a rule rather than at the digits.
+    """
+    if line is None or getattr(line, "size", 0) == 0:
+        return None
+    inner = line[2:-2, :] if line.shape[0] > 6 else line
+    hot = inner > max(140, float(np.percentile(inner, 88)))
+    keep = (hot.sum(axis = 1) > 0) & (hot.mean(axis = 1) < 0.5)
+    rows = np.where(keep)[0]
+    if len(rows) < 4:
+        return None
+    runs, first = [], rows[0]
+    for a, b in zip(rows, rows[1:]):
+        if b - a > 3:
+            runs.append((first, a))
+            first = b
+    runs.append((first, rows[-1]))
+    lo, hi = max(runs, key = lambda r: r[1] - r[0])
+    if hi - lo < 4:
+        return None
+    band = inner[int(lo):int(hi) + 1, :]
+    return band, band > max(140, float(np.percentile(band, 88)))
+
+
+def _readAt(band, hotBand, x, w):
+    """Best digit and score for a w-wide window at x, cut the way templates were."""
+    # A MARGIN, then the glyph nearest the window centre.  The digits are not evenly
+    # spaced -- 58, 100, 139, 183 on this panel, gaps of 42, 39 and 44 -- so a uniform
+    # comb cannot sit perfectly on all four and clips an edge column off one of them.
+    # A 9 with two columns shaved off its left correlates best with a 2, which is
+    # exactly the error this fixes.
+    m = 7
+    lo, hi = max(0, x - m), min(band.shape[1], x + w + m)
+    if lo >= hi:
+        return None, -1.0
+    mask = hotBand[:, lo:hi]
+    colsOn = mask.sum(axis = 0) > 0
+    runs, first = [], None
+    for i, v in enumerate(colsOn):
+        if v and first is None:
+            first = i
+        elif not v and first is not None:
+            runs.append((first, i))
+            first = None
+    if first is not None:
+        runs.append((first, len(colsOn)))
+    if not runs:
+        return None, -1.0
+    # Merge fragments: thin strokes split a glyph -- a 0 breaks into two runs on this
+    # font -- and picking the nearest fragment instead of the nearest GLYPH read every
+    # 0 as a 3.
+    joined = []
+    for a0, b0 in runs:
+        if joined and a0 - joined[-1][1] < 6:
+            joined[-1] = (joined[-1][0], b0)
+        else:
+            joined.append((a0, b0))
+    runs = joined
+    centre = (x + w / 2.0) - lo
+    a, b = min(runs, key = lambda r: abs((r[0] + r[1]) / 2.0 - centre))
+    rows = np.where(mask[:, a:b].sum(axis = 1) > 0)[0]
+    if b - a < 2 or len(rows) < 3:
+        return None, -1.0
+    patch = band[int(rows[0]):int(rows[-1]) + 1, lo + a:lo + b]
+    if patch.size == 0:
+        return None, -1.0
+    u = _unit(_canonical(patch))
+    best, bestScore = None, -2.0
+    for label, t in _digitTemplates().items():
+        score = float((u * _unit(t)).sum())
+        if score > bestScore:
+            best, bestScore = label, score
+    return best, bestScore
+
+
+def _candidates(band, hotBand):
+    """Character-like column runs on a panel line: (start, end) pairs.
+
+    Segmentation is used only to PROPOSE, never to decide.  It is reliable at finding
+    where ink is and unreliable at saying which ink is a digit -- the trailing V
+    splits into fragments on most frames and the V: line's crop also catches the
+    colon, so counting groups from either end picks the wrong four.  Matching decides.
+    """
+    colsOn = hotBand.sum(axis = 0) > 0
+    runs, first = [], None
+    for i, v in enumerate(colsOn):
+        if v and first is None:
+            first = i
+        elif not v and first is not None:
+            runs.append((first, i))
+            first = None
+    if first is not None:
+        runs.append((first, len(colsOn)))
+    merged = []
+    for a, b in runs:
+        if merged and a - merged[-1][1] < 6:
+            merged[-1] = (merged[-1][0], b)
+        else:
+            merged.append((a, b))
+    return [(a, b) for a, b in merged if b - a >= 4]
+
+
+def _scoreRun(band, hotBand, a, b):
+    """Best digit and score for one candidate run, cut the way templates were."""
+    rows = np.where(hotBand[:, a:b].sum(axis = 1) > 0)[0]
+    if len(rows) < 3:
+        return None, -2.0
+    patch = band[int(rows[0]):int(rows[-1]) + 1, a:b]
+    if patch.size == 0:
+        return None, -2.0
+    u = _unit(_canonical(patch))
+    best, bestScore = None, -2.0
+    for label, t in _digitTemplates().items():
+        score = float((u * _unit(t)).sum())
+        if score > bestScore:
+            best, bestScore = label, score
+    return best, bestScore
+
+
+def panelAlignment(line, gapRange = (30, 56)):
+    """Which four runs on a panel line are the digits: a list of (start, end), or None.
+
+    The digits are NOT evenly spaced -- 58, 100, 139 and 183 on this panel, gaps of
+    42, 39 and 44 -- so a rigid comb cannot sit on all four and whichever one it
+    misses gets a column shaved off.  A 9 with two columns clipped reads as a 2, which
+    is what a comb produced on every latched-line frame.  Scoring every x position
+    instead was worse: partial glyphs score well and the search found chains in empty
+    space.
+
+    So: segmentation proposes candidate runs, and a four-step dynamic program picks
+    the four that READ BEST with plausible spacing between them.  Each digit keeps its
+    own true position, and the sign and the trailing V are simply not chosen.
+
+    Run ONCE per session on a median frame; reused for every frame after.
+    """
+    got = _glyphBand(line)
+    if got is None:
+        return None
+    band, hotBand = got
+    runs = _candidates(band, hotBand)
+    if len(runs) < 4:
+        return None
+    scored = [(a, b) + _scoreRun(band, hotBand, a, b) for a, b in runs]
+    lo, hi = gapRange
+    n = len(scored)
+    # best[k][i] = best total score for a chain of k+1 digits ending at candidate i
+    best = [[-9.0] * n for _ in range(4)]
+    back = [[-1] * n for _ in range(4)]
+    for i, (_a, _b, d, sc) in enumerate(scored):
+        best[0][i] = sc if d is not None else -9.0
+    for k in range(1, 4):
+        for i, (ai, _bi, di, sci) in enumerate(scored):
+            if di is None:
+                continue
+            ci = (ai + _bi) / 2.0
+            for j in range(i):
+                aj, bj = scored[j][0], scored[j][1]
+                cj = (aj + bj) / 2.0
+                if best[k - 1][j] <= -8.0 or not (lo <= ci - cj <= hi):
+                    continue
+                cand = best[k - 1][j] + sci
+                if cand > best[k][i]:
+                    best[k][i] = cand
+                    back[k][i] = j
+    endI, endScore = -1, -9.0
+    for i in range(n):
+        if best[3][i] > endScore:
+            endI, endScore = i, best[3][i]
+    if endI < 0 or endScore <= -8.0:
+        return None
+    chain = [endI]
+    for k in (3, 2, 1):
+        chain.append(back[k][chain[-1]])
+    chain = list(reversed(chain))
+    return [(scored[i][0], scored[i][1]) for i in chain]
+
+
+def readPanelDigits(line, alignment):
+    """The four digits of a panel line at known run positions, or None."""
+    if alignment is None:
+        return None
+    got = _glyphBand(line)
+    if got is None:
+        return None
+    band, hotBand = got
+    text = ""
+    for a, b in alignment:
+        if b > band.shape[1]:
+            return None
+        d, _sc = _scoreRun(band, hotBand, a, b)
+        if d is None:
+            return None
+        text += d
+    return text
+
+
+def readLatchedVolts(cells, alignCells = None):
+    """Majority-vote the balance voltage over many crops of the latched line.
+
+    `alignCells` are crops of the V:/t: line from the same session.  The two lines are
+    vertically aligned -- same x, same font -- and the V: line is the one the comb
+    search locks onto reliably (27/27 and 21/21 on the labelled sweep), so the
+    alignment is found there and applied here.
+
+    Returns volts as an int, or None.  NEVER RAISES.
+    """
+    if not cells:
+        return None
+    try:
+        if not _digitTemplates():
+            return None
+        source = list(alignCells) if alignCells else list(cells)
+        shapes = set(c.shape for c in source)
+        median = (np.median(np.stack(source), axis = 0).astype(np.uint8)
+                  if len(shapes) == 1 else source[len(source) // 2])
+        alignment = panelAlignment(median)
+        if alignment is None:
+            return None
+        votes = {}
+        for cell in cells:
+            text = readPanelDigits(cell, alignment)
+            if text and len(text) == 4:
+                votes[text] = votes.get(text, 0) + 1
+        return int(max(votes, key = votes.get)) if votes else None
+    except Exception:
+        return None
 
 
 if __name__ == "__main__":
