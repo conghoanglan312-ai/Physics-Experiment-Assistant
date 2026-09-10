@@ -1250,7 +1250,8 @@ class Track:
         self.lastT = float(t)               # capture time of the last real match
         self.points = [(float(t), float(centre[1]))]
         self.xs = [float(centre[0])]        # parallel to points; only fallDrift reads it
-        self.reacquired = 0                 # times this fall was stitched across a gap
+        self.reacquired = 0
+        self.adopted = False        # this fall's `0` came from another track's crossing                 # times this fall was stitched across a gap
         self.byVolts = {}                   # bucketed plate voltage -> descent rates
         self.alerted = False                # the operator has been told about this one
         self.lastRow = None                 # (time, index) of the last grid line crossed
@@ -1942,7 +1943,7 @@ class Fall:
     """
 
     FIELDS = ("id", "fTop", "fBottom", "tTop", "tBottom", "seconds", "legal",
-              "kinematicLegal", "fieldOff", "balanceVoltage", "reacquired")
+              "kinematicLegal", "fieldOff", "balanceVoltage", "reacquired", "adopted")
 
     def __init__(self, t, spacing):
         for name in self.FIELDS:
@@ -2269,7 +2270,92 @@ def updateDivision(t, gridRows):
             return
 
 
-def updateCrossings(t, yTop, yBottom, spacing):
+# A `0` crossing older than this can no longer belong to a legal fall in progress,
+# so it is forgotten.  Half again the longest legal fall, which leaves room for the
+# interpolation and for a droplet that is still slowing.
+ZERO_KEEP_S = MAX_FALL_S * 1.5
+
+# What an adopting track must prove before it may claim someone else's `0`.
+#
+# Column, timing and an unclaimed crossing are not enough on their own.  Measured on
+# one_droplet_slow, those three alone admitted 31 extra traverses, every one of them
+# kinematically legal, on a fixture holding a single droplet -- the chamber is never so
+# empty that nothing else crosses both lines in the same column inside 16-40 s.
+#
+# What separates the real continuation is that it is the SAME FALL: a droplet at
+# terminal velocity descends in a straight line, so the adopting track's own points
+# must sit on the line joining the `0` crossing to the `1.6` crossing.  A stray that
+# merely ends up in the right place at the right time does not.
+#
+# The span requirement is the other half: a track that appears a division above `1.6`
+# has not seen enough of the fall to claim it, however well those few points fit.
+ADOPT_MIN_SPAN = 0.5          # fraction of the fall the adopting track must cover
+ADOPT_MAX_RESIDUAL_PX = 6.0   # furthest any of its points may sit off the line
+
+
+def _fellAlong(t, tTop, yTop, tBottom, yBottom):
+    """Do this track's own points lie on the fall the pairing implies?"""
+    if tBottom <= tTop:
+        return False
+    v = (yBottom - yTop) / (tBottom - tTop)
+    pts = [(ts, y) for ts, y in t.points if tTop <= ts <= tBottom]
+    if len(pts) < CONFIRM_POINTS:
+        return False
+    if (pts[-1][0] - pts[0][0]) < ADOPT_MIN_SPAN * (tBottom - tTop):
+        return False
+    return max(abs(y - (yTop + v * (ts - tTop))) for ts, y in pts) \
+        <= ADOPT_MAX_RESIDUAL_PX
+
+
+def noteZeroCrossing(crossings, when, x):
+    """Record that SOMETHING crossed `0` here, whoever was tracking it."""
+    if crossings is None:
+        return
+    crossings.append({"t": float(when), "x": float(x), "claimed": False})
+    cut = float(when) - ZERO_KEEP_S
+    crossings[:] = [c for c in crossings if c["t"] >= cut]
+
+
+def adoptZeroCrossing(crossings, when, x):
+    """An unclaimed `0` crossing in this column that would make this fall legal.
+
+    Track identity does not survive a whole traverse and never reliably has: four
+    legal falls were lost across four sessions because a track broke part-way down,
+    and the track that reached `1.6` had no `0` of its own to pair with.  Position
+    does survive -- it is what binding, the charge verdict and the measuring pin all
+    key on -- so pair the two crossings by column instead of by track id.
+
+    Three things keep this from inventing falls.  The crossing must be unclaimed, so
+    no `0` can serve two falls.  It must be in the same column, within the tolerance
+    binding already uses.  And the implied duration must be inside the kinematic band
+    -- outside it the fall would be rejected anyway, so adopting it gains nothing and
+    only risks pairing two unrelated droplets.
+    """
+    if crossings is None:
+        return None
+    best = None
+    for c in crossings:
+        if c["claimed"] or abs(c["x"] - float(x)) > SAME_DROPLET_X_PX:
+            continue
+        secs = float(when) - c["t"]
+        if not (MIN_FALL_S <= secs <= MAX_FALL_S):
+            continue
+        if best is None or c["t"] > best["t"]:
+            best = c              # the most recent match: the likeliest same droplet
+    return best
+
+
+def _claim(crossings, tTop):
+    """Mark the crossing a completed fall used, so nothing else can use it."""
+    if crossings is None or tTop is None:
+        return
+    for c in crossings:
+        if not c["claimed"] and abs(c["t"] - float(tTop)) < 0.05:
+            c["claimed"] = True
+            return
+
+
+def updateCrossings(t, yTop, yBottom, spacing, crossings = None):
     """Returns the track when it has just completed a full `0` -> `16` traverse.
 
     Both crossings are interpolated against capture TIME, so the measured duration
@@ -2281,10 +2367,27 @@ def updateCrossings(t, yTop, yBottom, spacing):
     if len(t.points) < 2:
         return None
     (t0, y0), (t1, y1) = t.points[-2], t.points[-1]
+    here = float(t.xs[-1]) if getattr(t, "xs", None) else float(t.pos[0])
     if t.tTop is None:
         if y0 < yTop <= y1:
             t.tTop = t0 + (yTop - y0) / (y1 - y0) * (t1 - t0)
             t.yDeepest = y1
+            noteZeroCrossing(crossings, t.tTop, here)
+            return None
+        # No `0` of its own.  It may still be the SAME DROPLET whose crossing was
+        # recorded under a track id that has since died -- see adoptZeroCrossing.
+        if y0 < yBottom <= y1:
+            when = t0 + (yBottom - y0) / (y1 - y0) * (t1 - t0)
+            got = adoptZeroCrossing(crossings, when, here)
+            if got is not None and not _fellAlong(t, got["t"], yTop, when, yBottom):
+                got = None
+            if got is not None:
+                got["claimed"] = True
+                t.tTop, t.tBottom = got["t"], when
+                t.seconds = t.tBottom - t.tTop
+                t.legal = isLegalFall(FALL_DIVISIONS, t.seconds)
+                t.adopted = True
+                return t
         return None
     t.yDeepest = y1 if t.yDeepest is None else max(t.yDeepest, y1)
     if y1 < t.yDeepest - RISE_VOID_DIVISIONS * spacing:
@@ -2329,11 +2432,13 @@ def updateCrossings(t, yTop, yBottom, spacing):
         t.tTop = t.tBottom = t.seconds = t.legal = None
         t.fTop = t.fBottom = t.yDeepest = None
         t.reacquired = 0
+        t.adopted = False
         return None
     if t.tBottom is None and y0 < yBottom <= y1:
         t.tBottom = t0 + (yBottom - y0) / (y1 - y0) * (t1 - t0)
         t.seconds = t.tBottom - t.tTop
         t.legal = isLegalFall(FALL_DIVISIONS, t.seconds)
+        _claim(crossings, t.tTop)
         return t
     return None
 
@@ -2480,6 +2585,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     columnVolts = {}                # column -> {plate voltage: [descent rates]}
     columnVerdicts = {}             # column -> (charged?, when) -- outlives the rates
     liftWatch = LiftWatch()         # follows the panel and latches on a 提升 press
+    zeroCrossings = []              # every `0` crossing, so a broken track can still
+                                    # be paired with its own start -- see adoptZeroCrossing
     voltsFailedAt = None            # when the `V:` line first refused to read
     chosenX = None                  # the column the operator has settled on
     chosenSeen = 0.0                # when a track was last alive in it
@@ -2703,7 +2810,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     t.observeVoltage(volts, spacing)
                     noteColumnVoltage(columnVolts, t, volts, spacing)
                     updateDivision(t, s["gridRows"])
-                    finished = updateCrossings(t, yTop, yBottom, spacing)
+                    finished = updateCrossings(t, yTop, yBottom, spacing,
+                                               zeroCrossings)
                     if finished is not None:
                         if not src.isLive:      # a frame index to seek back to, files only
                             t.fTop, t.fBottom = t.tTop * fps, t.tBottom * fps
@@ -3236,8 +3344,8 @@ def _beep():
 
 
 FALL_COLUMNS = ["id", "startFrame", "startTime", "seconds", "speedGridPerSec",
-                "xPx", "reacquired", "kinematicLegal", "fieldOff", "balanceVoltageV",
-                "legal"]
+                "xPx", "reacquired", "adopted", "kinematicLegal", "fieldOff",
+                "balanceVoltageV", "legal"]
 
 
 def fallRow(f):
@@ -3246,6 +3354,10 @@ def fallRow(f):
             "speedGridPerSec": FALL_DIVISIONS / f.seconds,
             "xPx": getattr(f, "xPx", None),
             "reacquired": getattr(f, "reacquired", 0),
+            # True when the `0` crossing was made under a DIFFERENT track id and
+            # paired to this one by column.  The measurement is the same; the row
+            # says so because a reader should be able to see which ones needed it.
+            "adopted": bool(getattr(f, "adopted", False)),
             "kinematicLegal": getattr(f, "kinematicLegal", f.legal),
             "fieldOff": getattr(f, "fieldOff", None),
             "balanceVoltageV": getattr(f, "balanceVoltage", None),
