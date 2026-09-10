@@ -2737,6 +2737,26 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # only "has this track sat still for three seconds", which is also
                     # a description of dust: it fired with nothing tracked at all and
                     # replaced the hunt with `MEASURING -- 0 of 5`.
+                    def worked(t):
+                        """Has the operator actually handled this droplet?
+
+                        A fall clock running is not intent.  Every droplet a spray puts
+                        in the chamber crosses `0` and starts one, and enough of them
+                        land inside 0.2-0.5 grid/s by chance: at 0:13 of the run on
+                        2026-09-10, three seconds after a spray, one was ringed at
+                        0.48 gr/s and the pipeline pinned the column to it -- which
+                        cleared the candidate list and switched the hunt aid off for
+                        the whole spray.  The operator saw no rings and no reason.
+
+                        Being HANDLED is the signal, and it is already recorded: the
+                        operator balances by moving the voltage, so a droplet they have
+                        worked has been seen at two plate voltages.  A droplet three
+                        seconds out of the nozzle has only ever seen one.  Nothing new
+                        is measured here and no threshold is invented -- byVolts is
+                        already maintained for the charge test.
+                        """
+                        return len(getattr(t, "byVolts", {})) >= 2
+
                     def measuring(t):
                         # A clock running is not enough on its own.  Any speck that
                         # crosses `0` starts one, and one did: it was ringed at
@@ -2765,6 +2785,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                 return True
                         if t.tTop is None or t.tBottom is not None:
                             return False
+                        if not worked(t):
+                            return False        # a spray droplet, not a chosen one
                         fit = t.windowFit(spacing, now)
                         return fit is not None and MIN_SPEED <= fit[0] <= MAX_SPEED
 
