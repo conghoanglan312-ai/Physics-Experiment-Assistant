@@ -2251,6 +2251,13 @@ def candidateBanner(best, volts, untested = 0, now = None):
                 tail = "set about %d V" % round((est[0] + est[1]) / 2.0)
             else:
                 tail = "%s %d-%d V" % (best["action"], abs(round(lo)), abs(round(hi)))
+            # Ⅴ.5 advises a balance voltage of 150-250 V, and a suggestion that lands
+            # outside it is worth flagging rather than following: an operator was told
+            # to LOWER to 87-94 V, which is a balance the apparatus can reach and the
+            # manual does not recommend.  pickedVerdict already said so; this did not.
+            mid = (est[0] + est[1]) / 2.0
+            if not ADVISORY_MIN_V <= mid <= ADVISORY_MAX_V:
+                tail += " (outside %g-%g V)" % (ADVISORY_MIN_V, ADVISORY_MAX_V)
             # Held still for SUGGEST_HOLD_S.  The knob, the panel and the fit all lag
             # each other, so a number recomputed every frame answers the voltage the
             # operator has just left and reverses if they overshoot.
@@ -2300,7 +2307,7 @@ def heldLongEnough(t, now):
     return since is not None and float(now) - since >= MEASURE_HOLD_S
 
 
-def pickedVerdict(t, spacing, now, volts, charged, vFree):
+def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None):
     """What to tell the operator about the droplet THEY chose.  (text, colour, ok)
 
     Reports on it whether or not it passes the candidate gates, because the operator
@@ -2311,8 +2318,15 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree):
     if speed is None:
         return "picked id %d -- watching it" % t.id, (0, 220, 255), None
     if charged is False:
-        return ("picked id %d does NOT answer the field -- DISCARD, spray again"
-                % t.id, (0, 0, 255), False)
+        # Telling the operator to throw away a droplet they have spent minutes on is
+        # the most expensive thing this can say, so it is said only on the droplet's
+        # OWN evidence.  A pooled column verdict is enough to rank candidates and not
+        # enough to condemn one.
+        if ownCharge is False:
+            return ("picked id %d does NOT answer the field -- DISCARD, spray again"
+                    % t.id, (0, 0, 255), False)
+        return ("picked id %d -- no response seen yet, toggle again to be sure"
+                % t.id, (0, 220, 255), None)
     if not volts:                                   # field off: the timing test
         if MIN_SPEED <= speed <= MAX_SPEED:
             return ("picked id %d falls %.2f gr/s -- USABLE, balance it on `0`"
@@ -2404,8 +2418,13 @@ MEASURE_HOLD_DIV = 1.0        # how far below `0` still counts as "on the line"
 # them, and no automatic rule can know which one the operator has decided to spend the
 # next ten minutes on -- only they know that.  So let them say.
 PICK_RADIUS_PX = 40.0         # how near a click has to land to select a droplet
-PICK_FOLLOW_PX = 45.0         # how far it may move between frames and stay selected
-PICK_LOST_S = 20.0            # dropped after this long with nothing where it was
+PICK_FOLLOW_PX = 30.0         # how far from where it was predicted a droplet may be
+                              # and still be the same one.  SMALLER than it looks: the
+                              # search starts from the PREDICTED position, not the last
+                              # one, so this is error in the prediction and not travel.
+                              # At 45 px it silently jumped to neighbouring droplets --
+                              # a crowded frame had two 30 px apart.
+PICK_LOST_S = 45.0            # dropped after this long with nothing where it should be
 
 ADOPT_MIN_SPAN = 0.5          # fraction of the fall the adopting track must cover
 ADOPT_MAX_RESIDUAL_PX = 6.0   # furthest any of its points may sit off the line
@@ -2709,12 +2728,13 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     # this settles in well under a second while still outvoting a stray misread.
     voltHistory = collections.deque(maxlen = 5)
     bestNow = None                  # the candidate the operator is being told about
-    bestId, bestSeen, bannerAt = None, 0.0, 0.0
+    bestAt, bestSeen, bannerAt = None, 0.0, 0.0   # bestAt: WHERE, not which id
     ranked = []                     # last computed candidate list, reused between frames
     columnVolts = {}                # column -> {plate voltage: [descent rates]}
     columnVerdicts = {}             # column -> (charged?, when) -- outlives the rates
     liftWatch = LiftWatch()         # follows the panel and latches on a 提升 press
-    pickedSeen = 0.0                # when the picked droplet was last seen
+    pickedSeen = 0.0                # when the picked droplet was last seen...
+    pickedAt = (0.0, 0.0)           # ...and where, so a dead track can be re-found
     zeroCrossings = []              # every `0` crossing, so a broken track can still
                                     # be paired with its own start -- see adoptZeroCrossing
     voltsFailedAt = None            # when the `V:` line first refused to read
@@ -3118,20 +3138,34 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                                                     t.pos[1] - ry))
                                   if near else None)
                         pickedSeen = now
-                    # Follow it by position, because the track id will not survive the
-                    # lift and the droplet the operator chose is still the droplet the
-                    # operator chose.
+                        pickedAt = ((float(picked.pos[0]), float(picked.pos[1]))
+                                    if picked is not None else (0.0, 0.0))
+                    # HOLD the track while it lives.  Re-selecting the nearest track
+                    # every frame is not following a droplet, it is following a
+                    # neighbourhood, and in a crowded frame it changes its mind: two
+                    # droplets 30 px apart handed the square back and forth.
                     if picked is not None:
-                        px, py = float(picked.pos[0]), float(picked.pos[1])
-                        near = [t for t in live if not t.miss
-                                and np.hypot(t.pos[0] - px, t.pos[1] - py)
-                                <= PICK_FOLLOW_PX]
-                        if near:
-                            picked = min(near, key = lambda t: np.hypot(t.pos[0] - px,
-                                                                       t.pos[1] - py))
+                        if picked in live and not picked.miss:
+                            pickedAt = (float(picked.pos[0]), float(picked.pos[1]))
                             pickedSeen = now
-                        elif now - pickedSeen > PICK_LOST_S:
-                            picked = None
+                        else:
+                            # Its track died -- which happens on every lift -- so look
+                            # where the droplet should have GOT to, not where the track
+                            # was last seen.  Without the prediction a lifted droplet is
+                            # always out of range by the time anything is looking.
+                            gap = now - pickedSeen
+                            aim = (pickedAt[0] + float(picked.vel[0]) * gap,
+                                   pickedAt[1] + float(picked.vel[1]) * gap)
+                            near = [t for t in live if not t.miss
+                                    and np.hypot(t.pos[0] - aim[0], t.pos[1] - aim[1])
+                                    <= PICK_FOLLOW_PX]
+                            if near:
+                                picked = min(near, key = lambda t: np.hypot(
+                                    t.pos[0] - aim[0], t.pos[1] - aim[1]))
+                                pickedAt = (float(picked.pos[0]), float(picked.pos[1]))
+                                pickedSeen = now
+                            elif gap > PICK_LOST_S:
+                                picked = None
                     ranked = candidates(live, spacing, now, H, volts = steadyVolts,
                                         quiet = noisy, columns = columnVolts,
                                         verdicts = columnVerdicts, lifting = lifting)
@@ -3215,9 +3249,20 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # test instead of asserting a result.
                     confirmed = [c for c in ranked if c["charged"] is True]
                     untested = len(ranked) - len(confirmed)
-                    held = next((c for c in confirmed if c["id"] == bestId), None)
+                    # Held by WHERE it is, not by which track id it currently has.
+                    # Matching on id looks stable and is not: with a dozen droplets in
+                    # the chamber the ids churn constantly, the held one vanishes every
+                    # second or so, and the banner reads as though it cannot make up
+                    # its mind.  An operator described it as jumping hysterically.  The
+                    # droplet had not moved; only its number had.
+                    held = None
+                    if bestAt is not None:
+                        me = [c for c in confirmed
+                              if abs(c["pos"][0] - bestAt[0]) <= SAME_DROPLET_X_PX]
+                        if me:
+                            held = min(me, key = lambda c: abs(c["pos"][0] - bestAt[0]))
                     if held is not None:
-                        bestNow, bestSeen = held, now
+                        bestNow, bestSeen, bestAt = held, now, held["pos"]
                     elif bestNow is None or now - bestSeen > CANDIDATE_STICKY_S:
                         # Only now is the held droplet really gone.  The grace has to cover
                         # a dropout while OTHER candidates still qualify -- that is the
@@ -3225,21 +3270,32 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # the banner alternating between two droplets every couple of
                         # seconds.
                         if confirmed:
-                            bestNow, bestId, bestSeen = confirmed[0], confirmed[0]["id"], now
+                            bestNow, bestSeen = confirmed[0], now
+                            bestAt = confirmed[0]["pos"]
                         else:
-                            bestNow, bestId = None, None
+                            bestNow, bestAt = None, None
                     # An explicit pick outranks every automatic choice, and is
                     # reported whether or not it passes the candidate gates: the
                     # operator asked about THIS droplet, and "this one will not work"
                     # is the most useful thing to say once they have spent time on it.
                     if picked is not None:
-                        pv = columnChargeState(columnVolts, picked.pos[0], now,
-                                               columnVerdicts)
+                        # The droplet's OWN history first, the column only as a
+                        # fallback.  The column pools everything within +-1 of it --
+                        # 90 px -- which is what makes it survive a lift, and also what
+                        # makes it wrong in a crowded chamber: with a dozen droplets on
+                        # screen it mixes several droplets' descent rates and can
+                        # produce a confident "not charged" about a droplet that plainly
+                        # answers the field.  An operator watched it say DISCARD to one.
+                        # For a droplet being actively watched, its own track is both
+                        # available and specific.
+                        pv = picked.chargeState()
                         if pv is None:
-                            pv = picked.chargeState()
+                            pv = columnChargeState(columnVolts, picked.pos[0], now,
+                                                   columnVerdicts)
                         banner, bannerColour, _ok = pickedVerdict(
                             picked, spacing, now, steadyVolts, pv,
-                            freeFallSpeed(columnVolts, picked.pos[0]))
+                            freeFallSpeed(columnVolts, picked.pos[0]),
+                            picked.chargeState())
                         bannerAt = now
                     elif bestNow is None or now - bannerAt >= CANDIDATE_REFRESH_S:
                         banner, bannerColour = candidateBanner(bestNow, steadyVolts,
@@ -3258,7 +3314,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         banner = "MEASURING -- %d of %d falls" % (
                             done, TARGET_FALLS_PER_DROPLET)
                         bannerColour = (200, 200, 200)
-                        bestNow, bestId = None, None
+                        bestNow, bestAt = None, None
                     if bestNow is not None and not bestNow["track"].alerted:
                         bestNow["track"].alerted = True
                         _beep()
