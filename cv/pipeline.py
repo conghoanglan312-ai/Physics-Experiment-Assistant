@@ -1252,6 +1252,7 @@ class Track:
         self.xs = [float(centre[0])]        # parallel to points; only fallDrift reads it
         self.reacquired = 0
         self.adopted = False        # this fall's `0` came from another track's crossing
+        self.voltageFrom = None     # where its balance voltage was read from
         self.heldSince = None       # when it settled on the top line, for MEASURE_HOLD_S                 # times this fall was stitched across a gap
         self.byVolts = {}                   # bucketed plate voltage -> descent rates
         self.alerted = False                # the operator has been told about this one
@@ -1826,6 +1827,33 @@ CHARGE_WINDOW_S = 30.0
 # whichever comes first.
 CHARGE_VERDICT_S = 300.0
 
+# How long after a voltage change before descent rates mean anything again.
+#
+# The rate recorded is the track's smoothed velocity, and both it and the droplet need
+# a moment to answer a new field.  Samples taken across the change therefore describe
+# neither state, and they land in the NEW voltage's bucket -- which is how a bucket
+# comes to hold two field states at once, widen, and be thrown out by the spread guard.
+# The result was that a droplet the operator had plainly proved inert was never marked,
+# because the only evidence about it had been poisoned at the moment it was gathered.
+#
+# The velocity filter settles in about four frames and the droplet itself in far less,
+# so half a second is generous.
+CHARGE_SETTLE_S = 0.5
+
+# How far back to look for the working voltage a fall was released from.
+#
+# The balance voltage is read from the LATCHED line, which holds the last voltage
+# before the field was cut.  On 2026-09-10 that line read `+0000V` for 26 of 36
+# refusals -- more than a third of the night's legal falls came back with no voltage
+# at all, and a fall without its voltage yields no charge.
+#
+# But the `V:` line is already read ten times a second, so the working voltage is
+# known without the latch: it is the last steady non-zero reading before the droplet
+# was released.  That is the same quantity the latched line is supposed to show,
+# arrived at from data already in hand.  The window bounds how stale a reading may be
+# and still describe the fall that followed it.
+WORKING_VOLTS_MEMORY_S = 120.0
+
 # A droplet whose column produced a legal fall this recently is being MEASURED, not
 # hunted, however the tracker happens to have re-numbered it since.
 MEASURING_MEMORY_S = 240.0
@@ -1982,7 +2010,8 @@ class Fall:
     """
 
     FIELDS = ("id", "fTop", "fBottom", "tTop", "tBottom", "seconds", "legal",
-              "kinematicLegal", "fieldOff", "balanceVoltage", "reacquired", "adopted")
+              "kinematicLegal", "fieldOff", "balanceVoltage", "reacquired", "adopted",
+              "voltageFrom")
 
     def __init__(self, t, spacing):
         for name in self.FIELDS:
@@ -2436,6 +2465,28 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None):
     speed = t.recentSpeed(spacing)
     if speed is None:
         return "picked id %d -- watching it" % t.id, (0, 220, 255), None
+    if volts is None:
+        # Not the same as zero.  `if not volts` treated an unreadable panel as a field
+        # that is off and judged the droplet's speed against the falling band, which
+        # is only the right test when the field really is off.
+        return "picked id %d -- panel unreadable, cannot judge it" % t.id, (0, 220, 255), None
+    if not volts:
+        # FIELD OFF, so the only question is whether it falls at a usable pace, and the
+        # charge verdict is not merely unnecessary here -- it is meaningless.  With no
+        # field there is nothing for the droplet to answer, so "does not answer the
+        # field" describes every droplet in the chamber.
+        #
+        # This test used to sit BELOW the charge check, which therefore pre-empted it:
+        # an operator watched a droplet fall on 0 V and be told it did not react, and a
+        # droplet falling too slowly be told the same instead of that it was too slow.
+        # Both were the wrong question answered first.
+        if MIN_SPEED <= speed <= MAX_SPEED:
+            return ("picked id %d falls %.2f gr/s -- USABLE, balance it on `0`"
+                    % (t.id, speed), (0, 255, 0), True)
+        why = "too fast" if speed > MAX_SPEED else "too slow"
+        return ("picked id %d falls %.2f gr/s -- %s for %g-%g, DISCARD"
+                % (t.id, speed, why, MIN_SPEED, MAX_SPEED), (0, 0, 255), False)
+    # Field on from here, so "did it answer" is a question that means something.
     if charged is False:
         # Telling the operator to throw away a droplet they have spent minutes on is
         # the most expensive thing this can say, so it is said only on the droplet's
@@ -2446,13 +2497,6 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None):
                     % t.id, (0, 0, 255), False)
         return ("picked id %d -- no response seen yet, toggle again to be sure"
                 % t.id, (0, 220, 255), None)
-    if not volts:                                   # field off: the timing test
-        if MIN_SPEED <= speed <= MAX_SPEED:
-            return ("picked id %d falls %.2f gr/s -- USABLE, balance it on `0`"
-                    % (t.id, speed), (0, 255, 0), True)
-        why = "too fast" if speed > MAX_SPEED else "too slow"
-        return ("picked id %d falls %.2f gr/s -- %s for %g-%g, DISCARD"
-                % (t.id, speed, why, MIN_SPEED, MAX_SPEED), (0, 0, 255), False)
     if charged is None:
         return ("picked id %d -- toggle the field to see if it answers"
                 % t.id, (0, 220, 255), None)
@@ -2624,6 +2668,11 @@ STEAL_SHOW_S = 6.0
 REACQUIRE_SPEED_W = 220.0     # px of positional error one grid/s of mismatch is worth
 REACQUIRE_AREA_W = 60.0       # ...and one whole area-fraction of mismatch
 
+PICK_SEARCH_S = 2.0           # unmatched this long and the operator is told the aid
+                              # is searching, rather than left watching a square sit on
+                              # nothing for PICK_LOST_S.  A droplet moving fast leaves
+                              # the prediction window at once and there is no reason to
+                              # keep that quiet.
 PICK_GONE_SHOW_S = 8.0        # how long the "it left, here is how to get it back" line
                               # stays up after the pick is dropped
 
@@ -2941,6 +2990,11 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     pickedGone = None               # (when, which edge) after it left, to prompt recovery
     pickedDoubt = None              # (when, before, after) when a hand-over looked wrong
     noisySince = None               # when the detection count started running high
+    lastVoltBucket = None           # the plate voltage last seen, bucketed to 10 V...
+    voltsChangedAt = -1e9           # ...and when it changed, for CHARGE_SETTLE_S
+    workingVolts = collections.deque(maxlen = 4000)   # (t, volts) whenever the field
+                                    # is ON, so a fall can be given its voltage even
+                                    # when the latched line refuses to hold it
     zeroCrossings = []              # every `0` crossing, so a broken track can still
                                     # be paired with its own start -- see adoptZeroCrossing
     voltsFailedAt = None            # when the `V:` line first refused to read
@@ -3052,6 +3106,14 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 # it moves, and voltHistory's mode would smear a one-reading step
                 # across half a second, which is the very edge being measured.
                 liftWatch.update(volts, now)
+                # When the plate voltage last MOVED, so the charge test can ignore the
+                # samples taken while everything was still catching up.
+                bucketNow = (int(round(volts / 10.0)) * 10
+                             if volts is not None else None)
+                if bucketNow != lastVoltBucket:
+                    lastVoltBucket, voltsChangedAt = bucketNow, now
+                if volts:
+                    workingVolts.append((now, int(volts)))
 
                 # Whatever goes wrong, keep the evidence.  A live run records only
                 # the ROI, so a panel that will not read leaves nothing to look at --
@@ -3163,8 +3225,9 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     if t.miss > 0 and np.hypot(c[0] - aim[0], c[1] - aim[1]) > maxStep:
                         t.reacquired += 1
                     t.update(c, now, maxSpeed)
-                    t.observeVoltage(volts, spacing)
-                    noteColumnVoltage(columnVolts, t, volts, spacing)
+                    if now - voltsChangedAt >= CHARGE_SETTLE_S:
+                        t.observeVoltage(volts, spacing)
+                        noteColumnVoltage(columnVolts, t, volts, spacing)
                     updateDivision(t, s["gridRows"])
                     updateHold(t, yTop, spacing, now)
                     finished = updateCrossings(t, yTop, yBottom, spacing,
@@ -3194,6 +3257,18 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                              if t.tTop <= ct <= t.tBottom],
                             report = panelReport) \
                             if src.isLive else None
+                        t.voltageFrom = "latched" if t.balanceVoltage else None
+                        if src.isLive and not t.balanceVoltage:
+                            # The latch did not hold.  Use the last steady non-zero
+                            # reading before the droplet was released -- which is what
+                            # the latched line is meant to be showing.
+                            got = next((v for ts, v in reversed(workingVolts)
+                                        if ts <= t.tTop
+                                        and t.tTop - ts <= WORKING_VOLTS_MEMORY_S),
+                                       None)
+                            if got:
+                                t.balanceVoltage = got
+                                t.voltageFrom = "V: line"
                         # A live run records only the ROI, so when the panel
                         # cannot be read there is otherwise nothing left to
                         # look at: four of nine legal falls came back with no
@@ -3307,7 +3382,26 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     continue                     # a live track is already on this
                 old = reacquire(morgue, c, now, s)
                 if old is None:
-                    live.append(Track(c, now))
+                    fresh = Track(c, now)
+                    # Inherit what was learned about the droplet that was just here.
+                    #
+                    # A track ends on every lift, and the replacement starts with no
+                    # voltage history, so chargeState() answers "unknown" and a droplet
+                    # the operator has plainly proved inert is never marked. Reading the
+                    # COLUMN instead pools everything within 90 px and mis-marked
+                    # charged droplets, so neither answer worked on its own.
+                    #
+                    # The history is not the track's, it is the DROPLET's. A track that
+                    # died in this column moments ago was watching the same droplet, so
+                    # its observations carry over -- gated tightly, because inheriting
+                    # the wrong droplet's history is how a charged one gets crossed out.
+                    for dead in morgue:
+                        if (now - dead.points[-1][0] <= CHARGE_WINDOW_S
+                                and abs(dead.xs[-1] - c[0]) <= SAME_DROPLET_X_PX
+                                and getattr(dead, "byVolts", None)):
+                            fresh.byVolts = {v: list(r) for v, r in dead.byVolts.items()}
+                            break
+                    live.append(fresh)
                 else:
                     morgue.remove(old)               # it lives again, with its history
                     old.miss = 0
@@ -3466,10 +3560,25 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         Once the column is pinned it stays pinned, so this only has to
                         be true at the moment the measurement begins, not throughout.
                         """
-                        if picked is not None and t is picked:
-                            return True
-                        if getattr(t, "completedFalls", 0) > 0:
-                            return True
+                        # Clicking says "this is my droplet", NOT "I am measuring".
+                        # Treating it as the latter pinned the column the instant the
+                        # operator picked something, and MEASURING then outranked the
+                        # verdict about the very droplet they had just clicked -- before
+                        # anything was balanced, which is when that verdict matters
+                        # most.  A measurement starts when the droplet is held on the
+                        # line, whether or not it was picked by hand.
+                        # `completedFalls > 0` used to sit here and it is the same
+                        # mistake this function has now made four times: a completed
+                        # legal fall proves a droplet FELL legally, not that anyone
+                        # chose it. The operator sprays with the field off, a stray
+                        # falls freely at 0.29 grid/s, and the column pins to it --
+                        # which empties the candidate list and suppresses every ring
+                        # outside that column, so the hunt aid goes quiet, nothing gets
+                        # marked uncharged, and the banner reads MEASURING 1 of 5 with
+                        # nothing balanced. One cause, three symptoms.
+                        #
+                        # Only the operator's own commitment starts a measurement: a
+                        # droplet held on the top line, or one they clicked.
                         return heldLongEnough(t, now)
 
 
@@ -3548,18 +3657,27 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # operator asked about THIS droplet, and "this one will not work"
                     # is the most useful thing to say once they have spent time on it.
                     urgent = None
+                    reacquired = False
+                    if (picked is not None and pickedSeen
+                            and now - pickedSeen >= PICK_SEARCH_S):
+                        urgent = (("lost your droplet %.0fs ago -- it may be moving too "
+                                   "fast to follow. Click it again"
+                                   % (now - pickedSeen)), (0, 140, 255))
                     if pickedDoubt is not None and now - pickedDoubt[0] <= STEAL_SHOW_S:
                         _w, _b, _a, odd = pickedDoubt
                         if odd:
                             urgent = (("re-acquired, but it now falls %.2f gr/s and was "
                                        "%.2f -- may be a DIFFERENT droplet, click yours "
                                        "again" % (_a, _b)), (0, 140, 255))
+                            banner, bannerColour = urgent
+                            bannerAt = now
                         else:
-                            urgent = (("re-acquired your droplet after its track broke "
-                                       "-- click it again if this is the wrong one"),
-                                      (0, 220, 255))
-                        banner, bannerColour = urgent
-                        bannerAt = now
+                            # A benign hand-over ANNOTATES, it does not take over.
+                            # Replacing the verdict for STEAL_SHOW_S meant that with
+                            # tracks breaking often the operator never saw what their
+                            # droplet was actually doing -- they picked one falling
+                            # outside the legal band and the aid never said so.
+                            reacquired = True
                     elif picked is None and pickedGone is not None \
                             and now - pickedGone[0] <= PICK_GONE_SHOW_S:
                         # It left the picture.  Which way it went decides the recovery,
@@ -3591,6 +3709,9 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         banner, bannerColour, _ok = pickedVerdict(
                             picked, spacing, now, steadyVolts, pv,
                             freeFallSpeed(columnVolts, picked.pos[0]), own)
+                        if reacquired:
+                            banner += "   (re-acquired -- click again if wrong)"
+                        bannerAt = now
                         bannerAt = now
                     elif bestNow is None or now - bannerAt >= CANDIDATE_REFRESH_S:
                         banner, bannerColour = candidateBanner(bestNow, steadyVolts,
@@ -3924,7 +4045,7 @@ def _beep():
 
 FALL_COLUMNS = ["id", "startFrame", "startTime", "seconds", "speedGridPerSec",
                 "xPx", "reacquired", "adopted", "kinematicLegal", "fieldOff",
-                "balanceVoltageV", "legal"]
+                "balanceVoltageV", "voltageFrom", "legal"]
 
 
 def fallRow(f):
@@ -3940,6 +4061,10 @@ def fallRow(f):
             "kinematicLegal": getattr(f, "kinematicLegal", f.legal),
             "fieldOff": getattr(f, "fieldOff", None),
             "balanceVoltageV": getattr(f, "balanceVoltage", None),
+            # "latched" is the apparatus's own hold; "V: line" means the latch was
+            # empty and the voltage was recovered from the live readout instead.  Same
+            # quantity, different route, and a reader should be able to tell.
+            "voltageFrom": getattr(f, "voltageFrom", None),
             "legal": f.legal}
 
 
