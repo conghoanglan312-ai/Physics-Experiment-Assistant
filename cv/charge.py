@@ -102,6 +102,46 @@ def summarise(rows):
             "errorPercent": 100.0 * (mean - ELEMENTARY_CHARGE) / ELEMENTARY_CHARGE}
 
 
+CSV_COLUMNS = ["droplet", "fallId", "seconds", "balanceVoltageV", "radiusM",
+               "chargeC", "electrons", "elementaryC",
+               "dropletMeanElementaryC", "dropletSdElementaryC",
+               "dropletRelSdPercent", "dropletErrorPercent",
+               "overallMeanElementaryC", "overallSdElementaryC",
+               "overallRelSdPercent", "overallErrorPercent"]
+
+
+def csvRows(droplets, voltages):
+    """table() flattened for charges.csv, with the summaries carried on every row.
+
+    summarise() has always computed the mean, the standard deviation and the error
+    against the accepted e, and they have always gone only to the terminal -- which
+    is the one place a result cannot survive.  Three sessions were lost in one day to
+    that same habit in falls.csv.  So they go in the file.
+
+    They repeat down the rows rather than sitting in a trailer, because a trailer row
+    breaks every reader that expects one shape per line, and a spreadsheet groups
+    repeated values without complaint.
+    """
+    rows, perDroplet, overall = table(droplets, voltages)
+    byLabel = {d["label"]: d for d in perDroplet}
+    out = []
+    for r in rows:
+        d = byLabel.get(r["label"], {})
+        out.append({"droplet": r["label"], "fallId": r["fallId"],
+                    "seconds": r["seconds"], "balanceVoltageV": r["balanceVoltage"],
+                    "radiusM": r["radiusM"], "chargeC": r["chargeC"],
+                    "electrons": r["electrons"], "elementaryC": r["elementaryC"],
+                    "dropletMeanElementaryC": d.get("meanElementaryC"),
+                    "dropletSdElementaryC": d.get("sdElementaryC"),
+                    "dropletRelSdPercent": d.get("relativeSdPercent"),
+                    "dropletErrorPercent": d.get("errorPercent"),
+                    "overallMeanElementaryC": (overall or {}).get("meanElementaryC"),
+                    "overallSdElementaryC": (overall or {}).get("sdElementaryC"),
+                    "overallRelSdPercent": (overall or {}).get("relativeSdPercent"),
+                    "overallErrorPercent": (overall or {}).get("errorPercent")})
+    return out, perDroplet, overall
+
+
 def table(droplets, voltages):
     """Rows for every fall of every droplet, plus a per-droplet and overall summary.
 
