@@ -6,10 +6,13 @@ from openai import OpenAI
 import time
 from queue import Queue
 from threading import Thread
-load_dotenv()
-
 from llm.logs.logger import LLMlogger
-from .base import BaseLLM, LLMEvent
+from .base import BaseLLM
+from llm.util.generateModelMessage import *
+from llm.config.settings import MODELS
+
+load_dotenv()
+config = MODELS["zai"]
 
 class ZaiLLM(BaseLLM):
     def __init__ (self):
@@ -18,7 +21,7 @@ class ZaiLLM(BaseLLM):
             base_url="https://open.bigmodel.cn/api/paas/v4/"
         )
 
-        self.model_name = "glm-5.2"
+
         self.log = LLMlogger()
 
 
@@ -31,18 +34,18 @@ class ZaiLLM(BaseLLM):
     ):
 
         # Log Initialization
-        self.log.start(self.model_name)
+        self.log.start(config["model"])
         start_time = time.time()
 
         # Log userQuery
-        self.log.query(self.model_name, userQuery)
+        self.log.query(config["model"], userQuery)
 
         try:
             interaction = self.client.chat.completions.create(
-                model = self.model_name,
-                messages = history,
-                stream = True,
-                temperature = 0.8,
+                model = config["model"],
+                messages = [{"role": "system", "content": system_prompt}, *history],
+                stream = config["stream"],
+                temperature = config["temperature"],
                 extra_body={
                     "thinking": {
                         "type": "disabled",
@@ -51,11 +54,9 @@ class ZaiLLM(BaseLLM):
                 max_tokens=1000
             )
         except Exception as e:
-            yield LLMEvent(
-                type="error",
-                data=str(e)
-            )
-            self.log.error(self.model_name, 0, e)
+            message = generateErrorMessage(e)
+            self.log.error(config["model"], 0, e)
+            yield message
             return
 
         queue = Queue()
@@ -64,32 +65,35 @@ class ZaiLLM(BaseLLM):
             token_count = -1 # Indicate Error
             assistant_response = ""
             try:
-                # TODO: Add timeout feature (30s for initial, 10s for chunks)
                 for event in interaction:
                     # Get Text Response
                     if event.choices[0].delta.content:
                         text = event.choices[0].delta.content
+                        message = generateTextMessage(text)
+
                         assistant_response += text
 
-                        queue.put(LLMEvent(type = "text", data = text))
+                        queue.put(message)
 
                     if (hasattr(event, "usage") and event.usage):
                         token_count = event.usage.total_tokens
             
                 # After Exhausted of interaction
-                queue.put(LLMEvent(type = "done"))
+                message = generateDoneMessage()
+                queue.put(message)
 
                 # Finish Logging
                 latency = time.time() - start_time
-                self.log.finish(self.model_name, latency, token_count)
+                self.log.finish(config["model"], latency, token_count)
 
             except Exception as e:
                 # Any kind of Error Occured
-                queue.put(LLMEvent(type = "error", data = str(e)))
+                message = generateErrorMessage(e)
+                queue.put(message)
 
                 # Log Error Occured
                 latency = time.time() - start_time
-                self.log.error(self.model_name, latency, e)
+                self.log.error(config["model"], latency, e)
 
         Thread(target = consume_stream, daemon=True).start()
 

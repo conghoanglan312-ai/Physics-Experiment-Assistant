@@ -24,7 +24,7 @@ def contextRetrieval(userQuery):
     text = """"""
 
     for i, doc in enumerate(result["documents"][0]):
-        text += f"Chunk {i+1}\n"
+        text += f"Reference section {i+1}\n"
         text += doc
         text += "\n"
 

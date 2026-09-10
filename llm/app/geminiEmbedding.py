@@ -2,9 +2,10 @@ from google import genai
 from google.genai import types
 import os
 from dotenv import load_dotenv
-
+from llm.config.settings import MODELS
 
 load_dotenv()
+config = MODELS["gemini-embedding"]
 
 class GeminiEmbeddingFunction:
     def __init__(self):
@@ -13,17 +14,17 @@ class GeminiEmbeddingFunction:
         )
 
     def name(self):
-        return "gemini-embedding-001"
+        return config["model"]
 
     # Used when adding documents
     def __call__(self, input):
 
         result = self.client.models.embed_content(
-            model="gemini-embedding-001",
+            model=config["model"],
             contents=input,
             config=types.EmbedContentConfig(
                 task_type="RETRIEVAL_DOCUMENT",
-                output_dimensionality=768
+                output_dimensionality=config["output_dimensionality"]
             )
         )
 
@@ -36,11 +37,11 @@ class GeminiEmbeddingFunction:
     def embed_query(self, input):
 
         result = self.client.models.embed_content(
-            model="gemini-embedding-001",
+            model=config["model"],
             contents=input,
             config=types.EmbedContentConfig(
                 task_type="RETRIEVAL_QUERY",
-                output_dimensionality=768
+                output_dimensionality=config["output_dimensionality"]
             )
         )
 
