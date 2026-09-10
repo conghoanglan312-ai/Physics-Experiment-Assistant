@@ -2295,6 +2295,13 @@ def electronsOff(seconds, volts):
     return ratio, abs(ratio - round(ratio))
 
 
+def _spreadOf(rates):
+    """Interquartile spread of one voltage bucket's descent rates."""
+    if len(rates) < 4:
+        return 0.0
+    return float(np.percentile(rates, 75) - np.percentile(rates, 25))
+
+
 def chargeFromBuckets(byVolts):
     """True / False / None from {plate voltage: [descent rates]}.
 
@@ -2316,8 +2323,31 @@ def chargeFromBuckets(byVolts):
         return None
     # More volts must mean less falling.  A droplet that descends just as fast at
     # 360 V as at 150 V is not charged, whatever else it is doing.
-    return (float(np.median(loRates))
-            - float(np.median(hiRates))) >= CHARGE_MIN_SEPARATION
+    #
+    # THREE answers, not two.  One threshold cannot both confirm and condemn: at a
+    # single 0.10 grid/s cut, a droplet that went from falling 0.05 to rising 0.03 --
+    # a separation of 0.08, and unmistakably a response -- was reported as PROVEN
+    # uncharged and crossed out on screen.  An operator watched it move and the aid
+    # deny it.
+    #
+    # So: a separation at or above CHARGE_MIN_SEPARATION is a confident yes; one no
+    # larger than BALANCED_MAX, the speed this project already treats as "not moving",
+    # is a confident no; and everything between is a response too small to call either
+    # way, which is None and stays a candidate.
+    # A bucket is supposed to hold one field state.  When the panel misreads -- and
+    # in the run that exposed this, three of four falls could not be read at all -- the
+    # balanced samples (~0 grid/s) and the free-fall samples (~0.28) land in the SAME
+    # bucket, their median falls between the two, the separation collapses and a
+    # plainly charged droplet reads as uncharged.  A bucket spread that wide is not
+    # one state, so it cannot answer the question.
+    if max(_spreadOf(loRates), _spreadOf(hiRates)) > CHARGE_MIN_SEPARATION:
+        return None
+    diff = float(np.median(loRates)) - float(np.median(hiRates))
+    if diff >= CHARGE_MIN_SEPARATION:
+        return True
+    if diff <= BALANCED_MAX:
+        return False
+    return None
 
 
 def updateHold(t, yTop, spacing, now):
@@ -3627,8 +3657,19 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # candidate wastes the operator's attention on the one thing that
                     # certainly will not work -- they reported rings landing on these
                     # repeatedly.  Cross it out and say so instead.
-                    if columnChargeState(columnVolts, t.pos[0], now,
-                                         columnVerdicts) is False:
+                    # Its OWN history, not the column's.  The column pools everything
+                    # within +-1 of it, 90 px, which is what lets a verdict survive a
+                    # lift and also what makes it wrong in a crowded chamber: a charged
+                    # droplet sharing a column with uncharged ones inherited their
+                    # answer and got crossed out.  Crossing a droplet out says it can
+                    # never be measured, which is the same weight as DISCARD, so it
+                    # takes the same evidence: the droplet's own.
+                    # ...and never while it is falling.  Mid-traverse the field is
+                    # off by definition, so there is nothing for a charge test to
+                    # compare, and the droplet is being MEASURED -- crossing it out
+                    # then is both unfounded and in the way.
+                    if (t.chargeState() is False
+                            and not (t.tTop is not None and t.tBottom is None)):
                         cv2.line(marked, (p[0] - 7, p[1] - 7), (p[0] + 7, p[1] + 7),
                                  (90, 90, 90), 1)
                         cv2.line(marked, (p[0] - 7, p[1] + 7), (p[0] + 7, p[1] - 7),

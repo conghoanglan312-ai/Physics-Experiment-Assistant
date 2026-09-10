@@ -1,0 +1,21 @@
+===== CIRCULARITY_MIN 0.52 =====
+D3 f5      28.20 | found      28.12    -0.08  LEGAL, 200.0 V
+
+found 15 of 15   legal 15 of 15
+rows in this csv: 260, of which legal: 21
+legal falls the operator did not time: 6  at 579 s, 573 s, 580 s, 1287 s, 1283 s, 1861 s
+
+===== CIRCULARITY_MIN 0.48 =====
+D3 f5      28.20 | found      28.12    -0.08  LEGAL, 200.0 V
+
+found 15 of 15   legal 15 of 15
+rows in this csv: 261, of which legal: 21
+legal falls the operator did not time: 6  at 579 s, 573 s, 580 s, 1287 s, 1283 s, 1861 s
+
+===== CIRCULARITY_MIN 0.45 =====
+D3 f5      28.20 | found      28.12    -0.08  LEGAL, 200.0 V
+
+found 15 of 15   legal 15 of 15
+rows in this csv: 259, of which legal: 21
+legal falls the operator did not time: 6  at 579 s, 573 s, 580 s, 1287 s, 1283 s, 1861 s
+
