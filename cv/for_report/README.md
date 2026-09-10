@@ -51,18 +51,19 @@ Two caveats to state rather than hide:
 
 ## The result
 
-**Electron counts n = 1, 2, 3** across **10 droplets and 50 falls**, six sessions.
-Overall mean e = 1.5637e-19 C, **error -2.39%** against the accepted 1.602e-19 C.
+**Electron counts n = 1, 2, 3** across **11 droplets and 55 falls**, seven sessions.
+Overall mean e = 1.5518e-19 C, **error -3.13%** against the accepted 1.602e-19 C.
 
 Every droplet was also timed by hand. Only the fifteen falls of droplets 1-3 have those
 hand times recorded in a file here, and against them the pipeline agrees to **-0.27 s on
 average (sd 0.42 s)**.
 
-Droplets 9 and 10 are the two worst, at +8.0% and -9.7%, and both are among the tightest
-measured -- so the error is systematic, not scatter. `BENCHMARK.md` shows that the manual
-warned about both conditions in advance: one balanced below Ⅴ.5's 150-250 V band, the
-other fell in 36.9 s carrying a single electron, which Ⅳ.2 calls out for Brownian motion.
-They are kept for that reason.
+Individual droplets run **-3.1% +/- 5.6%**, and no variable in this data predicts which
+one will be off -- balance voltage, fall time and electron count all correlate with the
+error at |r| < 0.3. `BENCHMARK.md` reports what was tested and withdraws an earlier
+explanation that did not survive the numbers. The spread between droplets is wider than
+the scatter within one, which points at something fixed per droplet: the balance
+voltage, read once, is the first suspect.
 
 **One fall was recovered from the recording.** Droplet 4's fifth fall completed
 normally -- the droplet is visible in the session recording for the whole descent -- but
