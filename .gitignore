@@ -17,3 +17,9 @@ CLAUDE.md
 *.csv
 output/
 uvc_check/
+
+# ...except the curated hand-over set.  cv/for_report is not scratch output: it is the
+# small set of measurements the report is written from, and the CSVs in it ARE the
+# deliverable -- the charge table and the raw per-traverse rows behind every figure
+# quoted.  Scoped to that one directory so the rule above still holds everywhere else.
+!cv/for_report/*.csv
