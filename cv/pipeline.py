@@ -1411,11 +1411,19 @@ def reacquire(dead, centre, now, s):
         if abs(x - t.xs[-1]) > xGate:              # a falling droplet does not sidestep
             continue
         vy = t.vel[1]
-        if vy <= 0:                                 # only continue things that were falling
+        if vy == 0:                                 # only continue things that were moving
             continue
         predY = lastY + vy * elapsed
         slack = max(4.0, REID_Y_SLACK * abs(predY - lastY))
-        if not (lastY - 4.0 <= y <= predY + slack):  # must be at or below where it was
+        # Must be where it was going, which for a lifted droplet is UPWARD.  This read
+        # `vy <= 0: continue` and so refused to revive anything rising, which is half
+        # of why 提升 ends a track -- the other half was the same assumption in
+        # assign().  Reviving a riser cannot resurrect a stale fall clock: rising
+        # RISE_VOID_DIVISIONS clears tTop before this can matter.
+        if vy > 0:
+            if not (lastY - 4.0 <= y <= predY + slack):
+                continue
+        elif not (predY - slack <= y <= lastY + 4.0):
             continue
         if abs(area - t.area) / max(t.area, 1.0) > AREA_TOLERANCE:
             continue
@@ -1482,10 +1490,23 @@ def assign(tracks, centres, maxStep, areaFloor, now, xGate):
         # only axis the droplet is actually moving along.  A circle wide enough to
         # cover a second of falling would be far too loose sideways, and that is
         # exactly how two droplets get filed as one.
-        wide = t.miss > 0 and len(t.points) >= CONFIRM_POINTS and t.vel[1] > 0
+        # `t.vel[1] > 0` here meant FALLING ONLY, and that is why a lift ends a
+        # track.  A droplet the operator raises is moving up, so it failed this test,
+        # got no re-acquisition window at all, and any blink -- a grid line, a dim
+        # frame -- ended it.  One droplet's three falls carried three different ids on
+        # 2026-09-10, and two earlier sessions produced 7 ids for 9 falls and 9 for 10.
+        # That is also why binding had to be moved onto position in the first place.
+        #
+        # The window still opens along the axis of travel only, which is the reason it
+        # was asymmetric to begin with -- it is simply mirrored when travel is upward,
+        # rather than being absent.
+        wide = t.miss > 0 and len(t.points) >= CONFIRM_POINTS and t.vel[1] != 0
         if wide:
             slack = max(4.0, REID_Y_SLACK * abs(aim[1] - t.pos[1]))
-            yLo, yHi = t.pos[1] - 4.0, aim[1] + slack
+            if t.vel[1] > 0:
+                yLo, yHi = t.pos[1] - 4.0, aim[1] + slack
+            else:
+                yLo, yHi = aim[1] - slack, t.pos[1] + 4.0
         for j, c in enumerate(centres):
             d = float(np.hypot(c[0] - aim[0], c[1] - aim[1]))
             if d > maxStep:
@@ -1711,8 +1732,23 @@ MEASURING_MEMORY_S = 240.0
 LIFT_TOLERANCE_V = 15.0
 LIFT_MEMORY_S = 300.0
 
+# How long the lift voltage must be HELD before the aid falls silent.
+#
+# Not every press of 提升 is a reposition.  Operators toggle it for half a second to
+# see which droplets answer the field at all -- a charge test -- and blanking the
+# display for that half second hides the one thing they are watching.  A reposition,
+# by contrast, runs 5-10 s: nothing usable climbs from below `1.6` to above `0` faster
+# than that.
+#
+# The threshold is not a compromise between those two numbers, it is fixed by what the
+# suppression is FOR.  A false "BALANCED" needs windowFit to report a near-zero speed,
+# and windowFit will not answer until it has CANDIDATE_FIT_S of history.  A lift
+# shorter than that window therefore cannot produce the verdict this suppression
+# exists to prevent, and there is nothing to gain by silencing it.
+LIFT_DWELL_S = CANDIDATE_FIT_S
 
-def inLift(volts, seen, now):
+
+def inLift(volts, seen, now, since = None):
     """Is this plate voltage the 提升 step above a working voltage seen recently?
 
     The operator raises a measured droplet back to the top by pressing 提升, which adds
@@ -1728,11 +1764,14 @@ def inLift(volts, seen, now):
     """
     if volts is None or volts <= 0:
         return False
-    for v, ts in seen.items():
-        if (now - ts <= LIFT_MEMORY_S
-                and abs((volts - v) - RISE_STEP_V) <= LIFT_TOLERANCE_V):
-            return True
-    return False
+    stepped = any(now - ts <= LIFT_MEMORY_S
+                  and abs((volts - v) - RISE_STEP_V) <= LIFT_TOLERANCE_V
+                  for v, ts in seen.items())
+    if not stepped:
+        return False
+    # Held long enough to be a reposition rather than a charge test.  `since` is when
+    # this voltage was first seen; without it the caller gets the old instant answer.
+    return since is None or (now - since) >= LIFT_DWELL_S
 
 # Update the window this many frames apart.  The picture only has to be legible to a
 # human watching droplets move at half a grid line a second; what it must not do is
@@ -2299,6 +2338,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     columnVolts = {}                # column -> {plate voltage: [descent rates]}
     columnVerdicts = {}             # column -> (charged?, when) -- outlives the rates
     voltSeen = {}                   # plate voltage -> when last steady, for inLift()
+    heldVolts = None                # the steady voltage currently being held...
+    heldSince = None                # ...and when it was first seen, for LIFT_DWELL_S
     voltsFailedAt = None            # when the `V:` line first refused to read
     chosenX = None                  # the column the operator has settled on
     chosenSeen = 0.0                # when a track was last alive in it
@@ -2408,6 +2449,10 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # Bucketed the same way the charge history is, so a supply
                         # wandering a volt does not look like a new hold.
                         voltSeen[int(round(steadyVolts / 10.0)) * 10] = now
+                    bucket = (int(round(steadyVolts / 10.0)) * 10
+                              if steadyVolts else steadyVolts)
+                    if bucket != heldVolts:
+                        heldVolts, heldSince = bucket, now
 
                 # Whatever goes wrong, keep the evidence.  A live run records only
                 # the ROI, so a panel that will not read leaves nothing to look at --
@@ -2682,7 +2727,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     noisy = (quietLevel is not None
                              and len(centres) > max(3.0, STALE_FACTOR * quietLevel))
 
-                    lifting = inLift(steadyVolts, voltSeen, now)
+                    lifting = inLift(steadyVolts, voltSeen, now, heldSince)
                     ranked = candidates(live, spacing, now, H, volts = steadyVolts,
                                         quiet = noisy, columns = columnVolts,
                                         verdicts = columnVerdicts, lifting = lifting)
