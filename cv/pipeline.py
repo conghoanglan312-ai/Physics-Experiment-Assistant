@@ -1798,49 +1798,103 @@ MEASURING_MEMORY_S = 240.0
 # the aid says nothing.  At 25 V a genuine balance at 485 V against a 250 V working
 # point reads as a lift and gets silenced.  15 V leaves the real step (209-210 V as
 # measured on 2026-09-10) comfortably inside and hands back that band.
-LIFT_TOLERANCE_V = 15.0
-LIFT_MEMORY_S = 300.0
+# Telling a LIFT from a hand on the knob.
+#
+# 平衡/提升 adds a fixed +210 V the instant it is pressed, and while it is held every
+# verdict about balance is about a voltage that is not a balance voltage.  The aid has
+# to know.  The first version asked only "is this about 210 V above something seen in
+# the last five minutes", which cannot tell a press from a slow climb to the same
+# place -- so an operator hand-tuning up towards 460 V had the aid go silent on them,
+# which is precisely when they wanted it.
+#
+# The operator's own suggestion was the answer: a hand cannot move the knob that fast.
+# Measured on this apparatus, 2026-09-10, reading the panel every 42 ms:
+#
+#     fastest hand turn      ~80 V/s        =    3 V per reading
+#     toggle press          210 V instantly = 210 V per reading   (12 of 12 presses)
+#     single-sample OCR glitch                up to 844 V per reading
+#
+# Every press produced an identical one-reading step, whether pressed slowly or
+# quickly: it is a switch, so how it is pressed cannot change it.
+#
+# The glitch is LARGER than the signal, so a rate test on the raw reading would fire on
+# misreads.  A short median over LIFT_SMOOTH samples removes a single-sample spike and
+# still passes a real step in about 0.13 s.  On the smoothed reading, in a window of
+# LIFT_STEP_S: a hand covers 40 V, a toggle covers 210 V, so 150 V separates them with
+# 3.7x margin below and 1.4x above.
+LIFT_STEP_V = 150.0        # a jump this big, this fast, is the button and nothing else
+LIFT_STEP_S = 0.5          # ...measured across a window this long
+LIFT_SMOOTH = 5            # readings in the median that kills single-sample glitches
 
-# How long the lift voltage must be HELD before the aid falls silent.
+# How long the lift must be HELD before the aid falls silent.
 #
-# Not every press of 提升 is a reposition.  Operators toggle it for half a second to
-# see which droplets answer the field at all -- a charge test -- and blanking the
-# display for that half second hides the one thing they are watching.  A reposition,
-# by contrast, runs 5-10 s: nothing usable climbs from below `1.6` to above `0` faster
-# than that.
+# Not every press is a reposition.  Operators tap it for half a second to see which
+# droplets answer the field at all -- a charge test -- and blanking the display for
+# that half second hides the one thing they are watching.  A reposition runs 5-10 s.
 #
-# The threshold is not a compromise between those two numbers, it is fixed by what the
-# suppression is FOR.  A false "BALANCED" needs windowFit to report a near-zero speed,
-# and windowFit will not answer until it has CANDIDATE_FIT_S of history.  A lift
-# shorter than that window therefore cannot produce the verdict this suppression
-# exists to prevent, and there is nothing to gain by silencing it.
+# The threshold is fixed by what the suppression is FOR, not split between those two.
+# A false "BALANCED" needs windowFit to report a near-zero speed, and windowFit will
+# not answer without CANDIDATE_FIT_S of history, so a lift shorter than that window
+# cannot produce the verdict this suppression exists to prevent.
 LIFT_DWELL_S = CANDIDATE_FIT_S
 
 
-def inLift(volts, seen, now, since = None):
-    """Is this plate voltage the 提升 step above a working voltage seen recently?
+class LiftWatch:
+    """Follows the plate voltage and says whether 提升 is currently held.
 
-    The operator raises a measured droplet back to the top by pressing 提升, which adds
-    a fixed +210 V.  Nothing in the panel says so -- it just reads a bigger number --
-    and on 2026-09-10 the aid read 459 V, saw the droplet drifting slowly through the
-    top of its rise, and announced "BALANCED at 459 V.  Cut to 0V and time it".  Had
-    the operator done that, the fall would have been recorded against 459 V instead of
-    the true 249 V and the charge would have come out nearly double.
-
-    The lift is recognisable without new hardware because the STEP is fixed: if some
-    lower voltage was steady within the last few minutes and this one sits 210 V above
-    it, the operator is lifting, not balancing.
+    A latch, not an inference.  It goes up on a fast step up and comes down on the
+    step back, so the aid returns the moment the operator releases instead of waiting
+    out a timer.  `since` reports how long the current state has lasted, which is what
+    LIFT_DWELL_S needs.
     """
-    if volts is None or volts <= 0:
-        return False
-    stepped = any(now - ts <= LIFT_MEMORY_S
-                  and abs((volts - v) - RISE_STEP_V) <= LIFT_TOLERANCE_V
-                  for v, ts in seen.items())
-    if not stepped:
-        return False
-    # Held long enough to be a reposition rather than a charge test.  `since` is when
-    # this voltage was first seen; without it the caller gets the old instant answer.
-    return since is None or (now - since) >= LIFT_DWELL_S
+
+    def __init__(self):
+        self.recent = collections.deque(maxlen = LIFT_SMOOTH)   # (t, volts)
+        self.lifting = False
+        self.since = None
+        self.base = None            # the working voltage the lift departed from
+
+    def smoothed(self):
+        if not self.recent:
+            return None
+        return float(np.median([v for _t, v in self.recent]))
+
+    def update(self, volts, now):
+        """Feed one panel reading.  Returns True while a lift is held."""
+        if volts is None:
+            return self.lifting
+        was = self.smoothed()
+        self.recent.append((now, float(volts)))
+        level = self.smoothed()
+        if was is None or level is None:
+            return self.lifting
+        # The step is measured against the oldest reading still inside the window, so
+        # a dropped frame widens the window rather than hiding the step.
+        old = [v for t, v in self.recent if now - t <= LIFT_STEP_S]
+        if len(old) < 2:
+            return self.lifting
+        step = level - float(np.median(old[:max(1, len(old) // 2)]))
+        if not self.lifting and step >= LIFT_STEP_V:
+            self.lifting, self.since, self.base = True, now, was
+        elif self.lifting and step <= -LIFT_STEP_V:
+            self.lifting, self.since, self.base = False, now, None
+        elif self.lifting and self.base is not None \
+                and level <= self.base + LIFT_TOLERANCE_V:
+            # Released without a clean step -- readings dropped through the change.
+            self.lifting, self.since, self.base = False, now, None
+        return self.lifting
+
+    def quiet(self, now):
+        """True when the aid should say nothing: a lift held longer than the dwell."""
+        return (self.lifting and self.since is not None
+                and now - self.since >= LIFT_DWELL_S)
+
+
+# Kept because the lift latch compares a released voltage against its starting point,
+# and because DESIGN_NOTES cites it.
+LIFT_TOLERANCE_V = 15.0
+
+
 
 # Update the window this many frames apart.  The picture only has to be legible to a
 # human watching droplets move at half a grid line a second; what it must not do is
@@ -2425,9 +2479,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     ranked = []                     # last computed candidate list, reused between frames
     columnVolts = {}                # column -> {plate voltage: [descent rates]}
     columnVerdicts = {}             # column -> (charged?, when) -- outlives the rates
-    voltSeen = {}                   # plate voltage -> when last steady, for inLift()
-    heldVolts = None                # the steady voltage currently being held...
-    heldSince = None                # ...and when it was first seen, for LIFT_DWELL_S
+    liftWatch = LiftWatch()         # follows the panel and latches on a 提升 press
     voltsFailedAt = None            # when the `V:` line first refused to read
     chosenX = None                  # the column the operator has settled on
     chosenSeen = 0.0                # when a track was last alive in it
@@ -2533,14 +2585,10 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # to see a 0.5 s toggle, which smoothing would erase.
                     steadyVolts = collections.Counter(
                         voltHistory).most_common(1)[0][0]
-                    if steadyVolts:
-                        # Bucketed the same way the charge history is, so a supply
-                        # wandering a volt does not look like a new hold.
-                        voltSeen[int(round(steadyVolts / 10.0)) * 10] = now
-                    bucket = (int(round(steadyVolts / 10.0)) * 10
-                              if steadyVolts else steadyVolts)
-                    if bucket != heldVolts:
-                        heldVolts, heldSince = bucket, now
+                # The RAW reading, not the mode: the lift is recognised by how fast
+                # it moves, and voltHistory's mode would smear a one-reading step
+                # across half a second, which is the very edge being measured.
+                liftWatch.update(volts, now)
 
                 # Whatever goes wrong, keep the evidence.  A live run records only
                 # the ROI, so a panel that will not read leaves nothing to look at --
@@ -2815,7 +2863,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     noisy = (quietLevel is not None
                              and len(centres) > max(3.0, STALE_FACTOR * quietLevel))
 
-                    lifting = inLift(steadyVolts, voltSeen, now, heldSince)
+                    lifting = liftWatch.quiet(now)
                     ranked = candidates(live, spacing, now, H, volts = steadyVolts,
                                         quiet = noisy, columns = columnVolts,
                                         verdicts = columnVerdicts, lifting = lifting)
