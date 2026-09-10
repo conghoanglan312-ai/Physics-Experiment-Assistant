@@ -1617,7 +1617,36 @@ CHARGE_MIN_SAMPLES = 5
 # 0.05 admits 20 V of error on a fast droplet and 50 V on a slow one, which is the
 # range the operator actually closes by hand.  Anything further off is a knob turn
 # away from being worth looking at, not a candidate.
-SLOW_DRIFT_MAX = 0.10              # grid/s, either direction, with the field on
+SLOW_DRIFT_MAX = 0.10              # grid/s -- superseded by slowDriftMax(), kept
+                                   # because DESIGN_NOTES cites it
+
+# Midpoint of Ⅳ.2's usable free-fall band, 0.2-0.5 grid/s.  The midpoint and not the
+# top: taking the most permissive corner of a range is how the first version of this
+# gate was derived, and an operator was right to challenge it.
+SLOW_DRIFT_FREE = 0.35
+
+
+def slowDriftMax(volts):
+    """How fast a droplet may drift and still be worth chasing, at this voltage.
+
+    A fixed number was wrong in both directions, because the answer depends on where
+    the voltage already sits.  From v = v_free (1 - U/U_b), a droplet drifting at v
+    under U balances at U_b, and it is worth ringing only if U_b is a voltage the
+    supply can actually reach:
+
+        v_max = v_free (1 - U / U_b_max)
+
+    At 250 V the old fixed 0.10 grid/s reached only U_b = 350 V, so every droplet
+    needing 400-500 V was invisible -- and the supply reaches at least 459 V, which is
+    the 提升 step measured on this apparatus.  An operator reported exactly that:
+    droplets they knew from experience were balanceable were never ringed.
+
+    At a HIGH working voltage the same formula tightens, which is also right: there is
+    little headroom left, so only a very slow drift can still be brought to balance.
+    """
+    if not volts or volts >= SUGGEST_MAX_V:
+        return BALANCED_MAX
+    return max(BALANCED_MAX, SLOW_DRIFT_FREE * (1.0 - float(volts) / SUGGEST_MAX_V))
 
 # Below this the droplet is BALANCED, not drifting, and telling the operator to change
 # the voltage is wrong.  Same relation as above: |v| / v_free = ΔU / U, so 0.02 grid/s
@@ -1949,7 +1978,7 @@ def candidates(live, spacing, now, roiH, volts = None, quiet = False,
         # lower limit to twice the upper -- because the fit, not this, is the test.
         rough = float(t.vel[1]) / spacing
         if fieldOn:
-            if abs(rough) > SLOW_DRIFT_MAX * 2.0:
+            if abs(rough) > slowDriftMax(volts) * 2.0:
                 continue
         elif not (MIN_SPEED * 0.5 <= rough <= MAX_SPEED * 2.0):
             continue
@@ -1964,7 +1993,7 @@ def candidates(live, spacing, now, roiH, volts = None, quiet = False,
             # Nearly balanced, whichever way it happens to be drifting.  Direction is
             # not a filter, it is the instruction: down means raise the voltage, up
             # means lower it.
-            if abs(speed) > SLOW_DRIFT_MAX:
+            if abs(speed) > slowDriftMax(volts):
                 continue
             if abs(speed) <= BALANCED_MAX:
                 action = "BALANCED"        # no direction, and no filtering by one
@@ -2046,7 +2075,7 @@ def divisionVerdict(seconds):
     return "1 div %.1fs USABLE" % seconds, (0, 255, 0)
 
 
-def candidateBanner(best, volts):
+def candidateBanner(best, volts, untested = 0):
     """One line of instruction, or None.  What to DO, not what was measured.
 
     Three regimes, because the operator hunts in three:
@@ -2060,6 +2089,14 @@ def candidateBanner(best, volts):
     against rubric 三.1.4 is a judgement for the team, so it is one constant.
     """
     if best is None:
+        if untested:
+            # Something is drifting slowly, but with the voltage sitting still nobody
+            # has tested whether it answers the field at all, and a slow drift on its
+            # own is equally a description of dust.  Ask for the test rather than
+            # naming a droplet: an instruction the operator can act on, and no claim
+            # that has not been earned.
+            return ("%d slow droplet%s -- toggle 0V/工作 or 平衡/提升 to see which answer"
+                    % (untested, "" if untested == 1 else "s"), (0, 220, 255))
         return None, (0, 220, 255)
     t, sp = best["track"], best["speed"]
     edge = best["secondsToEdge"]
@@ -2836,23 +2873,32 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         ranked = []
                 # Stick with the droplet already named unless it stops qualifying, or
                 # one with a CONFIRMED charge turns up while this one is still unknown.
-                    held = next((c for c in ranked if c["id"] == bestId), None)
-                    upgrade = (held is not None and held["charged"] is not True
-                               and any(c["charged"] is True for c in ranked))
-                    if held is not None and not upgrade:
+                    # Only a droplet whose charge has been CONFIRMED may be named.
+                    # A slow drift with the field sitting still is equally a
+                    # description of dust, and the operator has said three times that
+                    # the ring latches onto droplets which turn out to answer nothing.
+                    # It was true: the banner named whatever drifted slowest, tested or
+                    # not.  Untested droplets still get their thin ring -- the operator
+                    # has to see what to test -- but the instruction now asks for the
+                    # test instead of asserting a result.
+                    confirmed = [c for c in ranked if c["charged"] is True]
+                    untested = len(ranked) - len(confirmed)
+                    held = next((c for c in confirmed if c["id"] == bestId), None)
+                    if held is not None:
                         bestNow, bestSeen = held, now
-                    elif upgrade or bestNow is None or now - bestSeen > CANDIDATE_STICKY_S:
+                    elif bestNow is None or now - bestSeen > CANDIDATE_STICKY_S:
                         # Only now is the held droplet really gone.  The grace has to cover
                         # a dropout while OTHER candidates still qualify -- that is the
                         # common case, and applying it only when the list went empty left
                         # the banner alternating between two droplets every couple of
                         # seconds.
-                        if ranked:
-                            bestNow, bestId, bestSeen = ranked[0], ranked[0]["id"], now
+                        if confirmed:
+                            bestNow, bestId, bestSeen = confirmed[0], confirmed[0]["id"], now
                         else:
                             bestNow, bestId = None, None
                     if bestNow is None or now - bannerAt >= CANDIDATE_REFRESH_S:
-                        banner, bannerColour = candidateBanner(bestNow, steadyVolts)
+                        banner, bannerColour = candidateBanner(bestNow, steadyVolts,
+                                                               untested)
                         bannerAt = now
                     if chosenX is not None:
                         # Measuring, not hunting.  One line of progress, and the fall
