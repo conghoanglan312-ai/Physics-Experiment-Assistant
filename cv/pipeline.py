@@ -1696,6 +1696,46 @@ SUGGEST_MIN_V, SUGGEST_MAX_V = 40.0, 500.0
 # Below the low mark they are hunting slow fallers and will raise the voltage; above
 # the high mark, slow risers they will bring down.  Between the two, both populations
 # are worth showing, and the banner says which way each one needs to go.
+# How long a numeric voltage suggestion is held before it is allowed to change.
+#
+# The operator reads the suggestion, reaches for the knob, and turns it -- and the
+# panel, the reader and the fit all lag the knob by a fraction of a second.  A
+# suggestion recomputed every frame therefore keeps answering the voltage they have
+# just left, and if they overshoot the balance it reverses, which invites them to
+# overshoot back.  Holding it still for a few seconds lets the apparatus and the
+# reading settle between instructions.  The RING still follows every frame -- only the
+# number is held -- and the urgent messages (CATCH IT, BALANCED) are never held.
+SUGGEST_HOLD_S = 4.0
+_SUGGEST_HELD = {}                 # track id -> (text, when)
+
+
+def reachableBalance(volts, speed):
+    """The balance voltage this drift implies, or None if the supply cannot get there.
+
+    From v = v_free (1 - U/U_b),
+
+        U_b = U / (1 - v / v_free)
+
+    with v_free taken at the midpoint of Ⅳ.2's 0.2-0.5 band.  A slow FALLER implies a
+    balance voltage above the present one, a slow RISER one below it, and neither is
+    worth an instruction unless the supply can actually reach it.
+
+    This replaces a pair of fixed thresholds (190 V and 210 V) which asked only where
+    the operator was working, not whether the droplet was reachable from there.  Under
+    those, a droplet drifting slowly down at 459 V was told to RAISE -- there is no
+    voltage above 459 that would have balanced it, and an operator reported exactly
+    that instruction.  The same test now scales with the working voltage by
+    construction, which is the weighting they asked for.
+    """
+    if not volts:
+        return None
+    denom = 1.0 - float(speed) / SLOW_DRIFT_FREE
+    if denom <= 0:
+        return None                     # would need an unbounded voltage
+    ub = float(volts) / denom
+    return ub if SUGGEST_MIN_V <= ub <= SUGGEST_MAX_V else None
+
+
 HUNT_LOW_V = 190.0
 HUNT_HIGH_V = 210.0
 
@@ -1998,14 +2038,12 @@ def candidates(live, spacing, now, roiH, volts = None, quiet = False,
             if abs(speed) <= BALANCED_MAX:
                 action = "BALANCED"        # no direction, and no filtering by one
             else:
-                # Only the direction that fits where the operator is working.  At the
-                # low end they are climbing towards a balance and want slow fallers; at
-                # the high end they are coming down and want slow risers.  Showing both
-                # everywhere made the ring latch onto whatever was plausible instead of
-                # whatever was useful.
-                if volts < HUNT_LOW_V and speed < 0:
-                    continue
-                if volts > HUNT_HIGH_V and speed > 0:
+                # Only a droplet the supply can actually bring to balance FROM
+                # HERE.  A slow faller needs more voltage, a slow riser needs less, and
+                # at 459 V there is no "more" -- reachableBalance() answers that in one
+                # test that scales with the working voltage, where the old pair of
+                # fixed thresholds could not.
+                if reachableBalance(volts, speed) is None:
                     continue
                 action = "RAISE" if speed > 0 else "LOWER"
             # ...but it must have BEEN somewhere.  Dropping the displacement test here
@@ -2075,7 +2113,7 @@ def divisionVerdict(seconds):
     return "1 div %.1fs USABLE" % seconds, (0, 255, 0)
 
 
-def candidateBanner(best, volts, untested = 0):
+def candidateBanner(best, volts, untested = 0, now = None):
     """One line of instruction, or None.  What to DO, not what was measured.
 
     Three regimes, because the operator hunts in three:
@@ -2120,6 +2158,19 @@ def candidateBanner(best, volts, untested = 0):
                 tail = "set about %d V" % round((est[0] + est[1]) / 2.0)
             else:
                 tail = "%s %d-%d V" % (best["action"], abs(round(lo)), abs(round(hi)))
+            # Held still for SUGGEST_HOLD_S.  The knob, the panel and the fit all lag
+            # each other, so a number recomputed every frame answers the voltage the
+            # operator has just left and reverses if they overshoot.
+            if now is not None:
+                got = _SUGGEST_HELD.get(best["id"])
+                if got is None or now - got[1] >= SUGGEST_HOLD_S:
+                    _SUGGEST_HELD[best["id"]] = (tail, now)
+                    if len(_SUGGEST_HELD) > 64:
+                        for k in [k for k, v in _SUGGEST_HELD.items()
+                                  if now - v[1] > 10 * SUGGEST_HOLD_S]:
+                            del _SUGGEST_HELD[k]
+                else:
+                    tail = got[0]
             return ("id %d charged, drifting %s %.3f gr/s -- %s"
                     % (best["id"], way, abs(sp), tail), (0, 255, 0))
         return ("%s the voltage -- id %d charged, drifting %s %.3f gr/s"
@@ -2898,7 +2949,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             bestNow, bestId = None, None
                     if bestNow is None or now - bannerAt >= CANDIDATE_REFRESH_S:
                         banner, bannerColour = candidateBanner(bestNow, steadyVolts,
-                                                               untested)
+                                                               untested, now)
                         bannerAt = now
                     if chosenX is not None:
                         # Measuring, not hunting.  One line of progress, and the fall
