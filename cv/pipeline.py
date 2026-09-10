@@ -2676,7 +2676,18 @@ PICK_SEARCH_S = 2.0           # unmatched this long and the operator is told the
 PICK_GONE_SHOW_S = 8.0        # how long the "it left, here is how to get it back" line
                               # stays up after the pick is dropped
 
-ADOPT_MIN_SPAN = 0.5          # fraction of the fall the adopting track must cover
+# Fraction of the fall the adopting track must cover.
+#
+# 0.5 was a guess and it was wrong in the direction that matters: the fall this feature
+# exists to recover -- 2026-09-10, `0` at 973.5 s and `1.6` at 998.8 s, track broken
+# from 985.6 to 989.3 -- leaves a surviving segment of 9.5 s, 38% of the traverse. The
+# guard would have rejected the very case it was built for, and the fixture could never
+# have shown that because nothing on it needs adopting at all.
+#
+# 0.35 clears that case with margin while still demanding a third of the descent. The
+# residual test does the rest of the work: a track must lie on the line joining the two
+# crossings, which a droplet appearing near `1.6` does not.
+ADOPT_MIN_SPAN = 0.35
 ADOPT_MAX_RESIDUAL_PX = 6.0   # furthest any of its points may sit off the line
 
 
