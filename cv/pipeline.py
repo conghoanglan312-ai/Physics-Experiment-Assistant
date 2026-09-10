@@ -1681,6 +1681,59 @@ CHARGE_COLUMN_PX = 30.0
 # settle, short enough that the last droplet through cannot vote on this one.
 CHARGE_WINDOW_S = 30.0
 
+# How long a CHARGE VERDICT survives, as opposed to the samples behind it.
+#
+# CHARGE_WINDOW_S is a window on raw descent rates, and it has to be short: a droplet
+# moves between columns and the rates go stale.  But the ANSWER it produces does not go
+# stale on the same clock -- a droplet that ignored a 250 V step is uncharged, and it is
+# still uncharged a minute later.  Expiring the verdict with the samples meant an
+# operator toggled the field, watched the useless droplets lose their rings, and saw
+# every one of them come back thirty seconds later.  They reported the hunt aid
+# "still latches onto non-charged droplets" three sessions running.
+#
+# A spray is what really invalidates it: new droplets arrive, and the column no longer
+# holds what was tested.  So the verdict is kept until then, or for five minutes,
+# whichever comes first.
+CHARGE_VERDICT_S = 300.0
+
+# A droplet whose column produced a legal fall this recently is being MEASURED, not
+# hunted, however the tracker happens to have re-numbered it since.
+MEASURING_MEMORY_S = 240.0
+
+# 平衡/提升 adds RISE_STEP_V to the working voltage, so seeing both V and V+210 within
+# a few minutes means the higher one is a LIFT and not a balance.
+#
+# The tolerance covers the supply wandering a volt and a panel digit being misread; it
+# is NOT a free parameter to widen, because everything inside it is a voltage at which
+# the aid says nothing.  At 25 V a genuine balance at 485 V against a 250 V working
+# point reads as a lift and gets silenced.  15 V leaves the real step (209-210 V as
+# measured on 2026-09-10) comfortably inside and hands back that band.
+LIFT_TOLERANCE_V = 15.0
+LIFT_MEMORY_S = 300.0
+
+
+def inLift(volts, seen, now):
+    """Is this plate voltage the 提升 step above a working voltage seen recently?
+
+    The operator raises a measured droplet back to the top by pressing 提升, which adds
+    a fixed +210 V.  Nothing in the panel says so -- it just reads a bigger number --
+    and on 2026-09-10 the aid read 459 V, saw the droplet drifting slowly through the
+    top of its rise, and announced "BALANCED at 459 V.  Cut to 0V and time it".  Had
+    the operator done that, the fall would have been recorded against 459 V instead of
+    the true 249 V and the charge would have come out nearly double.
+
+    The lift is recognisable without new hardware because the STEP is fixed: if some
+    lower voltage was steady within the last few minutes and this one sits 210 V above
+    it, the operator is lifting, not balancing.
+    """
+    if volts is None or volts <= 0:
+        return False
+    for v, ts in seen.items():
+        if (now - ts <= LIFT_MEMORY_S
+                and abs((volts - v) - RISE_STEP_V) <= LIFT_TOLERANCE_V):
+            return True
+    return False
+
 # Update the window this many frames apart.  The picture only has to be legible to a
 # human watching droplets move at half a grid line a second; what it must not do is
 # spend the frame budget.  cv2.waitKey(1) costs 14.1 ms of a 42.4 ms budget on this
@@ -1757,8 +1810,12 @@ def noteColumnVoltage(columns, t, volts, spacing):
         del bucket[0]
 
 
-def columnChargeState(columns, x, now):
-    """True / False / None for the column a droplet is in.  See CHARGE_COLUMN_PX."""
+def columnChargeState(columns, x, now, verdicts = None):
+    """True / False / None for the column a droplet is in.  See CHARGE_COLUMN_PX.
+
+    `verdicts` remembers the ANSWER once the samples have produced one, because the
+    samples expire on CHARGE_WINDOW_S and the physics does not.  See CHARGE_VERDICT_S.
+    """
     key = int(round(float(x) / CHARGE_COLUMN_PX))
     hist = {}
     for k in (key - 1, key, key + 1):          # a droplet may straddle a boundary
@@ -1768,15 +1825,31 @@ def columnChargeState(columns, x, now):
              for v, r in hist.items()}
     usable = [(v, r) for v, r in fresh.items() if len(r) >= CHARGE_MIN_SAMPLES]
     if len(usable) < 2:
-        return None
+        return _rememberedCharge(verdicts, key, now)
     usable.sort()
     (loV, loR), (hiV, hiR) = usable[0], usable[-1]
     if hiV - loV < CHARGE_MIN_STEP_V:
+        return _rememberedCharge(verdicts, key, now)
+    got = (float(np.median(loR)) - float(np.median(hiR))) >= CHARGE_MIN_SEPARATION
+    if verdicts is not None:
+        for k in (key - 1, key, key + 1):
+            verdicts[k] = (got, now)
+    return got
+
+
+def _rememberedCharge(verdicts, key, now):
+    """The last verdict for this column, while it is still worth believing."""
+    if not verdicts:
         return None
-    return (float(np.median(loR)) - float(np.median(hiR))) >= CHARGE_MIN_SEPARATION
+    for k in (key, key - 1, key + 1):
+        got = verdicts.get(k)
+        if got is not None and now - got[1] <= CHARGE_VERDICT_S:
+            return got[0]
+    return None
 
 
-def candidates(live, spacing, now, roiH, volts = None, quiet = False, columns = None):
+def candidates(live, spacing, now, roiH, volts = None, quiet = False,
+               columns = None, verdicts = None, lifting = False):
     """The tracks worth the operator's attention, best first.
 
     Ⅳ.2 SELECTS IN TWO STAGES AND SO DOES THIS.  Getting that wrong is not a tuning
@@ -1816,6 +1889,11 @@ def candidates(live, spacing, now, roiH, volts = None, quiet = False, columns = 
         # panel unreadable there is no way to know which test to apply.  `if fieldOn:`
         # treated that as "off" and told an operator to balance a droplet that was
         # falling through a live 150 V field.  Say nothing instead.
+        return []
+    if lifting:
+        # 提升 is pressed: the operator is putting a droplet they have ALREADY chosen
+        # back at the top, and every verdict here would be about a voltage that is not
+        # a balance voltage.  There is nothing to hunt during a lift.
         return []
     fieldOn = volts > 0
     out = []
@@ -1884,8 +1962,8 @@ def candidates(live, spacing, now, roiH, volts = None, quiet = False, columns = 
         # The column's history first -- it survives the track dying at the toggle,
         # which the track's own history does not.  Fall back to the track for a
         # droplet in a column nothing else has been seen in.
-        charged = (columnChargeState(columns, t.pos[0], now) if columns is not None
-                   else None)
+        charged = (columnChargeState(columns, t.pos[0], now, verdicts)
+                   if columns is not None else None)
         if charged is None:
             charged = t.chargeState()
         if charged is False:
@@ -2219,6 +2297,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     bestId, bestSeen, bannerAt = None, 0.0, 0.0
     ranked = []                     # last computed candidate list, reused between frames
     columnVolts = {}                # column -> {plate voltage: [descent rates]}
+    columnVerdicts = {}             # column -> (charged?, when) -- outlives the rates
+    voltSeen = {}                   # plate voltage -> when last steady, for inLift()
     voltsFailedAt = None            # when the `V:` line first refused to read
     chosenX = None                  # the column the operator has settled on
     chosenSeen = 0.0                # when a track was last alive in it
@@ -2324,6 +2404,10 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # to see a 0.5 s toggle, which smoothing would erase.
                     steadyVolts = collections.Counter(
                         voltHistory).most_common(1)[0][0]
+                    if steadyVolts:
+                        # Bucketed the same way the charge history is, so a supply
+                        # wandering a volt does not look like a new hold.
+                        voltSeen[int(round(steadyVolts / 10.0)) * 10] = now
 
                 # Whatever goes wrong, keep the evidence.  A live run records only
                 # the ROI, so a panel that will not read leaves nothing to look at --
@@ -2598,8 +2682,10 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     noisy = (quietLevel is not None
                              and len(centres) > max(3.0, STALE_FACTOR * quietLevel))
 
+                    lifting = inLift(steadyVolts, voltSeen, now)
                     ranked = candidates(live, spacing, now, H, volts = steadyVolts,
-                                        quiet = noisy, columns = columnVolts)
+                                        quiet = noisy, columns = columnVolts,
+                                        verdicts = columnVerdicts, lifting = lifting)
 
                     # Has the operator settled on one?  Decided AFTER the candidate
                     # list, so it inherits every test in it.  An earlier version asked
@@ -2615,6 +2701,23 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # the display for.
                         if getattr(t, "completedFalls", 0) > 0:
                             return True
+                        # ...but completedFalls lives on the TRACK, and a track does
+                        # not survive the lift: on 2026-09-10 one droplet's three falls
+                        # carried three different ids, so the counter was back at zero
+                        # every time it mattered.  Position does survive -- it is what
+                        # binding is grouped on -- so ask the same question of the
+                        # column instead.  Without this, the test could only catch a
+                        # fall IN PROGRESS, which needs a clean three-second fit, which
+                        # is exactly what a droplet drifting along a grid line cannot
+                        # give: the hunt rings stayed up through the whole first
+                        # measurement.
+                        here = float(t.pos[0])
+                        for f in reversed(falls[-12:]):
+                            if (f.legal and getattr(f, "xPx", None) is not None
+                                    and f.tBottom is not None
+                                    and abs(f.xPx - here) <= SAME_DROPLET_X_PX
+                                    and now - f.tBottom <= MEASURING_MEMORY_S):
+                                return True
                         if t.tTop is None or t.tBottom is not None:
                             return False
                         fit = t.windowFit(spacing, now)
@@ -2644,6 +2747,11 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             abs(float(t.pos[0]) - chosenX) <= SAME_DROPLET_X_PX
                             for t in live if not t.miss):
                         chosenSeen = now           # still occupied, between drops
+                    if noisy:
+                        # A spray puts new droplets in every column, so what was
+                        # established about the old ones no longer describes what is
+                        # being ringed.  The verdict outlives its samples but not this.
+                        columnVerdicts.clear()
                     if chosenX is not None and (noisy or now - chosenSeen > CHOSEN_RELEASE_S):
                         chosenX = None             # sprayed, or the column emptied
                     if chosenX is not None:
