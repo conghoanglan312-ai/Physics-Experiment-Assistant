@@ -2764,6 +2764,19 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # having taken the whole screen with it.  A fall already
                         # outside the legal band is not a measurement worth clearing
                         # the display for.
+                        # EVERY route into this function needs the operator to
+                        # have handled the droplet, not just the fall-in-progress one.
+                        # Guarding a single branch on 2026-09-10 left the other two
+                        # open, and a spray droplet's own legal fall pinned the column
+                        # through the positional branch below: the operator sprays with
+                        # the field off, two unrelated droplets fell freely at
+                        # 0.45 grid/s, both were correctly recorded LEGAL, and the aid
+                        # switched itself off for a droplet they had never chosen.
+                        #
+                        # A legal fall proves a droplet FELL legally.  It says nothing
+                        # about whose droplet it is.
+                        if not worked(t):
+                            return False
                         if getattr(t, "completedFalls", 0) > 0:
                             return True
                         # ...but completedFalls lives on the TRACK, and a track does
@@ -2785,8 +2798,6 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                 return True
                         if t.tTop is None or t.tBottom is not None:
                             return False
-                        if not worked(t):
-                            return False        # a spray droplet, not a chosen one
                         fit = t.windowFit(spacing, now)
                         return fit is not None and MIN_SPEED <= fit[0] <= MAX_SPEED
 
