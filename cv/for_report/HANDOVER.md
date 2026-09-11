@@ -377,12 +377,6 @@ timestamps, so each is located to ~22 ms — **0.1%** of a 20 s fall.
   without showing which side made the call.
 - Control for that second look: 40 empty spots and 40 real droplets mixed in, blind.
 
-**Not done yet (asked for in 7.3)**
-
-- **Second laptop.** Replaying the 09-08 recording on another laptop needs no apparatus
-  and gives ms/frame and whether all 15 falls come out the same. A live run needs the
-  dongle on that laptop at the lab.
-
 ---
 
 ## Chapter 8 — Results
