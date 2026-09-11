@@ -1,0 +1,1334 @@
+{
+ "seed": 20260911,
+ "fixture": "09-08 hand-timed session",
+ "counts": {
+  "spray": 30,
+  "hunting": 50,
+  "measuring": 50,
+  "quiet": 20
+ },
+ "repeats": 15,
+ "minGapS": 3.0,
+ "items": [
+  {
+   "id": 47,
+   "frame": 48110,
+   "t": 2103.358,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 0
+  },
+  {
+   "id": 39,
+   "frame": 23645,
+   "t": 1064.6,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 1
+  },
+  {
+   "id": 38,
+   "frame": 48488,
+   "t": 2119.408,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 2
+  },
+  {
+   "id": 127,
+   "frame": 51060,
+   "t": 2228.612,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 3
+  },
+  {
+   "id": 106,
+   "frame": 33608,
+   "t": 1487.618,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 4
+  },
+  {
+   "id": 9,
+   "frame": 1573,
+   "t": 127.443,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 5
+  },
+  {
+   "id": 111,
+   "frame": 35182,
+   "t": 1554.448,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 6
+  },
+  {
+   "id": 114,
+   "frame": 32759,
+   "t": 1451.571,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 7
+  },
+  {
+   "id": 110,
+   "frame": 38540,
+   "t": 1697.025,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 8
+  },
+  {
+   "id": 105,
+   "frame": 18007,
+   "t": 825.215,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 9
+  },
+  {
+   "id": 10,
+   "frame": 21863,
+   "t": 988.937,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 10
+  },
+  {
+   "id": 4,
+   "frame": 22413,
+   "t": 1012.289,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 11
+  },
+  {
+   "id": 77,
+   "frame": 10249,
+   "t": 495.819,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 12
+  },
+  {
+   "id": 81,
+   "frame": 51315,
+   "t": 2239.439,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 13
+  },
+  {
+   "id": 30,
+   "frame": 3186,
+   "t": 195.929,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 14
+  },
+  {
+   "id": 35,
+   "frame": 3650,
+   "t": 215.632,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 15
+  },
+  {
+   "id": 76,
+   "frame": 26207,
+   "t": 1173.379,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 16
+  },
+  {
+   "id": 84,
+   "frame": 31807,
+   "t": 1411.15,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 17
+  },
+  {
+   "id": 22,
+   "frame": 40776,
+   "t": 1791.962,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 18
+  },
+  {
+   "id": 139,
+   "frame": 20009,
+   "t": 910.223,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 19
+  },
+  {
+   "id": 29,
+   "frame": 1449,
+   "t": 122.178,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 20
+  },
+  {
+   "id": 50,
+   "frame": 8374,
+   "t": 416.206,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 21
+  },
+  {
+   "id": 73,
+   "frame": 9190,
+   "t": 450.852,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 22
+  },
+  {
+   "id": 104,
+   "frame": 32073,
+   "t": 1422.444,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 23
+  },
+  {
+   "id": 147,
+   "frame": 19731,
+   "t": 898.414,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 24
+  },
+  {
+   "id": 119,
+   "frame": 14036,
+   "t": 656.611,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 25
+  },
+  {
+   "id": 33,
+   "frame": 4377,
+   "t": 246.5,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 26
+  },
+  {
+   "id": 18,
+   "frame": 1129,
+   "t": 108.591,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 27
+  },
+  {
+   "id": 86,
+   "frame": 51852,
+   "t": 2262.24,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 28
+  },
+  {
+   "id": 90,
+   "frame": 38189,
+   "t": 1682.122,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 29
+  },
+  {
+   "id": 85,
+   "frame": 33238,
+   "t": 1471.909,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 30
+  },
+  {
+   "id": 27,
+   "frame": 1741,
+   "t": 134.577,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 31
+  },
+  {
+   "id": 61,
+   "frame": 31119,
+   "t": 1381.939,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 32
+  },
+  {
+   "id": 56,
+   "frame": 45854,
+   "t": 2007.572,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 33
+  },
+  {
+   "id": 66,
+   "frame": 8580,
+   "t": 424.952,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 34
+  },
+  {
+   "id": 120,
+   "frame": 53305,
+   "t": 2323.933,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 35
+  },
+  {
+   "id": 142,
+   "frame": 346,
+   "t": 75.346,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 36
+  },
+  {
+   "id": 26,
+   "frame": 41411,
+   "t": 1818.924,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 37
+  },
+  {
+   "id": 138,
+   "frame": 39274,
+   "t": 1728.191,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 38
+  },
+  {
+   "id": 116,
+   "frame": 16561,
+   "t": 763.819,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 39
+  },
+  {
+   "id": 137,
+   "frame": 20446,
+   "t": 928.772,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 40
+  },
+  {
+   "id": 16,
+   "frame": 21336,
+   "t": 966.562,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 41
+  },
+  {
+   "id": 68,
+   "frame": 27675,
+   "t": 1235.71,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 42
+  },
+  {
+   "id": 123,
+   "frame": 18885,
+   "t": 862.493,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 43
+  },
+  {
+   "id": 53,
+   "frame": 48806,
+   "t": 2132.91,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 44
+  },
+  {
+   "id": 43,
+   "frame": 27237,
+   "t": 1217.114,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 45
+  },
+  {
+   "id": 118,
+   "frame": 56008,
+   "t": 2438.699,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 46
+  },
+  {
+   "id": 141,
+   "frame": 39591,
+   "t": 1741.65,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 47
+  },
+  {
+   "id": 62,
+   "frame": 3416,
+   "t": 205.695,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 48
+  },
+  {
+   "id": 132,
+   "frame": 20584,
+   "t": 934.631,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 49
+  },
+  {
+   "id": 78,
+   "frame": 5203,
+   "t": 281.569,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 50
+  },
+  {
+   "id": 130,
+   "frame": 19826,
+   "t": 902.448,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 51
+  },
+  {
+   "id": 17,
+   "frame": 833,
+   "t": 96.023,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 52
+  },
+  {
+   "id": 117,
+   "frame": 14463,
+   "t": 674.741,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 53
+  },
+  {
+   "id": 109,
+   "frame": 49220,
+   "t": 2150.488,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 54
+  },
+  {
+   "id": 54,
+   "frame": 43662,
+   "t": 1914.501,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 55
+  },
+  {
+   "id": 80,
+   "frame": 17000,
+   "t": 782.46,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 56
+  },
+  {
+   "id": 12,
+   "frame": 1666,
+   "t": 131.392,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 57
+  },
+  {
+   "id": 1106,
+   "frame": 33608,
+   "t": 1487.618,
+   "stratum": "measuring",
+   "repeatOf": 106,
+   "pos": 58
+  },
+  {
+   "id": 113,
+   "frame": 36040,
+   "t": 1590.878,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 59
+  },
+  {
+   "id": 70,
+   "frame": 25350,
+   "t": 1136.992,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 60
+  },
+  {
+   "id": 14,
+   "frame": 39884,
+   "t": 1754.09,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 61
+  },
+  {
+   "id": 31,
+   "frame": 44579,
+   "t": 1953.436,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 62
+  },
+  {
+   "id": 55,
+   "frame": 29428,
+   "t": 1310.14,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 63
+  },
+  {
+   "id": 125,
+   "frame": 52628,
+   "t": 2295.188,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 64
+  },
+  {
+   "id": 136,
+   "frame": 20914,
+   "t": 948.643,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 65
+  },
+  {
+   "id": 37,
+   "frame": 43918,
+   "t": 1925.371,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 66
+  },
+  {
+   "id": 88,
+   "frame": 37328,
+   "t": 1645.565,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 67
+  },
+  {
+   "id": 7,
+   "frame": 486,
+   "t": 81.29,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 68
+  },
+  {
+   "id": 20,
+   "frame": 22594,
+   "t": 1019.974,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 69
+  },
+  {
+   "id": 44,
+   "frame": 41823,
+   "t": 1836.418,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 70
+  },
+  {
+   "id": 91,
+   "frame": 15267,
+   "t": 708.877,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 71
+  },
+  {
+   "id": 72,
+   "frame": 8836,
+   "t": 435.822,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 72
+  },
+  {
+   "id": 0,
+   "frame": 22115,
+   "t": 999.636,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 73
+  },
+  {
+   "id": 121,
+   "frame": 52328,
+   "t": 2282.45,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 74
+  },
+  {
+   "id": 6,
+   "frame": 22230,
+   "t": 1004.519,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 75
+  },
+  {
+   "id": 75,
+   "frame": 24025,
+   "t": 1080.733,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 76
+  },
+  {
+   "id": 126,
+   "frame": 32857,
+   "t": 1455.732,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 77
+  },
+  {
+   "id": 41,
+   "frame": 2185,
+   "t": 153.428,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 78
+  },
+  {
+   "id": 11,
+   "frame": 40703,
+   "t": 1788.863,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 79
+  },
+  {
+   "id": 83,
+   "frame": 36314,
+   "t": 1602.512,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 80
+  },
+  {
+   "id": 25,
+   "frame": 40019,
+   "t": 1759.822,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 81
+  },
+  {
+   "id": 46,
+   "frame": 7437,
+   "t": 376.422,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 82
+  },
+  {
+   "id": 140,
+   "frame": 39369,
+   "t": 1732.224,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 83
+  },
+  {
+   "id": 58,
+   "frame": 9384,
+   "t": 459.089,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 84
+  },
+  {
+   "id": 99,
+   "frame": 38847,
+   "t": 1710.06,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 85
+  },
+  {
+   "id": 115,
+   "frame": 32955,
+   "t": 1459.893,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 86
+  },
+  {
+   "id": 71,
+   "frame": 28138,
+   "t": 1255.369,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 87
+  },
+  {
+   "id": 1120,
+   "frame": 53305,
+   "t": 2323.933,
+   "stratum": "measuring",
+   "repeatOf": 120,
+   "pos": 88
+  },
+  {
+   "id": 135,
+   "frame": 20154,
+   "t": 916.374,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 89
+  },
+  {
+   "id": 82,
+   "frame": 19070,
+   "t": 870.348,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 90
+  },
+  {
+   "id": 103,
+   "frame": 16792,
+   "t": 773.629,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 91
+  },
+  {
+   "id": 93,
+   "frame": 32293,
+   "t": 1431.787,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 92
+  },
+  {
+   "id": 24,
+   "frame": 22490,
+   "t": 1015.56,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 93
+  },
+  {
+   "id": 45,
+   "frame": 5293,
+   "t": 285.392,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 94
+  },
+  {
+   "id": 133,
+   "frame": 20296,
+   "t": 922.403,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 95
+  },
+  {
+   "id": 13,
+   "frame": 21712,
+   "t": 982.526,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 96
+  },
+  {
+   "id": 108,
+   "frame": 19341,
+   "t": 881.856,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 97
+  },
+  {
+   "id": 145,
+   "frame": 56135,
+   "t": 2444.092,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 98
+  },
+  {
+   "id": 59,
+   "frame": 47969,
+   "t": 2097.373,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 99
+  },
+  {
+   "id": 48,
+   "frame": 11411,
+   "t": 545.155,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 100
+  },
+  {
+   "id": 69,
+   "frame": 42531,
+   "t": 1866.478,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 101
+  },
+  {
+   "id": 79,
+   "frame": 46525,
+   "t": 2036.061,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 102
+  },
+  {
+   "id": 28,
+   "frame": 921,
+   "t": 99.76,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 103
+  },
+  {
+   "id": 19,
+   "frame": 1926,
+   "t": 142.431,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 104
+  },
+  {
+   "id": 101,
+   "frame": 16895,
+   "t": 778.002,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 105
+  },
+  {
+   "id": 122,
+   "frame": 37938,
+   "t": 1671.465,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 106
+  },
+  {
+   "id": 94,
+   "frame": 38632,
+   "t": 1700.933,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 107
+  },
+  {
+   "id": 34,
+   "frame": 10384,
+   "t": 501.55,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 108
+  },
+  {
+   "id": 107,
+   "frame": 18189,
+   "t": 832.942,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 109
+  },
+  {
+   "id": 87,
+   "frame": 18559,
+   "t": 848.652,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 110
+  },
+  {
+   "id": 143,
+   "frame": 20810,
+   "t": 944.228,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 111
+  },
+  {
+   "id": 51,
+   "frame": 5785,
+   "t": 306.28,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 112
+  },
+  {
+   "id": 129,
+   "frame": 54040,
+   "t": 2355.14,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 113
+  },
+  {
+   "id": 131,
+   "frame": 215,
+   "t": 69.784,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 114
+  },
+  {
+   "id": 8,
+   "frame": 21437,
+   "t": 970.85,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 115
+  },
+  {
+   "id": 3,
+   "frame": 751,
+   "t": 92.542,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 116
+  },
+  {
+   "id": 36,
+   "frame": 10784,
+   "t": 518.534,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 117
+  },
+  {
+   "id": 74,
+   "frame": 6510,
+   "t": 337.063,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 118
+  },
+  {
+   "id": 89,
+   "frame": 52002,
+   "t": 2268.609,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 119
+  },
+  {
+   "id": 149,
+   "frame": 109,
+   "t": 65.283,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 120
+  },
+  {
+   "id": 63,
+   "frame": 24959,
+   "t": 1120.39,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 121
+  },
+  {
+   "id": 52,
+   "frame": 9958,
+   "t": 483.461,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 122
+  },
+  {
+   "id": 144,
+   "frame": 478,
+   "t": 80.951,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 123
+  },
+  {
+   "id": 1014,
+   "frame": 39884,
+   "t": 1754.09,
+   "stratum": "spray",
+   "repeatOf": 14,
+   "pos": 124
+  },
+  {
+   "id": 64,
+   "frame": 4127,
+   "t": 235.883,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 125
+  },
+  {
+   "id": 21,
+   "frame": 41166,
+   "t": 1808.522,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 126
+  },
+  {
+   "id": 1132,
+   "frame": 20584,
+   "t": 934.631,
+   "stratum": "quiet",
+   "repeatOf": 132,
+   "pos": 127
+  },
+  {
+   "id": 112,
+   "frame": 55694,
+   "t": 2425.367,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 128
+  },
+  {
+   "id": 134,
+   "frame": 56290,
+   "t": 2450.673,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 129
+  },
+  {
+   "id": 97,
+   "frame": 51403,
+   "t": 2243.175,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 130
+  },
+  {
+   "id": 42,
+   "frame": 44726,
+   "t": 1959.678,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 131
+  },
+  {
+   "id": 5,
+   "frame": 40244,
+   "t": 1769.374,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 132
+  },
+  {
+   "id": 65,
+   "frame": 3321,
+   "t": 201.661,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 133
+  },
+  {
+   "id": 100,
+   "frame": 54541,
+   "t": 2376.411,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 134
+  },
+  {
+   "id": 49,
+   "frame": 41450,
+   "t": 1820.58,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 135
+  },
+  {
+   "id": 40,
+   "frame": 23460,
+   "t": 1056.744,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 136
+  },
+  {
+   "id": 1,
+   "frame": 40983,
+   "t": 1800.752,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 137
+  },
+  {
+   "id": 60,
+   "frame": 46107,
+   "t": 2018.313,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 138
+  },
+  {
+   "id": 1000,
+   "frame": 22115,
+   "t": 999.636,
+   "stratum": "spray",
+   "repeatOf": 0,
+   "pos": 139
+  },
+  {
+   "id": 1130,
+   "frame": 19826,
+   "t": 902.448,
+   "stratum": "quiet",
+   "repeatOf": 130,
+   "pos": 140
+  },
+  {
+   "id": 1024,
+   "frame": 22490,
+   "t": 1015.56,
+   "stratum": "spray",
+   "repeatOf": 24,
+   "pos": 141
+  },
+  {
+   "id": 67,
+   "frame": 42156,
+   "t": 1850.556,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 142
+  },
+  {
+   "id": 2,
+   "frame": 41295,
+   "t": 1813.999,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 143
+  },
+  {
+   "id": 98,
+   "frame": 31888,
+   "t": 1414.589,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 144
+  },
+  {
+   "id": 1027,
+   "frame": 1741,
+   "t": 134.577,
+   "stratum": "spray",
+   "repeatOf": 27,
+   "pos": 145
+  },
+  {
+   "id": 146,
+   "frame": 56463,
+   "t": 2458.018,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 146
+  },
+  {
+   "id": 15,
+   "frame": 22666,
+   "t": 1023.031,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 147
+  },
+  {
+   "id": 124,
+   "frame": 17139,
+   "t": 788.36,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 148
+  },
+  {
+   "id": 148,
+   "frame": 39682,
+   "t": 1745.513,
+   "stratum": "quiet",
+   "repeatOf": null,
+   "pos": 149
+  },
+  {
+   "id": 1116,
+   "frame": 16561,
+   "t": 763.819,
+   "stratum": "measuring",
+   "repeatOf": 116,
+   "pos": 150
+  },
+  {
+   "id": 57,
+   "frame": 44402,
+   "t": 1945.921,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 151
+  },
+  {
+   "id": 32,
+   "frame": 48888,
+   "t": 2136.392,
+   "stratum": "hunting",
+   "repeatOf": null,
+   "pos": 152
+  },
+  {
+   "id": 95,
+   "frame": 32595,
+   "t": 1444.608,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 153
+  },
+  {
+   "id": 1089,
+   "frame": 52002,
+   "t": 2268.609,
+   "stratum": "measuring",
+   "repeatOf": 89,
+   "pos": 154
+  },
+  {
+   "id": 96,
+   "frame": 13950,
+   "t": 652.959,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 155
+  },
+  {
+   "id": 128,
+   "frame": 37018,
+   "t": 1632.403,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 156
+  },
+  {
+   "id": 102,
+   "frame": 31710,
+   "t": 1407.032,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 157
+  },
+  {
+   "id": 1013,
+   "frame": 21712,
+   "t": 982.526,
+   "stratum": "spray",
+   "repeatOf": 13,
+   "pos": 158
+  },
+  {
+   "id": 23,
+   "frame": 40569,
+   "t": 1783.173,
+   "stratum": "spray",
+   "repeatOf": null,
+   "pos": 159
+  },
+  {
+   "id": 92,
+   "frame": 50886,
+   "t": 2221.224,
+   "stratum": "measuring",
+   "repeatOf": null,
+   "pos": 160
+  },
+  {
+   "id": 1021,
+   "frame": 41166,
+   "t": 1808.522,
+   "stratum": "spray",
+   "repeatOf": 21,
+   "pos": 161
+  },
+  {
+   "id": 1148,
+   "frame": 39682,
+   "t": 1745.513,
+   "stratum": "quiet",
+   "repeatOf": 148,
+   "pos": 162
+  },
+  {
+   "id": 1124,
+   "frame": 17139,
+   "t": 788.36,
+   "stratum": "measuring",
+   "repeatOf": 124,
+   "pos": 163
+  },
+  {
+   "id": 1001,
+   "frame": 40983,
+   "t": 1800.752,
+   "stratum": "spray",
+   "repeatOf": 1,
+   "pos": 164
+  }
+ ]
+}
