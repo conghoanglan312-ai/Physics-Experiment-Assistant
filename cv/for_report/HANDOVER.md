@@ -162,107 +162,111 @@ flowchart LR
 
 ## Chapter 6 — Development history
 
-### 6.1 Timeline (git: 57 commits, 2026-08-12 → 09-11)
+### 6.1 Timeline (57 commits, 2026-08-12 → 09-11)
 
-| date | what changed | commits |
-|---|---|---|
-| 08-12 | CV stub API; LLM back end + retrieval | cd44b9b, a17c60b |
-| 08-27 | CV API v2: session → droplets → falls, legality flags, LLM allow-list | 1cd1f7e |
-| 08-28 | pipeline moved into `cv/`, `api.py` the only entry; dongle bench check | 7c4c74a, 94a1ecd |
-| 08-29 | lost-track recovery: area floor, no duplicate spawn, re-acquisition | 3d94582 |
-| 08-30 | timing on capture timestamps | d60e8d6 |
-| 09-02 | panel and grid read at the dongle's geometry | 49e54b2 |
-| 09-03 | live path runs on real hardware (7 bench fixes); blind benchmark mode (11 commits) | f1ef33f, 2edf8c7 |
-| 09-06 | charge maths sealed in the CV layer; real grid-line masks; raw-frame replay | bc696ee, c6d70c3 |
-| 09-07 | balance voltage read from the panel; falls grouped; stale background rebuilt | eda75f6 |
-| 09-08 | overlay decluttered; killed captures replayable; hand-timed benchmark recorded | 496af20, 3103b64 |
-| 09-09 | area cap 100 → 900·mag²; first aided hunt (319 s); LLM model config + session flow | 5823629 |
-| 09-10 | hunt aid, position binding, live panel reading; circularity sweep; teammate's `llm/` merged; lift detector; adoption; click-to-select (19 commits) | baecd90, 3536f8c, 0a212a9, 222fd6b, 19b1fec, c9c9a65 |
-| 09-11 | field state decides the verdict; live-line voltage; adoption threshold | 9c145fd, 45f6b88 |
+| date | what changed | why | result |
+|---|---|---|---|
+| 08-12 | CV stub API; LLM back end + retrieval | tutor work could start before CV existed | CV and tutor built in parallel |
+| 08-27 | CV API v2: session → droplets → falls, legality flags, LLM allow-list | v1 held one result per video, not 5 falls per droplet | one data shape; charge kept away from the tutor |
+| 08-28 | pipeline moved into `cv/`, `api.py` the only entry; dongle check tool | code was reachable from many places | one entry point to test and seal |
+| 08-29 | lost-track recovery: area floor, no duplicate spawn, re-acquisition | droplets blink out mid-fall; twin tracks on one droplet | fewer lost falls and duplicates |
+| 08-30 | timing on capture timestamps | camera says 30 fps, delivers 22.4–23.6 | fall times independent of frame rate |
+| 09-02 | panel and grid read at the dongle's geometry | positions had been measured on monitor recordings | panel and grid found on dongle video |
+| 09-03 | live path on real hardware (7 fixes at the bench); blind benchmark mode | first run at the lab | live measuring works; human-vs-pipeline test possible |
+| 09-06 | charge maths inside the CV layer; real grid-line masks; lossless frame replay | rubric 三.1.4; grid lines made false blobs; compressed video hides droplets | q, n, e computed but sealed; fewer false blobs; exact re-runs |
+| 09-07 | balance voltage read from the panel; falls grouped by droplet; stale background rebuilt | voltage was typed in by hand; a refocus flooded the screen with false detections | voltage and grouping automatic |
+| 09-08 | overlay decluttered; killed captures replayable; hand-timed session recorded | markers flickered on 2-frame noise; a killed capture lost its data | cleaner screen; 15 stopwatch falls as a reference |
+| 09-09 | area cap 100 → 900·mag²; first aided hunt; LLM model config + session flow | pipeline found only 1 of 15 stopwatch falls | 15 of 15; first aided hunt 319 s |
+| 09-10 | hunt aid, position binding, live panel reading; shape-gate sweep; `llm/` merged; lift detector; fall recovery; click-to-select | hunting took 81% of lab time; operator reports from live tests | aided hunt median 219 s vs 463 s unaided; 11 droplets, 55 falls |
+| 09-11 | field state decides the verdict; live-line voltage; recovery threshold | wrong verdict at 0 V; 12 of 35 falls lacked a voltage; recovery refused the real lost fall | offline checks pass; live test pending |
 
 ### 6.2 Growth record (the "training log" equivalent)
 
 No training epochs. Each change was replayed on the same fixed recordings and scored.
+Two recordings served as benchmarks:
+- **Hand-timed session** (09-08): 3 droplets, 15 stopwatch-timed falls, 56,547 lossless frames.
+- **Acceptance recording** (older, one droplet): 5 operator-timed falls; every code change
+  had to keep all five.
 
-**Hand-timed benchmark `bench_0908`** (15 stopwatch-timed falls, 56,547 raw frames)
+**Hand-timed session**
 
-| version | falls found | legal |
+| version | stopwatch falls found | legal |
 |---|---|---|
 | area cap 100·mag² | 1 / 15 | — |
 | area cap 900·mag² (09-09) | 15 / 15 | 15 / 15 |
-| circularity 0.52 / 0.48 / 0.45 (09-10) | 15 / 15 each; 260 / 261 / 259 traverses | 15 / 15 |
+| shape gate 0.52 / 0.48 / 0.45 (09-10) | 15 / 15 each; 260 / 261 / 259 traverses | 15 / 15 |
 
-**Acceptance fixture `one_droplet_slow`** (5 operator-timed falls)
+**Acceptance recording**
 
-| version | traverses | kinematic-legal | reference falls kept |
+| version | traverses | speed-and-time legal | operator falls kept |
 |---|---|---|---|
-| b3f5a6c, before 09-09 | 33 | 7 | 5 / 5 |
+| before 09-09 | 33 | 7 | 5 / 5 |
 | area cap 100 → 900·mag² (09-09) | — | — | 3 / 5 |
 | + timed track claims blobs first, 6 s coast (09-09) | 46 | 16 | 5 / 5 |
 | + panel-margin and glyph masks (09-10) | 43 | 16 | 5 / 5 |
-| + rising droplets keep their track (09-10, current bar) | 46 | not recorded | 5 / 5 |
+| + rising droplets keep their track (09-10, current) | 46 | not recorded | 5 / 5 |
 
 **Other measured steps**
 
 | change | before → after |
 |---|---|
-| circularity 0.80 → 0.52 | droplet seen in 77% → 100% of frames (706 frames); 3.7 → 14.2 detections/frame (§1) |
-| coasting 0.5 → 3.0 s | both legal falls on the reference clip lost → both recovered (§7) |
-| duplicate-spawn guard | 31% of spawned tracks were twins within 12 px of a live track (§8) |
-| background interval 1.000 → 1.067 s | 13 → 37 traverses, 0 → 2 legal falls (§4) |
-| panel vote gate 0.9 | 15 bench falls: 14 correct, 1 refused, 0 wrong (§13) |
+| shape gate (circularity) 0.80 → 0.52 | droplet seen in 77% → 100% of frames (706 frames); 3.7 → 14.2 detections/frame |
+| coasting 0.5 → 3.0 s | both legal falls on a test clip lost → both recovered |
+| duplicate-spawn guard | 31% of new tracks had been twins within 12 px of a live track |
+| background sampling 1.000 → 1.067 s | 13 → 37 traverses, 0 → 2 legal falls |
+| panel vote gate 0.9 | 15 falls: 14 correct, 1 refused, 0 wrong |
 
 **Droplets measured (cumulative):** 5 by 09-08 → 8 by 09-09 → **11** by 09-10 (55 falls).
 
 ### 6.3 Bugs and how they were found and fixed
 
-| bug | symptom | cause | fix | ref |
-|---|---|---|---|---|
-| Shape gate unreachable | droplet seen in 77% of frames, never > 2.6 s → no falls timed | small-blob bias in 4πA/P² | 0.52 | §1 |
-| Area cap too tight | 1 / 15 falls | halo size depends on focus | 900·mag² | §2 |
-| Stale background after refocus | 68,609 track ids in 10 min (healthy session: 2,362) | median held two scenes | rebuild on 4× detection rate | §3 |
-| Frozen fall clock | first duration held through five drops; five identical CSV rows | end time never cleared; live object appended | clear; snapshot each fall | §9 |
-| Stale start after a lift | a 75.78 s "fall" | upward test needed the droplet seen above a height | test the direction | §10 |
-| Starved droplet | 2 fixture falls lost | spawn reservation ignored area | reserve by position and area | §11 |
-| `2` read as `7` | 700 V reported for a 200 V droplet | near-identical glyphs | vote + refuse | §13 |
-| Results written only at the end | 3 sessions lost in one day | CSV written after the last frame | write + flush per fall | §15 |
-| Display hid a timed fall | operator re-dropped a droplet already being timed, ~20 s lost | draw filter ran before the "being timed" exemption | reorder | §17 |
-| Hunt-time tool | a 2035 s hunt | a 4-fall droplet dropped, its time absorbed by the next | count from 2 falls | §18 |
-| Lift read as balance | "BALANCED at 459 V" advice; charge would be ~2× off | no lift awareness | rate-based lift latch | 4c5c756, 222fd6b |
-| Nothing ringed at 150 V | aid silent at low voltage | fixed v_free | measure v_free | c9c9a65 |
-| Rising droplet lost its track | new track id after each lift | re-acquisition was falling-only | mirror by direction | 2032c1c |
-| Aid pinned to strays | aid went silent | chosen droplet guessed from clock / legal fall | 15 s hold or click | 14aa449, 84fcc4f, c9c9a65 |
-| False "uncharged" | responsive droplets crossed out | one threshold, unsettled samples | three-way test + settling | d5eb5f8 |
-| "3/5" shown at 5/5 | wrong progress | count method differed from binding | count like binding | 5415c17 |
-| Wrong verdict at 0 V | falling droplet called "no reaction" | charge question asked before field state | field state first | 9c145fd |
-| Missing voltage | 12 / 35 legal falls without U | latch shows +0000V | live-line fallback | 9c145fd |
-| Adoption threshold | would refuse the real lost fall (38%) | 50% was a guess | 35% + unit test | 45f6b88 |
+| bug | symptom | cause | fix |
+|---|---|---|---|
+| Shape gate unreachable | droplet seen in 77% of frames, never > 2.6 s → no falls timed | small-blob bias in 4πA/P² | gate 0.80 → 0.52 |
+| Area cap too tight | 1 / 15 falls | halo size depends on focus | 900·mag² |
+| Stale background after refocus | 68,609 track ids in 10 min (healthy session: 2,362) | background held two scenes | rebuild when detections stay 4× the quiet rate |
+| Frozen fall clock | first duration held through five drops; five identical rows | end time never cleared; the same record saved five times | clear it; save a copy per fall |
+| Stale start after a lift | a 75.78 s "fall" | upward test needed the droplet seen above a height | test the direction of travel |
+| Starved droplet | 2 falls lost on the acceptance recording | spawn reservation ignored area | reserve by position and area |
+| `2` read as `7` | 700 V reported for a 200 V droplet | near-identical glyphs | vote across frames; refuse when frames disagree |
+| Results written only at the end | 3 sessions lost in one day | CSV written after the last frame | write + flush per fall |
+| Display hid a timed fall | operator re-dropped a droplet already being timed, ~20 s lost | draw filter ran before the "being timed" exemption | reorder |
+| Hunt-time counting | a 2035 s hunt | a 4-fall droplet dropped, its time absorbed by the next | count droplets from 2 falls |
+| Lift read as balance | "BALANCED at 459 V" advice; charge would be ~2× off | no lift awareness | rate-based lift detector |
+| Nothing ringed at 150 V | aid silent at low voltage | fixed free-fall speed | measure it at 0 V |
+| Rising droplet lost its track | new track id after each lift | re-acquisition was falling-only | mirror by direction |
+| Aid pinned to strays | aid went silent | chosen droplet guessed from clock / legal fall | 15 s hold on `0`, or click |
+| False "uncharged" | responsive droplets crossed out | one threshold, unsettled samples | three-way test + settling |
+| "3/5" shown at 5/5 | wrong progress | count method differed from grouping | count the way grouping does |
+| Wrong verdict at 0 V | falling droplet called "no reaction" | charge question asked before field state | field state first |
+| Missing voltage | 12 / 35 legal falls without U | latched line shows +0000V | fall back to the live `V:` line |
+| Fall-recovery threshold | would refuse the real lost fall (38% tracked) | 50% was a guess | 35% + unit test |
 
-How they were found: replay against hand times (area cap, shape gate), the acceptance
-fixture (starved droplet, rising tracks), frame-by-frame review of the annotated video
-(hidden fall), and operator reports during live tests (aid bugs).
+How they were found: replaying against stopwatch times (area cap, shape gate), the
+acceptance recording (starved droplet, rising tracks), frame-by-frame review of the
+annotated video (hidden fall), and operator reports during live tests (aid bugs).
 
 ### 6.4 AI tutor and app
 
-- **No training or fine-tuning.** Hosted models via API, grounded by retrieval over the
-  lab manual.
-- Built: provider base class with Gemini and GLM implementations, streaming, timeout,
-  input limit, 20-message memory, manual ingest into ChromaDB, 1,072-line system-prompt
-  builder. Commits a17c60b (08-12), 5823629 (09-09), merge 0a212a9 (09-10).
-- **Ask the LLM teammate** for prompt iterations, model comparisons and test
-  conversations; git does not hold those in detail.
+**To be written from the LLM / app teammates' records** (prompt iterations, model
+comparisons, test conversations, UI design). What the shared code shows so far:
+
+- No training or fine-tuning: hosted models via API, grounded by retrieval over the lab
+  manual.
+- Built: Gemini and GLM behind one interface, streaming, timeout, input limit,
+  20-message memory, manual indexed in ChromaDB, system-prompt builder.
 - Web UI not built yet.
 
 ### 6.5 Integration record
 
-| date | problem | solution | commit |
-|---|---|---|---|
-| 08-12 | LLM side needed CV data before CV existed | stub API with sample data | cd44b9b |
-| 08-27 | one dict per video could not hold 5 falls per droplet; field names inconsistent | v2: session → droplets → falls; allow-list for the LLM | 1cd1f7e |
-| 08-28 | pipeline code reachable from many places | `cv/api.py` the only entry point | 7c4c74a |
-| 09-06 | tutor + manual + time + voltage = the student's answer | q, n, e, U computed inside CV and never put in the LLM dict | bc696ee |
-| 09-10 | two branches (CV, `llm/`) diverged | merged | 0a212a9 |
-| to do | tutor reads `sample()` | pass live `analyze()` output | — |
+| date | problem | solution |
+|---|---|---|
+| 08-12 | LLM side needed CV data before CV existed | stub API with sample data |
+| 08-27 | one dict per video could not hold 5 falls per droplet; field names inconsistent | v2: session → droplets → falls; allow-list for the LLM |
+| 08-28 | pipeline code reachable from many places | `cv/api.py` the only entry point |
+| 09-06 | tutor + manual + time + voltage = the student's answer | q, n, e, U computed inside CV and never put in the LLM dict |
+| 09-10 | CV and `llm/` code diverged | merged |
+| to do | tutor reads `sample()` | pass live `analyze()` output |
 
 ---
 
@@ -339,7 +343,7 @@ timestamps, so each is located to ~22 ms — **0.1%** of a 20 s fall.
 | `cv/charge.py` | eq. (1-13), (1-14), manual constants |
 | `cv/api.py` | contract to the tutor, charge seal |
 | `llm/` | tutor back end |
-| `test/tools/` (not in git) | `check.py`, `bench15.py`, `hunttime.py`, `adoptunit.py` |
+| Development test scripts | automated checks used while building: benchmark replays, regression gate, hunt timing, unit tests. Not part of the finished product |
 
 ### 7.7 Validation and verification
 
@@ -426,7 +430,7 @@ Notes:
 
 ### 8.2 Machine vs manual
 
-**Per fall** (`bench_0908`, hand = operator's stopwatch)
+**Per fall** (09-08 hand-timed session; hand = operator's stopwatch)
 
 | fall | hand (s) | pipeline (s) | diff (s) | U (V) |
 |---|---|---|---|---|
@@ -442,9 +446,12 @@ Notes:
 | D2 f5 | 29.47 | 29.74 | +0.27 | 176 |
 | D3 f1 | 28.03 | 28.09 | +0.06 | 200 |
 | D3 f2 | 27.85 | 27.63 | −0.22 | 200 |
-| D3 f3 | 27.82 | 27.89 | +0.07 | 200 (not read on this fall; from the droplet's other falls) |
+| D3 f3 | 27.82 | 27.89 | +0.07 | 200\* |
 | D3 f4 | 27.58 | 27.75 | +0.17 | 200 |
 | D3 f5 | 28.20 | 28.12 | −0.08 | 200 |
+
+\* The panel showed +0000V during this fall: an apparatus display fault (a jammed button).
+The voltage was recovered by majority vote over the droplet's other four falls, all 200 V.
 
 15 / 15 found; mean −0.11 s, sd 0.23 s. A stopwatch carries a few tenths of a second of
 reaction error, so the two agree within the manual method's own uncertainty.
@@ -470,7 +477,7 @@ apparatus and operator.
 | bench 09-08 | 1 | 508 | 310 | 818 | no |
 | bench 09-08 | 2 | 443 | 315 | 758 | no |
 | bench 09-08 | 3 | 392 | 300 | 692 | no |
-| live 09-08 19:51 | 4 | 343 | 203 (4 falls live) | — | no |
+| live 09-08 19:51 | 4 | 343 | 252 | 595 | no |
 | live 09-08 19:51 | 5 | 1243 | 483 | 1726 | no |
 | live 09-09 15:20 | 6 | 541 | 369 | 910 | no |
 | live 09-09 15:20 | 7 | 463 | 444 | 907 | no |
@@ -487,22 +494,23 @@ apparatus and operator.
 
 - **Median hunt −244 s (−53%).** Every aided hunt is faster than every unaided hunt
   (35 of 35 pairs; Mann–Whitney U = 0, p ≈ 0.003 two-sided).
-- Measuring time is similar either way (median 342 s unaided, 314 s aided): it is set by
+- Measuring time is similar either way (median 315 s unaided, 314 s aided): it is set by
   fall time × 5 plus lifts.
-- Hunt + measuring per completed droplet: median 863 s unaided (n = 6), 555 s aided
-  (n = 3), −36%.
+- Hunt + measuring per completed droplet: median 818 s unaided (n = 7), 555 s aided
+  (n = 3), −32%.
 - Caveats (small n, learning curve): `HUNT_TIMES.md`.
 
 ### 8.4 Detection, tracking and analysis error
 
-| metric | value | source |
+| metric | value | how it was measured |
 |---|---|---|
-| Stopwatch-timed falls detected | 15 / 15 and 5 / 5 | `bench15.py`, `check.py` |
-| Timing vs stopwatch | −0.11 ± 0.23 s (15 falls); −0.27 ± 0.42 s (5 falls) | same |
-| e from pipeline vs hand times | within 0.9 percentage points per droplet | 8.2 |
-| Legal falls lost to tracking breaks | 4, across 4 sessions | recordings; adoption added 09-10, fixed 09-11 |
-| Voltage read per legal fall | 23 / 35 (66%), 09-10 lab sessions; every droplet still got its voltage from its other falls | `falls_*.csv`; fallback added 09-11, not yet tested live |
-| Panel misreads | 14 correct, 1 refused, 0 wrong on 15 falls | §13 |
-| q/e distance from a whole number | 0.02–0.16 for 10 of 11 droplets; 0.29 for droplet 10 (−9.7%), which the live warning flags | `BENCHMARK.md` |
-| Limit of that check | droplet 11 (n = 1, −10.5%) sits only 0.11 from 1 | `BENCHMARK.md` |
-| **Per-frame detection precision / recall** | **not measured** | protocol in 7.7 |
+| Stopwatch falls detected, 09-08 session | 15 / 15 | session replayed through the pipeline; a stopwatch fall counts as found when the pipeline recorded a fall starting within 4 s of the operator's start |
+| Operator-timed falls kept, older one-droplet recording | 5 / 5 | re-run after every code change; all five still found each time |
+| Timing error vs stopwatch | −0.11 ± 0.23 s (15 falls); −0.27 ± 0.42 s (5 falls) | pipeline duration minus stopwatch duration, mean ± SD; the 5-fall set paired shortest with shortest |
+| e: pipeline vs hand times | within 0.9 percentage points per droplet | e computed twice for droplets 1–3, once from each set of times, same voltages (8.2) |
+| Legal falls lost to tracking breaks | 4, across 4 sessions | completed falls the pipeline never recorded because the droplet's track broke mid-fall; recovery added 09-10, corrected 09-11 |
+| Voltage read per legal fall | 23 / 35 (66%); every droplet still got its voltage from its other falls | legal falls with a panel reading in the pipeline output, all 09-10 lab sessions; fallback to the live `V:` line added 09-11, not yet tested live |
+| Panel reading | 14 correct, 1 refused, 0 wrong | the 15 falls of the 09-08 session against the known 151 / 176 / 200 V; the refused one is D3 f3 (8.2) |
+| q/e distance from a whole number | 0.02–0.16 for 10 of 11 droplets; 0.29 for droplet 10 (−9.7%), which the live warning flags | each droplet's q divided by e = 1.602×10⁻¹⁹ C, distance to the nearest whole number |
+| Limit of that check | droplet 11 (n = 1, −10.5%) sits only 0.11 from 1 | a 10% error moves q/e by 0.1 when n = 1, but by 0.3 when n = 3 |
+| Per-frame detection precision / recall | in progress | hand-labelled frames scored against the pipeline (7.7) |
