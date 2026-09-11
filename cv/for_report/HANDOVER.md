@@ -217,6 +217,13 @@ Two recordings served as benchmarks:
 
 **Droplets measured (cumulative):** 5 by 09-08 → 8 by 09-09 → **11** by 09-10 (55 falls).
 
+**What this means**
+
+- Nothing was tuned by feel. Every change was re-run on the same recordings and kept only if the stopwatch-timed falls still came out.
+- The biggest single gain was the area cap: from finding 1 of 15 falls to 15 of 15.
+- When a change cost a real fall (the area cap briefly dropped the acceptance recording from 5 falls to 3), it was fixed before moving on.
+- Loosening the shape gate added noise, not droplets, so the stricter setting stayed.
+
 ### 6.3 Bugs and how they were found and fixed
 
 | bug | symptom | cause | fix |
@@ -330,6 +337,11 @@ All results in this document were measured on this one machine.
 **Why dropped frames do not bias results:** crossings are interpolated on capture
 timestamps, so each is located to ~22 ms — **0.1%** of a 20 s fall.
 
+**What this means**
+
+- The laptop keeps up in real time: about 22 frames processed per second against the 23 the camera delivers.
+- The frames it drops cost display smoothness only; timing accuracy loses at most 0.1%.
+
 ### 7.4–7.6 Components
 
 | component | role |
@@ -377,6 +389,12 @@ timestamps, so each is located to ~22 ms — **0.1%** of a 20 s fall.
   without showing which side made the call.
 - Control for that second look: 40 empty spots and 40 real droplets mixed in, blind.
 
+**What this means**
+
+- Timing is checked against a human stopwatch, and the gap (0.1–0.3 s) is within a stopwatch's own reaction error.
+- Every code change is re-run on fixed recordings, so a change that loses a real fall is caught before it reaches the lab.
+- The physics is a check too: charge must come in whole electrons, and the pipeline warns live when it does not.
+
 ---
 
 ## Chapter 8 — Results
@@ -421,6 +439,12 @@ Notes:
 - Droplet 4 fall 5 (17.49 s) was measured from the session recording after the live
   tracker lost the track mid-fall (`README.md`).
 
+**What this means**
+
+- Measured e = 1.552×10⁻¹⁹ C, 3.1% below the accepted value, from 11 droplets carrying 1, 2 or 3 electrons: charge came in whole-number steps, which is what the experiment sets out to show.
+- Each droplet is measured precisely (about 1% uncertainty), but droplets disagree with each other by about 6%. The error is something fixed per droplet, not timing; a small leftover drift when a droplet was judged balanced is enough to explain it.
+- More droplets would shrink the overall error. Timing precision is not the limit.
+
 ### 8.2 Machine vs manual
 
 **Per fall** (09-08 hand-timed session; hand = operator's stopwatch)
@@ -460,6 +484,11 @@ reaction error, so the two agree within the manual method's own uncertainty.
 
 Same n for every fall either way.
 
+**What this means**
+
+- The pipeline times a fall as well as a careful person with a stopwatch: 0.11 s apart on average, about one reaction time.
+- Both give the same electron count for every fall and e within 0.9 percentage points, so the automatic timing can stand in for the hand timing.
+
 ### 8.3 Time taken
 
 Hunt = spray → first legal fall. Measuring = first fall start → last fall end. Same
@@ -493,6 +522,12 @@ apparatus and operator.
   (n = 3), −32%.
 - Caveats (small n, learning curve): `HUNT_TIMES.md`.
 
+**What this means**
+
+- With the aid, finding a usable droplet takes about half as long (median 7.7 → 3.7 min), and every aided search beat every unaided one.
+- Measuring time barely changes, because the physics sets it: 5 falls of 17–37 s plus lifts.
+- Per finished droplet the aid saves about a third of the total time (13.6 → 9.3 min).
+
 ### 8.4 Detection, tracking and analysis error
 
 | metric | value | how it was measured |
@@ -508,6 +543,13 @@ apparatus and operator.
 | Limit of that check | droplet 11 (n = 1, −10.5%) sits only 0.11 from 1 | a 10% error moves q/e by 0.1 when n = 1, but by 0.3 when n = 3 |
 | Per-frame detection, tracked droplets | precision 95.8%, recall 85.4%, F1 90.3% | 150 hand-labelled frames, blind, after a blind second look (8.5) |
 
+**What this means**
+
+- Detection and timing are solid: every stopwatch-timed fall was found and timed within stopwatch error.
+- Tracking occasionally lost a droplet mid-fall (4 falls in 4 sessions); a recovery step now handles this and passes its offline tests.
+- The weakest link is reading the voltage off the screen: about a third of falls took their voltage from the droplet's other falls. No droplet ended up without one, and a fix is in place but not yet tested at the lab.
+- The whole-number check catches balance errors on droplets with 2–3 electrons but can miss them on single-electron droplets.
+
 ### 8.5 Per-frame detection accuracy
 
 150 hand-labelled frames from the 09-08 recording, 1,213 droplets; method in 7.7. Figures
@@ -522,7 +564,7 @@ time. 95% intervals in brackets.
 | Rings shown to the operator | 96.6% (94.8–98.1) | 63.2%\* (56.6–70.3) | 76.4% (71.3–81.5) | 0.13 | 2.21 |
 
 \* Low on purpose: a ring goes only to a droplet that has fallen at least 0.2 division in
-a straight line for 1.5 s, so balanced, new or jittering droplets get none. For rings,
+a straight line for 1.5 s, to filter out stationary dust and flickering speckle, which also means balanced, new or jittering droplets get none. For rings,
 precision is the figure that matters.
 
 **By phase** (tracked droplets, plus the raw detector's recall)
@@ -548,3 +590,11 @@ precision is the figure that matters.
 `detection_examples_tracker.jpg`: one random frame per phase (fixed seed, not
 hand-picked), tracker stage. Green ring = found, red X = false detection, blue square =
 missed, yellow ring = marked unsure.
+
+**What this means**
+
+- When the system says "this is a tracked droplet", it is right about 96 times in 100.
+- It keeps track of about 85 of every 100 droplets on screen, and 97.5% while a droplet is being measured, which is when it matters.
+- Its agreement with a person (F1 90%) is close to how well the same person agrees with themself (95%), so the remaining gap is small.
+- It misses most right after spraying (crowded, 75% found) and in quiet stretches (61%), when the operator is not measuring. The rings the operator sees are 97% correct.
+- The result was checked three ways: blind labelling, a blind second look at every disagreement, and a control in which 0 of 40 empty spots were called droplets.
