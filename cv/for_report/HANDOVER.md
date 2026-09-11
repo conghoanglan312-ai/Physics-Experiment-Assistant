@@ -362,27 +362,26 @@ timestamps, so each is located to ~22 ms — **0.1%** of a 20 s fall.
 | Physics self-check | q/e distance from a whole number | warns above 0.20 | live, every fall |
 | Accepted value | e vs 1.602×10⁻¹⁹ C | −3.13% over 55 falls | per result set, automatic |
 
-**Requested in the requirements, not finished yet**
+**Per-frame detection accuracy (asked for in chapter 8) — done, results in 8.5**
 
-1. **Per-frame detection accuracy — in progress** (chapter 8 asks for it).
-   - 150 frames sampled at random across the 09-08 session's four phases (spray, hunting,
-     measuring, quiet), plus 15 of them shown again without notice to measure the
-     labeller's own consistency.
-   - A person marks every droplet, blind: the pipeline's output, the frame number and the
-     phase are hidden. Faint or ambiguous dots can be marked "unsure", which counts
-     neither way.
-   - Scored at three stages: raw detector blobs, tracked droplets (the HUD's "tracked"
-     count) and the rings shown to the operator. A detection within 8 px (about one
-     droplet width) of a mark is a hit.
-   - Precision, recall and F1, weighted by each phase's share of session time, with 95%
-     bootstrap intervals and a check across 4–12 px match radius.
-   - Disagreements then get a blind second look (droplet / not / unsure, without showing
-     which side made the call); results are reported before and after it.
-   - Live runs keep only the annotated video, so labelling uses the lossless recording of
-     the 09-08 session.
-2. **Second laptop — not done** (7.3 asks for it). Replaying the 09-08 recording on
-   another laptop needs no apparatus and gives ms/frame and whether all 15 falls come out
-   the same. A live run needs the dongle on that laptop at the lab.
+- 150 frames sampled at random from the 09-08 recording across its four phases (30 spray,
+  50 hunting, 50 measuring, 20 quiet), plus 15 of them shown again without notice.
+- One person marked every droplet (66 min), blind: the pipeline's output, the frame
+  number and the phase were hidden. Faint or ambiguous dots could be marked "unsure",
+  which counts neither way.
+- Scored at three stages: raw detector blobs, tracked droplets (the screen's "tracked"
+  count) and the rings shown to the operator. A detection within 8 px (about one droplet
+  width) of a mark is a hit. Phases weighted by their share of session time; 95%
+  bootstrap intervals.
+- Blind second look at every spot where the marks and the tracker disagreed (459 spots),
+  without showing which side made the call.
+- Control for that second look: 40 empty spots and 40 real droplets mixed in, blind.
+
+**Not done yet (asked for in 7.3)**
+
+- **Second laptop.** Replaying the 09-08 recording on another laptop needs no apparatus
+  and gives ms/frame and whether all 15 falls come out the same. A live run needs the
+  dongle on that laptop at the lab.
 
 ---
 
@@ -513,4 +512,45 @@ apparatus and operator.
 | Panel reading | 14 correct, 1 refused, 0 wrong | the 15 falls of the 09-08 session against the known 151 / 176 / 200 V; the refused one is D3 f3 (8.2) |
 | q/e distance from a whole number | 0.02–0.16 for 10 of 11 droplets; 0.29 for droplet 10 (−9.7%), which the live warning flags | each droplet's q divided by e = 1.602×10⁻¹⁹ C, distance to the nearest whole number |
 | Limit of that check | droplet 11 (n = 1, −10.5%) sits only 0.11 from 1 | a 10% error moves q/e by 0.1 when n = 1, but by 0.3 when n = 3 |
-| Per-frame detection precision / recall | in progress | hand-labelled frames scored against the pipeline (7.7) |
+| Per-frame detection, tracked droplets | precision 95.8%, recall 85.4%, F1 90.3% | 150 hand-labelled frames, blind, after a blind second look (8.5) |
+
+### 8.5 Per-frame detection accuracy
+
+150 hand-labelled frames from the 09-08 recording, 1,213 droplets; method in 7.7. Figures
+are after the blind second look, inside the detection area (the grid-line bands the
+detector skips by design are left out), with phases weighted by their share of session
+time. 95% intervals in brackets.
+
+| stage | precision | recall | F1 | false detections / frame | missed / frame |
+|---|---|---|---|---|---|
+| **Tracked droplets** | **95.8%** (93.4–97.5) | **85.4%** (80.9–89.8) | **90.3%** (87.5–92.8) | 0.23 | 0.88 |
+| Raw detector | 81.8% (72.8–88.9) | 95.6% (94.0–97.1) | 88.2% (82.7–92.3) | 1.28 | 0.26 |
+| Rings shown to the operator | 96.6% (94.8–98.1) | 63.2%\* (56.6–70.3) | 76.4% (71.3–81.5) | 0.13 | 2.21 |
+
+\* Low on purpose: a ring goes only to a droplet that has fallen at least 0.2 division in
+a straight line for 1.5 s, so balanced, new or jittering droplets get none. For rings,
+precision is the figure that matters.
+
+**By phase** (tracked droplets, plus the raw detector's recall)
+
+| phase | share of session | droplets / frame | precision | recall | F1 | raw detector recall |
+|---|---|---|---|---|---|---|
+| spray | 8.7% | 18.6 | 95.8% | 74.9% | 84.1% | 91.7% |
+| hunting | 47.1% | 8.7 | 95.1% | 89.7% | 92.3% | 96.6% |
+| measuring | 38.5% | 1.7 | 100.0% | 97.5% | 98.7% | 100.0% |
+| quiet | 5.6% | 6.8 | 94.9% | 61.2% | 74.4% | 93.4% |
+
+**Checks on the result**
+
+| check | result |
+|---|---|
+| Before the second look | tracked: precision 84.8%, recall 84.0%, F1 84.4%; raw detector: 73.6%, 95.2%, 83.0% |
+| Second look, 459 disagreement spots | 333 marked droplets the tracker missed: 332 confirmed, 1 unsure. 126 tracker-only spots: 103 droplets the labeller had missed, 10 not droplets, 13 unsure |
+| Control: 40 empty spots + 40 real droplets, blind | empty: 0 called a droplet (39 no, 1 unsure); real: 40 of 40 called a droplet |
+| Labeller against themself, 15 repeats | precision 97.6%, recall 93.1%, F1 95.3% |
+| Match radius 4 / 6 / 8 / 10 / 12 px | tracked F1 85.9 / 89.5 / 90.3 / 90.3 / 90.3% |
+| Whole picture, grid-line bands included | tracked: precision 98.5%, recall 77.5%, F1 86.8%. 11.8% of droplets sit in those bands, which the detector skips by design and tracks coast across |
+
+`detection_examples_tracker.jpg`: one random frame per phase (fixed seed, not
+hand-picked), tracker stage. Green ring = found, red X = false detection, blue square =
+missed, yellow ring = marked unsure.
