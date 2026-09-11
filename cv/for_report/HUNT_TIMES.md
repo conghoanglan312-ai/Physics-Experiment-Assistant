@@ -43,14 +43,15 @@ be scored. Reproduce with `python test/tools/hunttime.py <session dirs>`.
 |---|---|
 | aided median vs unaided median | **−244 s, −53%** |
 | slowest aided (319 s) vs fastest unaided (343 s) | −24 s, −7% |
+| aided–unaided pairs in which the aided hunt is faster | **35 of 35** (Mann–Whitney U = 0, p ≈ 0.003 two-sided) |
 
 **The two groups do not overlap.** Every aided hunt is faster than every unaided hunt.
-That is the statement to quote: it uses no mean, no pooling and no discarded outlier,
-and the second row is what makes it hold at the worst case rather than the best.
+That is the statement to quote: it uses no mean and no pooling, and the second row is
+what makes it hold at the worst case rather than the best.
 
 Roughly: hunting takes about **8 minutes unaided and about 4 aided**, while measuring a
-droplet takes 5–8 minutes either way. Over a five-droplet session that is close to
-20 minutes returned.
+droplet takes 4–8 minutes either way (236–483 s). Over a five-droplet session that is
+close to 20 minutes returned.
 
 ## The like-for-like check
 
@@ -76,8 +77,8 @@ could have been argued to read in the aid's favour. It no longer can.
   is for, but it is a counterfactual and cannot be recovered from the recording.
 - **A learning curve runs alongside.** Unaided hunts fell 508 → 443 → 392 inside one
   session, so operator practice explains part of any improvement. It does not explain
-  all of it: the aided figures sit below the whole unaided range, including the
-  operator's own best unaided attempt after three sessions of practice.
+  all of it: every aided figure sits below the whole unaided range, including the
+  operator's best unaided hunt (343 s).
 - **The 1243 s hunt is genuine** and is kept. It is the single worst hunt on record and
   it belongs in the unaided range.
 

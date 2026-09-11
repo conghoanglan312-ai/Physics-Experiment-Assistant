@@ -1,5 +1,10 @@
 # CV pipeline — everything the report needs
 
+> **2026-09-11: start with `HANDOVER.md`.** Two figures further down are out of date.
+> Hunt times: use `HUNT_TIMES.md` (median 463 s unaided, 219 s aided). The
+> "−0.27 s, sd 0.42 s" agreement is the `one_droplet_slow` fixture against its operator;
+> against the fifteen `bench_0908` hand times the pipeline agrees to −0.11 s, sd 0.23 s.
+
 Generated 2026-09-10. Every file here is a copy; the originals stay where they were
 produced, and the paths are given so anything can be regenerated or checked.
 
@@ -44,6 +49,7 @@ Two caveats to state rather than hide:
 | `charges_all.csv` | every fall of every droplet: t, U_n, a, q, n, e_i, plus per-droplet and overall mean/sd/error | `test/output/report_package/` |
 | `HUNT_TIMES.md` | every hunt measured, both comparisons, and what is not yet established | regenerate: `python test/tools/hunttime.py <session dirs>` |
 | `ALGORITHMS.md` | every algorithm used, what for, what it produces; top five ranked | - |
+| `HANDOVER.md` | **start here for chapters 5-8**: algorithms per system, frameworks, integration diagrams, rejected methods, development history, specs and latency, validation, result tables with Type A/B uncertainty | answers `Requirements_from_report.md` |
 | `WHY_CLASSICAL_CV.md` | where the AI is, why the measurement layer is not, and the one model worth adding | - |
 | `circularity_sweep.txt` | three full runs of the 15-fall benchmark at three thresholds | `test/output/circ_0.52`, `circ_0.48`, `circ_0.45` |
 | [`../DESIGN_NOTES.md`](../DESIGN_NOTES.md) | 20 sections: methodology, dead ends, what each cost | one level up, not duplicated here |
