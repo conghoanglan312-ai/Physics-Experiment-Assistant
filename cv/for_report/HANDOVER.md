@@ -1,10 +1,9 @@
 # CV hand-over for the report — chapters 5–8
 
-Answers `Requirements_from_report.md`. Every number comes from the recordings, the repo,
-or a named script. Anything not yet measured says so. Supporting files in this folder:
-`HUNT_TIMES.md`, `BENCHMARK.md`, `ALGORITHMS.md`, `WHY_CLASSICAL_CV.md`,
-`charges_all.csv`, `falls_*.csv`, `circularity_sweep.txt`. `§n` = section n of
-`../DESIGN_NOTES.md`.
+Answers `Requirements_from_report.md`. Every number comes from the recordings or the
+repo; anything not yet measured says so. Supporting files in this folder: `HUNT_TIMES.md`,
+`BENCHMARK.md`, `ALGORITHMS.md`, `WHY_CLASSICAL_CV.md`, `charges_all.csv`, `falls_*.csv`,
+`circularity_sweep.txt`.
 
 **Two facts before writing chapter 5:**
 - `app/` holds only a README. Streamlit is listed in `requirements.txt`, but **no web UI
@@ -25,8 +24,8 @@ No trained model. Classical computer vision plus rules taken from the lab manual
 
 | method | purpose | setting |
 |---|---|---|
-| Rolling median background | learn what is static: grid, labels, panel | 61 samples over 300 s, rebuilt every 5 s, 30 s initial learn; sample interval kept off whole seconds (§4) |
-| Stale-background rebuild | recover after the focus is touched | detections ≥ 4× the session's quiet rate for 45 s (§3) |
+| Rolling median background | learn what is static: grid, labels, panel | 61 samples over 300 s, rebuilt every 5 s, 30 s initial learn; sample interval kept off whole seconds |
+| Stale-background rebuild | recover after the focus is touched | detections ≥ 4× the session's quiet rate for 45 s |
 | Background subtraction (absolute difference) | isolate what moves | — |
 | Gaussian blur | suppress pixel noise | — |
 | Otsu's threshold + noise floor from median absolute deviation | per-frame threshold that cannot collapse on an empty chamber | floor factor 6 |
@@ -58,18 +57,18 @@ No trained model. Classical computer vision plus rules taken from the lab manual
 
 | method | purpose | setting |
 |---|---|---|
-| Line-crossing interpolation on capture timestamps | fall time independent of frame rate | sub-frame; timestamp taken between `grab()` and `retrieve()` (§6) |
+| Line-crossing interpolation on capture timestamps | fall time independent of frame rate | sub-frame; timestamp taken between `grab()` and `retrieve()` |
 | Least-squares line fit + residual | speed, and "is this a straight fall, not stitched noise" | residual ≤ 3 px over 3 s |
 | Kinematic legality (manual Ⅳ.2) | accept a fall | 8 divisions = 1.60 mm, 16–40 s, 0.2–0.5 div/s |
 | Field-off check | fall must happen at 0 V | panel digits all alike, sampled on 15 frames per fall |
-| Rise void | cancel a run when the droplet is lifted | 0.5 division of upward travel (§10) |
+| Rise void | cancel a run when the droplet is lifted | 0.5 division of upward travel |
 | One-division test | judge a droplet before a full fall | 2–5 s per division |
 
 **Voltage reading** (from the apparatus panel in the video)
 
 | method | purpose | setting |
 |---|---|---|
-| Glyph segmentation + 4-step dynamic programming | locate the four unevenly spaced digits | §12 |
+| Glyph segmentation + 4-step dynamic programming | locate the four unevenly spaced digits | uneven gaps of 42 / 39 / 44 px |
 | Template matching, zero-mean normalised cross-correlation | identify each digit | two template sets (latched line, live `V:` line) cut from labelled sweeps of 24 held voltages |
 | Multi-frame median after re-alignment | stable read | single-frame alignment read 733 for 133; stale alignment 183 for 83 |
 | Agreement vote | refuse a misread instead of guessing | ≥ 90% of frames must agree, else no value |
@@ -111,7 +110,7 @@ One entry point: **`cv/api.py`** — `survey()`, `analyze()`, `sample()`, `llm_c
   and health.
 - **q, n, e and the balance voltage never cross.** Rubric 三.1.4: the AI must not do the
   student's analysis. The tutor has the manual in retrieval, so fall time + voltage
-  would already be the answer (§16).
+  would already be the answer.
 - Today `llm/main.py → getSafeDropletData()` puts `llm_context(sample())` into memory.
   Next step: live `analyze()` output in place of `sample()`.
 
@@ -136,18 +135,18 @@ flowchart LR
 |---|---|---|
 | Trained detector (CNN) — considered | needs labelled footage per lamp, focus and camera; cannot explain why it rejected something (`WHY_CLASSICAL_CV.md`) | classical pipeline, each threshold measured |
 | Greedy nearest-neighbour matching — considered | can swap identities of two close droplets | Hungarian assignment |
-| Circularity ≥ 0.80 | droplets seen in 77% of frames; a perfect 2–5 px disc scores only 0.67–0.79 (§1) | 0.52; re-run at 0.48 and 0.45 on 56,547 frames → no extra falls (§20) |
-| Area cap 100·mag² | 1 of 15 hand-timed falls found (§2) | 900·mag² → 15 of 15 |
-| Adaptive per-session area cap | deferred, not needed at this magnification (§2) | fixed cap |
-| Timing by frame count | camera says 30 fps, delivers 22.4–23.6 (§6) | capture timestamps |
-| Corroboration gate (new track only on a blob also seen last frame) | removed 87% of noise, but operator falls 5 → 3 (§5) | not used |
-| Focus change from frame–background disagreement | 0.31% / 0.39% / 0.41% in handling / spray / quiet — no separation (§3) | detect the symptom: detection rate |
-| Focus change from reticle sharpness | impossible: the reticle is drawn electronically (§3) | same |
-| Background sampled every 1.000 s | 13 traverses, 0 legal vs 37 and 2 at 1.067 s (§4) | interval kept off whole seconds |
-| Grouping falls by track id | 9 falls came from 7 track ids on one live session (§9) | position + duration binding |
-| Rigid digit comb / scoring every x / stretching glyphs / aligning from `V:` | clipped digits; false chains; every `1` read as `7`; 609 V and 749 V (§12) | segmentation + dynamic programming; latched line aligns itself |
-| Better matcher for `2` misread as `7` | still read `0700` with cut and binarised variants (§13) | multi-frame vote, refuse below 90%, more templates |
-| H.264 clips as the acceptance gate | compression blur lets blobs pass that raw frames do not (§14) | raw frame captures gate; clips advisory |
+| Circularity ≥ 0.80 | droplets seen in 77% of frames; a perfect 2–5 px disc scores only 0.67–0.79 | 0.52; re-run at 0.48 and 0.45 on 56,547 frames → no extra falls |
+| Area cap 100·mag² | 1 of 15 hand-timed falls found | 900·mag² → 15 of 15 |
+| Adaptive per-session area cap | deferred, not needed at this magnification | fixed cap |
+| Timing by frame count | camera says 30 fps, delivers 22.4–23.6 | capture timestamps |
+| Corroboration gate (new track only on a blob also seen last frame) | removed 87% of noise, but operator falls 5 → 3 | not used |
+| Focus change from frame–background disagreement | 0.31% / 0.39% / 0.41% in handling / spray / quiet — no separation | detect the symptom: detection rate |
+| Focus change from reticle sharpness | impossible: the reticle is drawn electronically | same |
+| Background sampled every 1.000 s | 13 traverses, 0 legal vs 37 and 2 at 1.067 s | interval kept off whole seconds |
+| Grouping falls by track id | 9 falls came from 7 track ids on one live session | position + duration binding |
+| Rigid digit comb / scoring every x / stretching glyphs / aligning from `V:` | clipped digits; false chains; every `1` read as `7`; 609 V and 749 V | segmentation + dynamic programming; latched line aligns itself |
+| Better matcher for `2` misread as `7` | still read `0700` with cut and binarised variants | multi-frame vote, refuse below 90%, more templates |
+| H.264 clips as the acceptance gate | compression blur lets blobs pass that raw frames do not | raw frame captures gate; clips advisory |
 | Lift = a large voltage change | a hand turn and the switch both change the voltage | rate: hand ≤ 80 V/s (3 V per reading); switch 210 V in one reading (12 of 12 presses); OCR glitch up to 844 V → median, then rate |
 | Fixed free-fall speed 0.35 div/s | at 150 V a droplet falling 0.27 div/s computed as 656 V (unreachable); with v_free 0.45 it is 375 V | v_free measured at 0 V |
 | Fixed drift gate 0.10 div/s | at 250 V only balances ≤ 350 V were shown; the supply reaches ≥ 459 V | gate from reachable balance voltage |
@@ -155,7 +154,7 @@ flowchart LR
 | Single-threshold charge test | crossed out droplets that did respond | three answers + 0.5 s settling |
 | Voltage from latched line only | 12 of 35 legal falls had no voltage (09-10 lab sessions) | live `V:` line fallback |
 | Adoption needing ≥ 50% coverage | the real lost fall had 38% | ≥ 35% + ≤ 6 px residual |
-| Drop the annotated video to gain frame rate | writer costs 10.9 ms/frame, but it is the only record of a live run (§19) | kept |
+| Drop the annotated video to gain frame rate | writer costs 10.9 ms/frame, but it is the only record of a live run | kept |
 | Refresh the window every 3rd frame | saves the 14.1 ms of `waitKey`, but on Windows gives an 8 fps picture | every frame |
 
 ---
@@ -317,7 +316,7 @@ All results in this document were measured on this one machine.
 | Video input | apparatus BNC → USB UVC capture dongle, 1280×720; advertises 30 fps, **delivers 22.4–23.6 fps** |
 | Software | Python 3.11.9, OpenCV 5.0.0, NumPy 2.4.6, SciPy 1.17.1, pandas 3.0.5 |
 
-**Latency** (3,000 frames of `bench_0908`, everything else equal, §19)
+**Latency** (3,000 frames of the 09-08 recording, everything else equal)
 
 | configuration | per frame | frame rate |
 |---|---|---|
@@ -349,40 +348,41 @@ timestamps, so each is located to ~22 ms — **0.1%** of a 20 s fall.
 
 **In place**
 
-| check | how | result | automatic? |
+| check | how | result | when it runs |
 |---|---|---|---|
-| Timing vs stopwatch | `bench15.py`: 15 hand-timed falls | mean −0.11 s, sd 0.23 s, mean abs 0.19 s | script |
-| Timing vs operator | `check.py`: `one_droplet_slow`, 5 falls, paired by rank | mean −0.27 s, sd 0.42 s | script |
-| Result vs stopwatch | e from hand times vs pipeline times, droplets 1–3 | within 0.9 percentage points (8.2) | script |
-| Fall detection | same two benchmarks | 15 / 15 and 5 / 5 | script |
-| Regression gate | `check.py fixtures`: raw captures replayed; every reference fall kept, traverses ≥ 95% of baseline | 12+ runs, PASS | every change |
-| Adversarial clips | `check.py clips`: 4 H.264 clips, 20 reference falls, glare / tilt / blur / blackouts | advisory; clip 8 keeps 8 / 10, both losses verified genuine (§14) | script |
-| Shape-gate sweep | 3 full benchmark runs at 0.52 / 0.48 / 0.45 | 15 / 15 each, same durations (§20) | script |
-| Adoption unit test | `adoptunit.py`: real lost-fall geometry, 4 should-adopt and 4 impostor cases | PASS | script |
-| Panel reading | 15 bench falls vs known voltages | 14 correct, 1 refused, 0 wrong (§13) | script |
-| Physics self-check | q/e distance from a whole number | warns > 0.20 | live |
-| Accepted value | e vs 1.602×10⁻¹⁹ C | −3.13% over 55 falls | script |
+| Timing vs stopwatch | 09-08 session replayed; each of the 15 stopwatch falls compared with the pipeline's fall at the same moment | mean −0.11 s, sd 0.23 s, mean abs 0.19 s | on demand, automatic |
+| Timing vs operator | older one-droplet recording, 5 operator-timed falls, paired shortest with shortest | mean −0.27 s, sd 0.42 s | every code change, automatic |
+| Result vs stopwatch | e from hand times vs pipeline times, droplets 1–3 | within 0.9 percentage points (8.2) | once, automatic |
+| Fall detection | the same two recordings | 15 / 15 and 5 / 5 | as above |
+| Regression gate | lossless recordings replayed; every operator-timed fall must survive and the fall count must stay ≥ 95% of the last accepted run | 12+ runs, all passed | every code change, automatic |
+| Hard-case clips | 4 compressed clips with glare, tilt, blur and blackouts; 20 known falls | reported, not gating; one clip keeps 8 / 10, both losses checked and genuine | every code change, automatic |
+| Shape-gate sweep | 3 full runs of the 09-08 session at circularity 0.52 / 0.48 / 0.45 | 15 / 15 each, same durations | once, automatic |
+| Fall-recovery unit test | geometry of a real lost fall; 4 cases that should be recovered, 4 impostors | all 8 correct | on demand, automatic |
+| Panel reading | 15 falls of the 09-08 session vs the known voltages | 14 correct, 1 refused, 0 wrong | once, automatic |
+| Physics self-check | q/e distance from a whole number | warns above 0.20 | live, every fall |
+| Accepted value | e vs 1.602×10⁻¹⁹ C | −3.13% over 55 falls | per result set, automatic |
 
-**Not done yet — both are asked for in the requirements**
+**Requested in the requirements, not finished yet**
 
-1. **Per-frame detection accuracy** (chapter 8 asks for detection error / accuracy rate).
-   What exists is fall-level: every stopwatch-timed fall was found. Nothing yet says how
-   many droplets in a frame are detected, or how many detections are noise.
-   - Frames: live runs keep only the annotated video (overlay drawn on it, raw frames
-     gone), so labelling uses raw captures — `bench_0908` (56,547 frames) and
-     `one_droplet_slow` — or a new raw capture at the lab.
-   - Sample ~200 frames across quiet, just-after-spray and measuring periods.
-   - A person clicks every droplet centre. A second person labels 50 of the same frames
-     to measure human agreement.
-   - Score: detection within 8 px of a label = hit; unmatched detection = false
-     positive; unmatched label = miss. Report precision, recall, false positives per
-     frame, split by crowded vs quiet. Droplets on grid lines are blanked by design —
-     count them separately.
-   - Labelling is manual once (~30–40 min); scoring is a script that re-runs on every
-     change, like `check.py`.
-2. **Second laptop** (7.3 asks for it). Replay `bench_0908` on another laptop: no
-   apparatus needed, gives ms/frame and whether all 15 falls come out the same. A live
-   run needs the dongle on that laptop at the lab.
+1. **Per-frame detection accuracy — in progress** (chapter 8 asks for it).
+   - 150 frames sampled at random across the 09-08 session's four phases (spray, hunting,
+     measuring, quiet), plus 15 of them shown again without notice to measure the
+     labeller's own consistency.
+   - A person marks every droplet, blind: the pipeline's output, the frame number and the
+     phase are hidden. Faint or ambiguous dots can be marked "unsure", which counts
+     neither way.
+   - Scored at three stages: raw detector blobs, tracked droplets (the HUD's "tracked"
+     count) and the rings shown to the operator. A detection within 8 px (about one
+     droplet width) of a mark is a hit.
+   - Precision, recall and F1, weighted by each phase's share of session time, with 95%
+     bootstrap intervals and a check across 4–12 px match radius.
+   - Disagreements then get a blind second look (droplet / not / unsure, without showing
+     which side made the call); results are reported before and after it.
+   - Live runs keep only the annotated video, so labelling uses the lossless recording of
+     the 09-08 session.
+2. **Second laptop — not done** (7.3 asks for it). Replaying the 09-08 recording on
+   another laptop needs no apparatus and gives ms/frame and whether all 15 falls come out
+   the same. A live run needs the dongle on that laptop at the lab.
 
 ---
 
