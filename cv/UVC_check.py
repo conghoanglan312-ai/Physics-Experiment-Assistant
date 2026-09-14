@@ -176,7 +176,11 @@ display. Move the tap to the monitor's own feed and re-run this. There is no
 fallback: the camera-on-monitor method is retired, and the geometry constants
 are calibrated on the dongle's field now.
 """)
+    if autoROI is not None and withGrid:
+        return f"python -m cv.pipeline live {withGrid[0]['index']}"
 
 
 if __name__ == "__main__":
-    main(sys.argv)
+    result = main(sys.argv)
+    if result:
+        print(result)
