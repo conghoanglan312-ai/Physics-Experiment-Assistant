@@ -808,6 +808,30 @@ AREA_MAX_PX = 900
 
 
 REJECTS = {}                # gate -> count, for the run-end census
+# A blob where a live track is already pointing carries a prior that no shape gate can
+# match.  Small faint droplets -- 6 to 16 px, circularity sitting on the 0.52 gate --
+# blink out of the detector for seconds at a time, and a track that dies mid-fall takes
+# the measurement with it: two falls were lost that way on 2026-09-14.
+#
+# Relaxing all three gates at once FAILED the acceptance gate -- two reference falls
+# lost, two more shifted -- so each was gated alone on one_droplet_slow:
+#
+#   area floor x0.6   keeps all 5 reference falls, 50 traverses vs 46, timing identical
+#   grid mask off     LOSES 33.47 s                                        -> rejected
+#   circularity off   keeps all 5, but traverses FALL to 44 -- a relaxation that finds
+#                     fewer falls is not a fix                             -> rejected
+#
+# So only the area floor relaxes, and only for a contour sitting where a confirmed
+# track is already pointing.  Shape and the grid mask are unchanged: a droplet may be
+# fainter than the hunt would accept, but it must still look like a droplet and must
+# still be off the lines.  The static-mark mask, the area ceiling, the panel margin and
+# the frame edge never relax at all.
+SECOND_CHANCE_PX = 14.0
+SECOND_CHANCE_GROW = 12.0     # px of radius per second a track has been missing
+SECOND_CHANCE_MAX_PX = 30.0
+SECOND_CHANCE_AREA_FRAC = 0.6
+RECOVERED = [0]
+
 NEAR_MISSES = []            # (area, circularity) of contours that failed ONLY the
                             # shape test, which is where a flickering droplet lives
 
@@ -826,6 +850,10 @@ def rejectCensus():
     out = ["%-16s %8s %7s" % ("gate", "count", "share")]
     for why, count in sorted(REJECTS.items(), key = lambda kv: -kv[1]):
         out.append("%-16s %8d %6.1f%%" % (why, count, 100.0 * count / total))
+    if RECOVERED[0]:
+        out.append("")
+        out.append("kept beside a live track, under the area floor: %d"
+                   % RECOVERED[0])
     if NEAR_MISSES:
         import numpy as _np
         a = _np.array(NEAR_MISSES)
@@ -841,7 +869,15 @@ def rejectCensus():
     return "\n".join(out)
 
 
-def detectDroplets(gray, background, s, allAreas = None):
+def _nearTrack(cx, cy, keepNear):
+    """Is this contour where a confirmed track is already pointing?"""
+    for x, y, r in keepNear:
+        if (cx - x) ** 2 + (cy - y) ** 2 <= r * r:
+            return True
+    return False
+
+
+def detectDroplets(gray, background, s, allAreas = None, keepNear = None):
     diff = cv2.absdiff(gray, background)
     blurred = cv2.GaussianBlur(diff, (5, 5), sigmaX = 0)
     levelOtsu, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
@@ -862,10 +898,17 @@ def detectDroplets(gray, background, s, allAreas = None):
         if allAreas is not None:
             allAreas.append(cArea)
         perimeter = cv2.arcLength(cnt, True)
-        if perimeter == 0:
+        M = cv2.moments(cnt)
+        if perimeter == 0 or M["m00"] == 0:
             _reject("degenerate")
             continue
-        if cArea < s["areaMin"]:
+        # The centroid is needed before the gates now, because which gates apply
+        # depends on whether a track is already pointing here.
+        cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
+        near = bool(keepNear) and _nearTrack(cx, cy, keepNear)
+        areaFloor = (s["areaMin"] * SECOND_CHANCE_AREA_FRAC if near
+                     else s["areaMin"])
+        if cArea < areaFloor:
             _reject("area<min")
             continue
         if cArea > s["areaMax"]:
@@ -875,21 +918,23 @@ def detectDroplets(gray, background, s, allAreas = None):
         if circularity < CIRCULARITY_MIN:
             _reject("circularity", cArea, circularity)
             continue
-        M = cv2.moments(cnt)
-        cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
+        if near and cArea < s["areaMin"]:
+            RECOVERED[0] += 1
         mask = s.get("staticMask")
         if mask is not None:
             iy, ix = int(round(cy)), int(round(cx))
             if 0 <= iy < mask.shape[0] and 0 <= ix < mask.shape[1] and mask[iy, ix]:
                 _reject("static mark")
                 continue                # sitting on something the apparatus drew
-        if min(abs(cy - r) for r in s["gridRows"]) > s["gridClear"] \
-           and min(abs(cx - c) for c in s["gridCols"]) > s["gridClear"] \
-           and cx < s["roiW"] - s["panelClear"] \
-           and min(cx, cy, s["roiW"] - cx, s["roiH"] - cy) > s["edgeClear"]:
+        onGrid = (min(abs(cy - r) for r in s["gridRows"]) <= s["gridClear"]
+                  or (s["gridCols"]
+                      and min(abs(cx - c) for c in s["gridCols"]) <= s["gridClear"]))
+        inPicture = (cx < s["roiW"] - s["panelClear"]
+                     and min(cx, cy, s["roiW"] - cx, s["roiH"] - cy) > s["edgeClear"])
+        if inPicture and not onGrid:
             centres.append((cx, cy, cArea))
         else:
-            if min(abs(cy - r) for r in s["gridRows"]) <= s["gridClear"]:
+            if onGrid and min(abs(cy - r) for r in s["gridRows"]) <= s["gridClear"]:
                 _reject("grid row")
             elif s["gridCols"] and min(abs(cx - c) for c in s["gridCols"]) <= s["gridClear"]:
                 _reject("grid col")
@@ -1036,7 +1081,12 @@ MAX_COAST_S = 3.0          # how long a CONFIRMED track may be predicted through
 # crossing is interpolated between the last point above the line and the first below,
 # so a longer gap costs accuracy only if the droplet changed speed while invisible --
 # and a droplet in free fall at terminal velocity does not.
-MEASURING_COAST_S = 6.0
+# Raised from 6.0 on 2026-09-14.  A droplet whose circularity sits on the gate blinks
+# out for seconds at a time -- one fall that session lost its track six times and was
+# never recorded -- and a track that is mid-fall has nothing to gain from dying early:
+# it is reserved its corridor while it coasts, and the x-gate that takes the droplet
+# back is 14 px, so a longer wait cannot pick up a neighbour.
+MEASURING_COAST_S = 12.0
 # How close a new detection may be to a track that already exists before we refuse
 # to spawn on it.  Measured on clip 8 (2026-09-05) with the gate loosened to 0.52:
 # 868 of 2814 spawned tracks -- 31% -- were born within 12 px of a live track, which
@@ -1577,6 +1627,17 @@ EDGE_WARN_S = 8.0
 # which means the field must slow it or lift it.
 CHARGE_MIN_SEPARATION = 0.10       # grid/s between field-off and field-on descent
 
+# ...and the same question asked as a RATIO, which is what actually works.
+#
+# The difference test has a dead band: below 0.10 grid/s of separation and above
+# 0.02 it answers "unclear", and on 2026-09-14 twenty-six droplets out of twenty-six
+# landed there.  An operator watched one droplet ignore every voltage change for two
+# thirds of a session and it was never crossed out.  The reason is that the difference
+# between two noisy speeds is noisier than either, while their RATIO is not: a droplet
+# still falling at three quarters of its free-fall speed with the plates at 250 V is
+# not being held, whatever the difference happens to measure that second.
+CHARGE_HELD_FRACTION = 0.75        # still this fast at the higher voltage = not held
+
 # How many observations in EACH field state before the question is answerable.  This
 # was 12, which assumed the operator would hold each side of the toggle for a couple of
 # seconds.  They do not, and cannot: at 150-250 V most of a fresh spray leaves the
@@ -1684,6 +1745,70 @@ def slowDriftMax(volts, vFree = None):
 # every other frame -- which is exactly what an operator saw: a droplet balanced in
 # front of them, never ringed.
 BALANCED_MAX = 0.02                # grid/s
+
+# How well the droplet has to be balanced before its falls are worth trusting.
+#
+# BALANCED_MAX is the "it has stopped moving" test, and it is far too generous to
+# MEASURE against.  A residual drift v at plate voltage U means the true balance is
+# U / (1 - v/v_free), so the charge comes out wrong by about v/v_free: 0.02 grid/s on
+# a droplet that free-falls at 0.30 is a 7% error -- the size of the spread between
+# our own eleven droplets, and invisible to the eye (a third of a division in 30 s).
+#
+# So do not tighten BALANCED_MAX, which would stop the aid ever saying "settled".
+# Measure the residual drift instead and report it as the percentage it will cost.
+BALANCE_TARGET_PCT = 2.0        # implied error in q to aim under before timing
+BALANCE_FIT_S = 45.0            # the drift is fitted over at most this much of the hold
+BOLTZMANN = 1.380649e-23
+LAB_TEMPERATURE_K = 298.0       # 25 C, what the room reads; only the Brownian floor
+                                # uses it, never the charge
+BALANCE_MIN_FIT_S = 8.0         # ...and a shorter hold than this cannot say anything
+BALANCE_CHECK_S = 0.5           # how often it is recomputed, per droplet
+BALANCE_SHOW_S = 2.0            # ...and how often the screen is allowed to change
+SETTLE_AFTER_V_S = 2.0          # no verdict this soon after the voltage moved
+HOLD_SLACK_DIV = 0.35           # a held droplet may wander this far and still be held
+# Past this, "off balance by N%" is not a useful number -- 571% was shown on a droplet
+# in free fall.  Beyond it the droplet is not near balance at all, so give the
+# instruction and drop the arithmetic.
+BALANCE_FAR_PCT = 50.0
+# The implied balance voltage is U / (1 - v/v_free), which near balance amplifies every
+# wobble in v: an operator at 250 V was told to LOWER to 220, tuned to 224, was told to
+# LOWER to 200, then to RAISE to 250, then at 247 to LOWER to 220 again.  Each answer
+# was arithmetically right about a different second of Brownian motion.  So take the
+# median of the last few seconds of estimates, and say nothing when the move being
+# suggested is smaller than the noise on it.
+BALANCE_TARGET_MEMORY_S = 12.0
+# Past this far out, U / (1 - v/v_free) is still exact arithmetic and no longer advice:
+# v is then most of the free-fall speed, so the answer swings hundreds of volts between
+# frames.  An operator tuning a droplet that balanced at 169 V was sent to 43 V, 93 V,
+# 301 V and 364 V on consecutive seconds.  Beyond this, say which way and stop there.
+BALANCE_ADVICE_MAX_PCT = 40.0
+# A Brownian floor larger than this is not a floor, it is a window too short to fit:
+# the aid called 28.8% "as good as it gets" because a 2 s window makes the floor huge.
+BALANCE_FLOOR_MAX_PCT = 4.0
+# 提升 sits far above the balance band, so a reading up here is a lift whatever the
+# latch thinks.  Balance means nothing while the operator is carrying the droplet up.
+LIFT_VOLTS = 300.0
+# The fall-speed verdict is taken on a median over this long, and must cross the gate
+# by this much to flip.  Raw frame-to-frame speed sat on the 0.2 gr/s gate and the
+# banner alternated USABLE / DISCARD every two seconds on one droplet.
+SPEED_MEDIAN_S = 5.0
+SPEED_GATE_SLACK = 0.15
+# How long a droplet must go on being unbalanceable before it is crossed out.
+#
+# "Uncharged" needs the droplet seen at TWO voltages, and a droplet falling at full
+# speed leaves the picture before the operator can toggle: across a live session the
+# test reached two states on one track out of dozens, so four droplets that plainly
+# ignored the field went unmarked.  One state is enough for the weaker but sufficient
+# statement -- with this voltage on the plates it is still falling at free-fall pace,
+# so no voltage the supply can reach will hold it -- and that is the thing the operator
+# actually needs: do not chase this one.
+UNREACHABLE_SHOW_S = 3.0
+CHOSEN_IDLE_S = 90.0            # pinned column with nothing measured: let it go
+# ...and how long a REAL measurement holds the banner with no new fall arriving.  An
+# operator finished five falls at 7:34, moved to a second droplet, measured three more
+# falls on it -- and the banner still read "DONE -- 5 of 5" at 14:36, seven minutes
+# later, about a droplet they had left.  A count nobody is adding to is not news.
+MEASURE_IDLE_S = 180.0
 
 # The one-division drop test.  Balancing a droplet does not make it measurable: it
 # still has to fall at 0.2-0.5 grid/s with the field off, and the operator's quick
@@ -2011,7 +2136,7 @@ class Fall:
 
     FIELDS = ("id", "fTop", "fBottom", "tTop", "tBottom", "seconds", "legal",
               "kinematicLegal", "fieldOff", "balanceVoltage", "reacquired", "adopted",
-              "voltageFrom")
+              "voltageFrom", "balanceDriftPct", "balanceImpliedV")
 
     def __init__(self, t, spacing):
         for name in self.FIELDS:
@@ -2360,32 +2485,54 @@ def dropletFalls(falls, nearX):
     two-stage rule binding uses: cluster on column, then require the durations to agree,
     so a stray that falls down the same column is not absorbed.
     """
-    legal = sorted((f for f in falls
-                    if f.legal and getattr(f, "xPx", None) is not None),
-                   key = lambda f: f.tTop or 0.0)
-    if not legal:
+    # Column FIRST and duration SECOND was still two rules, and it broke the moment
+    # two droplets were measured in the same column: on 2026-09-14 one operator's five
+    # 26 s falls and another droplet's three 38 s falls clustered together, the median
+    # duration landed at 32 s between the two, and the 10% filter then threw away
+    # EVERYTHING -- the tally read "DONE 5 of 5" and then "MEASURING 4 of 5" on the
+    # same screen, and np.median() of the empty list filled the terminal with "Mean of
+    # empty slice".
+    #
+    # dropletGroups() grows each group on both tests at once, so two droplets sharing a
+    # column stay two groups.  It is what charges.csv already binds on, so the number
+    # on the screen and the number in the file now come from one rule instead of two
+    # that agree by coincidence.
+    groups = dropletGroups(falls)
+    if not groups:
         return []
-    groups = []
-    for f in legal:
-        for g in groups:
-            if abs(f.xPx - g["x"]) <= SAME_DROPLET_X_PX:
-                g["rows"].append(f)
-                g["x"] = float(np.median([q.xPx for q in g["rows"]]))
-                break
-        else:
-            groups.append({"x": float(f.xPx), "rows": [f]})
-    near = min(groups, key = lambda g: abs(g["x"] - nearX))
-    if abs(near["x"] - nearX) > 2 * SAME_DROPLET_X_PX:
+    centres = [float(np.median([q.xPx for q in g])) for g in groups]
+    i = min(range(len(groups)), key = lambda k: abs(centres[k] - nearX))
+    if abs(centres[i] - nearX) > 2 * SAME_DROPLET_X_PX:
         return []
-    rows = near["rows"]
-    for _pass in range(4):
-        med = float(np.median([q.seconds for q in rows]))
-        keep = [q for q in rows
-                if med > 0 and abs(q.seconds - med) / med <= SAME_DROPLET_DURATION_TOL]
-        if len(keep) == len(rows):
-            break
-        rows = keep
+    rows = groups[i]
     return rows
+
+
+def chargeFunnel(tracks):
+    """Where the charge test stops, counted across the live tracks.
+
+    Four droplets that plainly ignored the field went unmarked all session and no
+    number on the screen said why.  The test has four gates before it can answer --
+    the track must be confirmed, it must have been seen at some voltage, at two of
+    them with enough samples each, and those two must be far enough apart -- so count
+    the survivors of each and the answer falls out.
+    """
+    confirmed = [t for t in tracks if len(t.points) >= CONFIRM_POINTS]
+    seen = [t for t in confirmed if getattr(t, "byVolts", None)]
+    twoStates, apart = [], []
+    for t in seen:
+        full = sorted(v for v, r in t.byVolts.items() if len(r) >= CHARGE_MIN_SAMPLES)
+        if len(full) >= 2:
+            twoStates.append(t)
+            if full[-1] - full[0] >= CHARGE_MIN_STEP_V:
+                apart.append(t)
+    yes = sum(1 for t in apart if t.chargeState() is True)
+    no = sum(1 for t in apart if t.chargeState() is False)
+    crossed = sum(1 for t in confirmed if getattr(t, "unreachableSince", None))
+    return ("%d confirmed, %d seen at some voltage, %d at two, %d far enough apart "
+            "-> charged %d, uncharged %d, unclear %d; %d marked won't-balance"
+            % (len(confirmed), len(seen), len(twoStates), len(apart),
+               yes, no, len(apart) - yes - no, crossed))
 
 
 def chargeFromBuckets(byVolts):
@@ -2433,10 +2580,184 @@ def chargeFromBuckets(byVolts):
         return True
     if diff <= BALANCED_MAX:
         return False
+    # The ratio test, for everything the difference cannot call.  Only meaningful when
+    # the droplet was actually moving at the lower voltage -- a droplet that was not
+    # falling there says nothing about what the field does to it.
+    lo = float(np.median(loRates))
+    hi = float(np.median(hiRates))
+    if lo >= MIN_SPEED * 0.5 and hi >= CHARGE_HELD_FRACTION * lo:
+        return False
     return None
 
 
-def updateHold(t, yTop, spacing, now):
+def answersField(t, now, speed, vFree):
+    """Sticky: the field is visibly holding this droplet, so it has a charge.
+
+    The test used to read a one-second speed, which spikes, so a droplet being calmly
+    balanced was interrupted twelve times in one session with "no response seen yet,
+    toggle again to be sure".  Held is held: take the median of a couple of seconds,
+    and once a droplet has been seen held, stop asking.
+    """
+    if getattr(t, "answeredField", False):
+        return True
+    hist = getattr(t, "heldHistory", None)
+    if hist is None:
+        hist = t.heldHistory = []
+    hist.append((float(now), abs(float(speed))))
+    while hist and now - hist[0][0] > 2.5:
+        hist.pop(0)
+    if (hist[-1][0] - hist[0][0] >= 1.0
+            and float(np.median([v for _ts, v in hist])) <= 0.25 * float(vFree)):
+        t.answeredField = True
+    return bool(getattr(t, "answeredField", False))
+
+
+def steadySpeed(t, now, speed):
+    """This droplet's fall speed over the last few seconds, not this frame's."""
+    hist = getattr(t, "speedHistory", None)
+    if hist is None:
+        hist = t.speedHistory = []
+    hist.append((float(now), float(speed)))
+    while hist and now - hist[0][0] > SPEED_MEDIAN_S:
+        hist.pop(0)
+    return float(np.median([v for _ts, v in hist]))
+
+
+def usableSpeed(t, now, speed):
+    """(speed to report, is it in the legal band) -- with hysteresis on the band.
+
+    A droplet drifting at the 0.2 gr/s gate crosses it constantly, and each crossing
+    used to rewrite the banner: an operator watched one droplet go DISCARD, USABLE,
+    DISCARD, USABLE over ten seconds.  Once a verdict is given it takes a clear
+    crossing to reverse it.
+    """
+    v = steadySpeed(t, now, speed)
+    hist = t.speedHistory
+    span = hist[-1][0] - hist[0][0] if len(hist) > 1 else 0.0
+    was = getattr(t, "speedVerdict", None)
+    lo, hi = MIN_SPEED, MAX_SPEED
+    if was:
+        lo, hi = lo * (1.0 - SPEED_GATE_SLACK), hi * (1.0 + SPEED_GATE_SLACK)
+    ok = lo <= v <= hi
+    if was is not None and span < 1.5:
+        ok = was            # a median of one second cannot reverse a verdict either
+    t.speedVerdict = ok
+    return v, ok
+
+
+_shown = {}
+
+
+def brownianFloorPct(vFree, seconds):
+    """The best a drift measurement can do on this droplet in this window, in percent.
+
+    Brownian motion carries the droplet sqrt(2 D t) in time t, so a straight-line fit
+    over a window of t sees an apparent drift of about sqrt(2 D / t) however perfectly
+    the droplet is balanced.  Below that number there is nothing left to tune, and an
+    operator asked exactly the right question: how do you reach 2% when the thing
+    jiggles?  On a typical droplet, 20 s of hold cannot resolve better than ~2.5%,
+    45 s reaches ~1.7%, and 90 s ~1.2%.  Telling them when they are at the floor is
+    what stops them chasing it.
+    """
+    if not vFree or seconds < BALANCE_MIN_FIT_S:
+        return None
+    v = float(vFree) * chargeMath.FALL_DISTANCE / FALL_DIVISIONS      # grid/s -> m/s
+    if v <= 0:
+        return None
+    a = np.sqrt(9.0 * chargeMath.AIR_VISCOSITY * v
+                / (2.0 * chargeMath.OIL_DENSITY * chargeMath.GRAVITY))
+    D = (BOLTZMANN * LAB_TEMPERATURE_K
+         / (6.0 * np.pi * chargeMath.AIR_VISCOSITY * a))
+    floor = float(100.0 * np.sqrt(2.0 * D / seconds) / v)
+    return floor if floor <= BALANCE_FLOOR_MAX_PCT else None
+
+
+def holdText(key, now, text, colour, seconds = BALANCE_SHOW_S):
+    """Keep a changing number on the screen for `seconds` before letting it change.
+
+    Recomputed every frame, a drift percentage and a target voltage step through a
+    dozen values a second, and an operator reported the result as unreadable -- "more
+    of a nuisance than a help".  The calculation still runs every frame; only what is
+    DISPLAYED is held.
+    """
+    was = _shown.get(key)
+    if was is not None and now - was[2] < seconds:
+        return was[0], was[1]
+    _shown[key] = (text, colour, now)
+    return text, colour
+
+
+def fieldLevel(volts):
+    """Which of the three states the plates are in: off, working, or lifting."""
+    if volts is None:
+        return None
+    if float(volts) <= 0:
+        return "off"
+    return "lift" if float(volts) > LIFT_VOLTS else "work"
+
+
+def steadyDrift(t, now, drift, sinceChange = None):
+    """This droplet's drift over the last few seconds, not this frame's.
+
+    Smoothing the TARGET voltage and leaving the PERCENTAGE raw produced a screen that
+    argued with itself: "balanced to 6.0% ... within the noise, leave it", because the
+    6.0% was one frame's fit and the target was a twelve-second median.  Both now come
+    off the same smoothed drift, so the number and the instruction cannot disagree.
+
+    The memory is cut at the last voltage change.  After the operator turns the knob
+    the old samples describe a field that is gone, and averaging across the change is
+    how an aid lags behind the person using it.
+    """
+    hist = getattr(t, "driftHistory", None)
+    if hist is None:
+        hist = t.driftHistory = []
+    hist.append((float(now), float(drift)))
+    cut = now - BALANCE_TARGET_MEMORY_S
+    if sinceChange:
+        cut = max(cut, now - float(sinceChange))
+    while len(hist) > 1 and hist[0][0] < cut:
+        hist.pop(0)
+    return float(np.median([d for _ts, d in hist]))
+
+
+def balanceError(t, spacing, now, volts, vFree, seconds):
+    """What the residual drift at this voltage will cost the charge, in percent.
+
+    Returns (percent, drift grid/s, implied balance voltage, assumed) or None while
+    there is too little of the hold to fit.  `assumed` is True when the droplet's own
+    free-fall speed was never measured and the fallback had to be used, in which case
+    the percentage is an estimate of an estimate and is printed with a `~`.
+
+    Uses motion and the plate voltage only -- no charge, no electron count, no
+    accepted value.  From v = v_free (1 - U/U_b), a droplet still drifting at v is off
+    balance by v/v_free, and q is wrong by the same fraction.
+    """
+    if not volts or spacing <= 0:
+        return None
+    # A long fit over a steady hold is the accurate answer; the short-window speed is
+    # the one available while the operator is still turning the knob, which is exactly
+    # when they need to be told which way.  Marked `coarse` so the text can say `~`.
+    windows = ([seconds] if seconds >= BALANCE_MIN_FIT_S else []) + [BALANCE_MIN_FIT_S, 5.0]
+    fit, used = None, None
+    for w in windows:
+        fit = t.windowFit(spacing, now, w)
+        if fit is not None:
+            used = w
+            break
+    drift = fit[0] if fit is not None else t.recentSpeed(spacing)
+    if drift is None:
+        return None
+    drift = steadyDrift(t, now, drift, seconds)
+    free = vFree if vFree else SLOW_DRIFT_FREE
+    if free <= 0:
+        return None
+    return (100.0 * abs(drift) / free, drift,
+            reachableBalance(volts, drift, vFree), vFree is None,
+            fit is None or used < BALANCE_MIN_FIT_S)
+
+
+def updateHold(t, yTop, spacing, now, volts = None, columns = None,
+               sinceChange = None, lifting = False):
     """Track how long this droplet has sat balanced on the top line.
 
     Ⅳ.4's own first step, and the one thing on the screen that cannot happen by
@@ -2444,10 +2765,46 @@ def updateHold(t, yTop, spacing, now):
     """
     v = t.recentSpeed(spacing)
     onLine = float(t.pos[1]) <= yTop + MEASURE_HOLD_DIV * spacing
-    if v is None or abs(v) > BALANCED_MAX or not onLine:
-        t.heldSince = None
-    elif t.heldSince is None:
-        t.heldSince = float(now)
+    # Brownian motion defeats an instantaneous speed test.  A well balanced droplet
+    # crosses 0.02 grid/s constantly -- that is what the jiggle IS -- and every crossing
+    # used to reset the hold, so the fifteen seconds it must sit still were almost never
+    # reached: an operator reported the "hold it" line appearing about one try in ten.
+    # What matters is whether it has actually gone anywhere, so end the hold on
+    # DISPLACEMENT and let it jiggle in place.
+    if t.heldSince is None:
+        if v is not None and abs(v) <= BALANCED_MAX and onLine:
+            t.heldSince, t.heldAtY = float(now), float(t.pos[1])
+    elif not onLine or abs(float(t.pos[1]) - getattr(t, "heldAtY", float(t.pos[1]))) \
+            > HOLD_SLACK_DIV * spacing:
+        t.heldSince, t.heldAtY = None, None
+    # The hold IS the balance check: while the droplet sits on the line with the field
+    # on, fit its residual drift and keep the percentage it will cost.  Throttled,
+    # because freeFallSpeed reads the column history.  The value stays on the track
+    # after the operator cuts to 0 V, which is how the fall that follows carries it.
+    # The window to fit over is how long the VOLTAGE has been still, not how long the
+    # droplet has sat on the top line.  An operator left the knob untouched at 282 V
+    # for a minute with the droplet mid-screen, and nothing was ever measured or
+    # recorded, because a hold that never started gave a window of zero.
+    window = min(BALANCE_FIT_S, float(sinceChange)) if sinceChange else 0.0
+    if t.heldSince is not None:
+        window = max(window, min(BALANCE_FIT_S, float(now) - t.heldSince))
+    # Never while the droplet is being lifted.  A lift is 210 V above the working
+    # voltage and the droplet climbs at its free-fall pace, so the arithmetic returns
+    # about 100% -- and three of five falls carried that instead of the balance the
+    # operator had actually set.
+    if (volts and columns is not None and not lifting
+            and window >= BALANCE_MIN_FIT_S
+            and float(now) - getattr(t, "lastBalanceCheck", 0.0) >= BALANCE_CHECK_S):
+        t.lastBalanceCheck = float(now)
+        got = balanceError(t, spacing, now, volts, freeFallSpeed(columns, t.pos[0]),
+                           window)
+        if got is not None:
+            pct, drift, impliedV, _assumed, coarse = got
+            # A droplet nowhere near balance has no balance quality to record: the
+            # number belongs to the voltage the operator settled on, not to whatever
+            # the droplet was doing on the way there.
+            if not coarse and pct <= BALANCE_FAR_PCT:
+                t.balanceDriftPct, t.balanceDrift, t.balanceImpliedV = pct, drift, impliedV
 
 
 def heldLongEnough(t, now):
@@ -2455,7 +2812,8 @@ def heldLongEnough(t, now):
     return since is not None and float(now) - since >= MEASURE_HOLD_S
 
 
-def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None):
+def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
+                  sinceChange = None, lifting = False):
     """What to tell the operator about the droplet THEY chose.  (text, colour, ok)
 
     Reports on it whether or not it passes the candidate gates, because the operator
@@ -2480,13 +2838,22 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None):
         # an operator watched a droplet fall on 0 V and be told it did not react, and a
         # droplet falling too slowly be told the same instead of that it was too slow.
         # Both were the wrong question answered first.
-        if MIN_SPEED <= speed <= MAX_SPEED:
+        shown, ok = usableSpeed(t, now, speed)
+        if ok:
             return ("picked id %d falls %.2f gr/s -- USABLE, balance it on `0`"
-                    % (t.id, speed), (0, 255, 0), True)
-        why = "too fast" if speed > MAX_SPEED else "too slow"
+                    % (t.id, shown), (0, 255, 0), True)
+        why = "too fast" if shown > MAX_SPEED else "too slow"
         return ("picked id %d falls %.2f gr/s -- %s for %g-%g, DISCARD"
-                % (t.id, speed, why, MIN_SPEED, MAX_SPEED), (0, 0, 255), False)
-    # Field on from here, so "did it answer" is a question that means something.
+                % (t.id, shown, why, MIN_SPEED, MAX_SPEED), (0, 0, 255), False)
+    # Field on from here, so "did it answer" is a question that means something --
+    # unless the droplet is answering it in plain sight.  A droplet sitting almost
+    # still at 282 V, which would fall at its free-fall speed with the field off, is
+    # being HELD by the field; that IS the response.  The column verdict can belong to
+    # a previous droplet in the same column, and an operator who had left a balanced
+    # droplet alone for a minute was told "no response seen yet, toggle again".
+    if (volts and vFree and speed is not None
+            and answersField(t, now, speed, vFree)):
+        charged = True
     if charged is False:
         # Telling the operator to throw away a droplet they have spent minutes on is
         # the most expensive thing this can say, so it is said only on the droplet's
@@ -2500,29 +2867,104 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None):
     if charged is None:
         return ("picked id %d -- toggle the field to see if it answers"
                 % t.id, (0, 220, 255), None)
-    if abs(speed) <= BALANCED_MAX:
-        held = getattr(t, "heldSince", None)
-        steady = held is not None and float(now) - held >= SETTLED_S
-        if ADVISORY_MIN_V <= volts <= ADVISORY_MAX_V:
-            if steady:
-                # Ⅳ.3: a droplet that only jiggles about the line has reached
-                # mechanical equilibrium.  Say it plainly, because the instinct is to
-                # keep tuning and that is how the droplet gets lost.
-                return ("picked id %d BALANCED at %d V for %.0fs -- STOP ADJUSTING, "
-                        "the jiggle is Brownian. Cut to 0V and time it"
-                        % (t.id, volts, float(now) - held), (0, 255, 0), True)
-            return ("picked id %d looks balanced at %d V -- hold it, do not tune"
-                    % (t.id, volts), (0, 255, 0), True)
-        return ("picked id %d balances at %d V, outside the manual's %g-%g V"
-                % (t.id, volts, ADVISORY_MIN_V, ADVISORY_MAX_V), (0, 140, 255), False)
-    ub = reachableBalance(volts, speed, vFree)
+    # Nothing useful can be said in the first moments after the knob moves: the speed
+    # estimate still holds the motion from BEFORE the change.  An operator toggled back
+    # to 250 V and was told "no reachable balance, DISCARD" about a droplet that was
+    # simply still falling at its free-fall pace, which is what U_b = U/(1 - v/v_free)
+    # returns when v is momentarily v_free.
+    if sinceChange is not None and sinceChange < SETTLE_AFTER_V_S:
+        return ("picked id %d -- settling after the voltage change" % t.id,
+                (0, 220, 255), None)
+    # A droplet being carried up by 提升 is moving because the operator is moving it.
+    # Balance is not a question during a lift, and answering it anyway produced
+    # "balance ~1106.9%" and a target hundreds of volts away, on the screen of an
+    # operator who was simply holding the button.  The latch misses a ramped press, so
+    # the voltage itself is the backstop.
+    if lifting or (volts and float(volts) > LIFT_VOLTS):
+        return ("picked id %d -- lifting; balance is not measured during a lift"
+                % t.id, (0, 220, 255), None)
+    # How well it is balanced, as the percentage it will cost the charge.  One answer
+    # whether it is drifting or settled, because "not moving" and "balanced well enough
+    # to measure" are different questions and the eye cannot tell them apart: at
+    # 0.02 grid/s a droplet looks perfectly still and its charge is already 7% out.
+    held = getattr(t, "heldSince", None)
+    steady = held is not None and float(now) - held >= SETTLED_S
+    quality = balanceError(t, spacing, now, volts, vFree,
+                           min(BALANCE_FIT_S, float(now) - held)
+                           if held is not None else 0.0)
+    if quality is None:
+        return "picked id %d -- watching it" % t.id, (0, 220, 255), None
+    pct, drift, ub, assumed, coarse = quality
+    about = "~" if assumed or coarse else ""
+    # The target is 2%, but no measurement over a short window can resolve better than
+    # Brownian motion allows -- 2.5% over 15 s, 1.8% over 30 s.  Telling the operator
+    # to tune below that is telling them to chase noise, which is exactly what they
+    # were doing when they asked why the aid kept saying tune at 2-5%.
+    window = min(BALANCE_FIT_S, float(now) - held) if held is not None else 0.0
+    if sinceChange:
+        window = max(window, min(BALANCE_FIT_S, float(sinceChange)))
+    floor = brownianFloorPct(vFree, window)
+    # `coarse` means the fit fell back to a short window, where the floor is not a
+    # floor and the percentage is a guess.  No green cue is given on a guess.
+    atFloor = floor is not None and not coarse and pct <= floor * 1.3
+    if pct <= BALANCE_TARGET_PCT or atFloor:
+        if not ADVISORY_MIN_V <= volts <= ADVISORY_MAX_V:
+            return ("picked id %d balances at %d V, outside the manual's %g-%g V"
+                    % (t.id, volts, ADVISORY_MIN_V, ADVISORY_MAX_V), (0, 140, 255), False)
+        if coarse:
+            return ("picked id %d looks balanced (~%.1f%%) -- hold it still a few "
+                    "seconds to confirm" % (t.id, pct), (0, 220, 255), None)
+        if atFloor and pct > BALANCE_TARGET_PCT:
+            return ("picked id %d BALANCED to %.1f%% at %d V -- that is the Brownian "
+                    "limit over %.0f s, tuning cannot do better. Cut to 0V and time it"
+                    % (t.id, pct, volts, window), (0, 255, 0), True)
+        if steady:
+            # Ⅳ.3: a droplet this well balanced has reached mechanical equilibrium.
+            # Say it plainly, because the instinct is to keep tuning and that is how
+            # the droplet gets lost.
+            return ("picked id %d BALANCED to %s%.1f%% at %d V -- STOP ADJUSTING, the "
+                    "jiggle is Brownian. Cut to 0V and time it"
+                    % (t.id, about, pct, volts), (0, 255, 0), True)
+        return ("picked id %d balanced to %s%.1f%% at %d V -- hold it, do not tune"
+                % (t.id, about, pct, volts), (0, 255, 0), True)
+    way = "RAISE" if drift > 0 else "LOWER"
+    if drift > 0 and abs(drift) >= 0.9 * (vFree if vFree else SLOW_DRIFT_FREE):
+        # Falling at the pace it would with no field at all: the field is not holding
+        # it.  A state, not a verdict -- and more use than any percentage.
+        return ("picked id %d is falling at free-fall pace -- the field is not holding "
+                "it yet" % t.id, (0, 220, 255), None)
+    if drift > 0 and pct > BALANCE_ADVICE_MAX_PCT:
+        # Only the FALLING case is ill-conditioned: U / (1 - v/v_free) has a
+        # denominator going to zero, which is how a droplet that balanced at 169 V was
+        # sent to 364 V.  A droplet rising is the damped case -- denominator above one,
+        # the answer bounded and worth printing -- so it falls through to the ordinary
+        # advice below.  What is true here is not "turn it a lot": it is that this
+        # droplet needs more field than the apparatus band has.
+        return ("picked id %d is barely held (%s%.0f%% of free fall) -- RAISE it; if it "
+                "still falls at %g V it is too heavy, spray again"
+                % (t.id, about, pct, ADVISORY_MAX_V), (0, 140, 255), None)
+    if ub is not None and floor is not None and pct <= 2.0 * BALANCE_TARGET_PCT:
+        # A move smaller than the measurement's own noise is not worth making -- but
+        # only a droplet that is ALREADY near balance can be "within the noise".  This
+        # test is on the voltage step alone, and a step can be small while the drift is
+        # not: it told an operator to leave a droplet sitting 6.0% out.
+        if abs(ub - float(volts)) <= float(volts) * floor / 100.0:
+            return ("picked id %d balanced to %s%.1f%% at %d V -- within the noise, "
+                    "leave it" % (t.id, about, pct, volts), (0, 255, 0), True)
     if ub is None:
-        return ("picked id %d drifts %.3f gr/s -- no reachable balance, DISCARD"
-                % (t.id, speed), (0, 0, 255), False)
-    way = "RAISE" if speed > 0 else "LOWER"
-    warn = "" if ADVISORY_MIN_V <= ub <= ADVISORY_MAX_V else "  (outside 150-250 V)"
-    return ("picked id %d -- %s to about %d V%s" % (t.id, way, round(ub), warn),
-            (0, 255, 0) if not warn else (0, 140, 255), None)
+        free = vFree if vFree else SLOW_DRIFT_FREE
+        if abs(drift) >= 0.9 * free:
+            # Falling as fast as it would with no field at all: the field is not
+            # holding it yet.  That is a state, not a verdict, and calling it DISCARD
+            # threw away a droplet the operator was in the middle of catching.
+            return ("picked id %d is falling at free-fall pace -- the field is not "
+                    "holding it yet" % t.id, (0, 220, 255), None)
+        return ("picked id %d drifts %+.3f gr/s -- no reachable balance, DISCARD"
+                % (t.id, drift), (0, 0, 255), False)
+    warn = "" if ADVISORY_MIN_V <= ub <= ADVISORY_MAX_V else "  (outside %g-%g V)" % (
+        ADVISORY_MIN_V, ADVISORY_MAX_V)
+    return ("picked id %d off balance by %s%.1f%% -- %s to about %d V%s"
+            % (t.id, about, pct, way, round(ub), warn), (0, 140, 255), None)
 
 
 def updateDivision(t, gridRows):
@@ -2599,6 +3041,15 @@ MEASURE_HOLD_DIV = 1.0        # how far below `0` still counts as "on the line"
 # Clicking a droplet.  With several plausible droplets on screen the ring moves between
 # them, and no automatic rule can know which one the operator has decided to spend the
 # next ten minutes on -- only they know that.  So let them say.
+# After this long with no click and nothing being timed, the aid picks the droplet
+# nearest the middle itself.  Suggesting one in the banner was not enough: the operator
+# has both hands on the apparatus, and a message naming a droplet they then have to
+# find and click is a message they ignore.  A pick is reversible in one click, costs
+# nothing if wrong, and is the difference between the aid reporting on the droplet they
+# care about and reporting on nothing at all.
+IDLE_PICK_S = 30.0
+AUTO_PICK_SHOW_S = 6.0        # how long to say it happened
+
 PICK_RADIUS_PX = 40.0         # how near a click has to land to select a droplet
 PICK_FOLLOW_PX = 30.0         # how far from where it was predicted a droplet may be
                               # and still be the same one.  SMALLER than it looks: the
@@ -2613,6 +3064,10 @@ PICK_LIFT_PX = 90.0           # how far from the prediction to look DURING a lif
                               # safe here because a lift is also when the chamber is
                               # least ambiguous: everything charged is moving the same
                               # way and the speed test still has to agree.
+PICK_SPEED_TOL = 0.40         # grid/s a re-acquired droplet may differ by, at range
+PICK_PREDICT_S = 3.0          # how far ahead a dead track's velocity is still trusted
+PICK_REACH_GROW = 6.0         # px added to the search radius per second missing
+PICK_REACH_MAX_PX = 150.0
 PICK_LOST_S = 15.0            # dropped after this long with nothing where it should be.
                               # Fifteen seconds, because that is how long the operator
                               # says recovery takes: past it the droplet has reached the
@@ -2940,6 +3395,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     # is dark and this window is the only picture the operator has.  Make it resizable
     # for a blind run: they are watching a droplet cross a line on it.
     picked = None                   # the droplet the operator clicked, if any
+    lastClickAt = 0.0               # ...and when they last clicked anything
+    pickedAuto = -1e9               # when the aid last picked one for them
     clicks = []                     # filled by the mouse callback, drained in the loop
 
     def onMouse(event, mx, my, flags, param):
@@ -3000,6 +3457,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                     # track changes every lift causes
     pickedGone = None               # (when, which edge) after it left, to prompt recovery
     pickedDoubt = None              # (when, before, after) when a hand-over looked wrong
+    pickedLevel = None              # the field state when the pick was last SEEN
     noisySince = None               # when the detection count started running high
     lastVoltBucket = None           # the plate voltage last seen, bucketed to 10 V...
     voltsChangedAt = -1e9           # ...and when it changed, for CHARGE_SETTLE_S
@@ -3010,6 +3468,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                     # be paired with its own start -- see adoptZeroCrossing
     voltsFailedAt = None            # when the `V:` line first refused to read
     chosenX = None                  # the column the operator has settled on
+    chosenAt = None                 # ...and when it was pinned, to let a dead pin go
     chosenSeen = 0.0                # when a track was last alive in it
     banner, bannerColour = None, (0, 220, 255)
     detections = 0
@@ -3019,6 +3478,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     staleSince = None               # when the rate first went and stayed high
     resyncCooldown = 0.0            # no second rebuild while the first is settling
     resyncs = 0
+    lastFunnel = 0.0                # when the charge-test funnel was last printed
+    implausible = 0                 # panel readings above PANEL_MAX_V, i.e. misreads
     # A live run cannot seek back to the panel once a fall has finished, so keep the
     # readout crops as they go past.  Only the last MAX_FALL_S of them can ever matter.
     panel = collections.deque()
@@ -3104,8 +3565,22 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         panelAlign = panelAlignment(med)
                         got = readPanelVolts(med, panelAlign) if panelAlign else None
                         usingTemplates(was)
-                        if got is not None:
+                        if got is not None and 0 <= got <= PANEL_MAX_V:
                             volts = got
+                        elif got is not None:
+                            # Keep the crop that produced it: a live run records only
+                            # the ROI, so without this there is nothing to look at
+                            # afterwards and the diagnosis is guesswork.
+                            implausible += 1
+                            if implausible == 1:
+                                print("  the `V:` line read %d V, which the supply "
+                                      "cannot make -- ignoring these; crop saved"
+                                      % got, flush = True)
+                                try:
+                                    cv2.imwrite(os.path.join(outDir,
+                                                             "panel_implausible.png"), med)
+                                except Exception:
+                                    pass
                 if volts is not None:
                     voltHistory.append(volts)
                     # The mode over the last few reads, so one misread cannot move it.
@@ -3123,7 +3598,13 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                              if volts is not None else None)
                 if bucketNow != lastVoltBucket:
                     lastVoltBucket, voltsChangedAt = bucketNow, now
-                if volts:
+                # NOT while the 提升 button is held.  The lift adds 210 V, so the
+                # last non-zero reading before a droplet is released can be the LIFT
+                # voltage rather than the balance voltage -- a fall was recorded at
+                # 460 V on 2026-09-14, which would make its charge nearly half what it
+                # should be.  The fallback exists to recover the working voltage; the
+                # lift is not it.
+                if volts and not liftWatch.lifting:
                     workingVolts.append((now, int(volts)))
 
                 # Whatever goes wrong, keep the evidence.  A live run records only
@@ -3169,7 +3650,17 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     panel.popleft()
                 while latched and now - latched[0][0] > MAX_FALL_S + 5.0:
                     latched.popleft()
-            centres, _, _ = detectDroplets(gray, background, s)
+            # Where the tracker is already looking, and how sure it still is.
+            keepNear = []
+            for t in live:
+                if len(t.points) < CONFIRM_POINTS:
+                    continue                  # a probationary track proves nothing
+                px, py = t.predict(now)
+                gap = max(0.0, float(now) - float(t.lastT))
+                keepNear.append((float(px), float(py),
+                                 min(SECOND_CHANCE_MAX_PX,
+                                     SECOND_CHANCE_PX + SECOND_CHANCE_GROW * gap)))
+            centres, _, _ = detectDroplets(gray, background, s, keepNear = keepNear)
             detections += len(centres)
             detSeries.append((now, len(centres)))
 
@@ -3222,6 +3713,9 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 else:
                     staleSince = None
 
+            if now - lastFunnel >= 30.0:
+                lastFunnel = now
+                print("  charge test: %s" % chargeFunnel(live), flush = True)
             pairs = assign(live, centres, maxStep, s["areaFloor"], now, s["reidX"])
             for i, t in enumerate(live):
                 if i in pairs:
@@ -3240,7 +3734,9 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         t.observeVoltage(volts, spacing)
                         noteColumnVoltage(columnVolts, t, volts, spacing)
                     updateDivision(t, s["gridRows"])
-                    updateHold(t, yTop, spacing, now)
+                    updateHold(t, yTop, spacing, now, volts, columnVolts,
+                               now - voltsChangedAt if voltsChangedAt else None,
+                               liftWatch.lifting)
                     finished = updateCrossings(t, yTop, yBottom, spacing,
                                                zeroCrossings)
                     if finished is not None:
@@ -3317,6 +3813,21 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 if waited <= allowed:
                     keep.append(t)
                 elif len(t.points) >= CONFIRM_POINTS:
+                    if measuring:
+                        # A track dying mid-fall costs a measurement, and the fix
+                        # depends on WHY it died: a droplet that was genuinely
+                        # invisible for longer than the coast is a detection problem,
+                        # one with a blob sitting right beside it is an assignment
+                        # problem.  Guessing between them cost a failed gate on
+                        # 2026-09-14, so the live run is asked instead.
+                        near = min((float(np.hypot(c[0] - t.pos[0], c[1] - t.pos[1])),
+                                    float(c[2])) for c in centres) if centres else None
+                        print("  mid-fall track %d died at x=%.0f y=%.0f after %.1f s "
+                              "dark (limit %.1f); nearest blob %s"
+                              % (t.id, t.pos[0], t.pos[1], waited, allowed,
+                                 "none" if near is None else
+                                 "%.0f px, area %.0f vs its own %.0f"
+                                 % (near[0], near[1], t.area)), flush = True)
                     buried.append(t)                 # only confirmed tracks are worth keeping
             live = keep
             morgue.extend(buried)
@@ -3456,8 +3967,29 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                                                     t.pos[1] - ry))
                                   if near else None)
                         pickedSeen = now
+                        pickedLevel = fieldLevel(steadyVolts)
+                        lastClickAt = now
                         pickedAt = ((float(picked.pos[0]), float(picked.pos[1]))
                                     if picked is not None else (0.0, 0.0))
+                    # Nobody has clicked for a while, nothing is being timed, and there
+                    # are few enough droplets that the operator is choosing rather than
+                    # waiting: choose for them.  Nearest the middle, because near either
+                    # line one wrong toggle carries the droplet off the picture before
+                    # it can be balanced.  Never while a fall clock is running -- that
+                    # droplet is the measurement and attention must not move off it.
+                    if (picked is None and now - lastClickAt >= IDLE_PICK_S
+                            and now - pickedAuto >= IDLE_PICK_S
+                            and not any(t.tTop is not None and t.tBottom is None
+                                        for t in live)):
+                        room = [t for t in live
+                                if not t.miss and len(t.points) >= CONFIRM_POINTS
+                                and columnChargeState(columnVolts, t.pos[0], now,
+                                                      columnVerdicts) is not False]
+                        if 0 < len(room) <= CALM_TRACKS:
+                            mid = (yTop + yBottom) / 2.0
+                            picked = min(room, key = lambda t: abs(t.pos[1] - mid))
+                            pickedSeen = pickedAuto = now
+                            pickedAt = (float(picked.pos[0]), float(picked.pos[1]))
                     # HOLD the track while it lives.  Re-selecting the nearest track
                     # every frame is not following a droplet, it is following a
                     # neighbourhood, and in a crowded frame it changes its mind: two
@@ -3472,22 +4004,51 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             if not picked.miss:
                                 pickedAt = (float(picked.pos[0]), float(picked.pos[1]))
                                 pickedSeen = now
+                                pickedLevel = fieldLevel(steadyVolts)
                         else:
                             # Its track died -- which happens on every lift -- so look
                             # where the droplet should have GOT to, not where the track
                             # was last seen.  Without the prediction a lifted droplet is
                             # always out of range by the time anything is looking.
                             gap = now - pickedSeen
-                            aim = (pickedAt[0] + float(picked.vel[0]) * gap,
-                                   pickedAt[1] + float(picked.vel[1]) * gap)
+                            # A velocity extrapolated over ten seconds is not a
+                            # prediction.  A droplet went dark on a grid line at 1:58,
+                            # came back at 2:11 within a few pixels of where it left,
+                            # and the aim had walked far past it: nothing was within
+                            # reach, so the pick was dropped as "left the view".
+                            # Predict only as long as the velocity means anything, then
+                            # stop moving the aim and widen the search instead.
+                            fly = min(gap, PICK_PREDICT_S)
+                            aim = (pickedAt[0] + float(picked.vel[0]) * fly,
+                                   pickedAt[1] + float(picked.vel[1]) * fly)
                             reach = (PICK_LIFT_PX if liftWatch.lifting
                                      else PICK_FOLLOW_PX)
+                            reach = min(PICK_REACH_MAX_PX, reach + PICK_REACH_GROW * gap)
                             near = [t for t in live if not t.miss
                                     and np.hypot(t.pos[0] - aim[0], t.pos[1] - aim[1])
                                     <= reach]
+                            if not near:
+                                # One confirmed droplet in an otherwise empty picture
+                                # can only be the one that was picked.
+                                alone = [t for t in live if not t.miss
+                                         and len(t.points) >= CONFIRM_POINTS]
+                                if len(alone) == 1:
+                                    near = alone
+                            wasSpeed = picked.recentSpeed(spacing)
+                            wasArea = float(getattr(picked, "area", 0.0) or 0.0)
+                            if near and wasSpeed is not None:
+                                # Widening the search made recovery possible and swaps
+                                # easy: the square jumped from a droplet rising at
+                                # -0.75 grid/s to one falling at 0.19, and again from
+                                # 2.55 to -0.75.  At arm's length the speed has to
+                                # match; only right where the droplet was may it differ.
+                                near = [c for c in near
+                                        if np.hypot(c.pos[0] - aim[0], c.pos[1] - aim[1])
+                                        <= PICK_FOLLOW_PX
+                                        or (c.recentSpeed(spacing) is not None
+                                            and abs(c.recentSpeed(spacing) - wasSpeed)
+                                            <= PICK_SPEED_TOL)]
                             if near:
-                                wasSpeed = picked.recentSpeed(spacing)
-                                wasArea = float(getattr(picked, "area", 0.0) or 0.0)
                                 # Score every droplet in reach on where it should be,
                                 # how fast it falls and how big it is -- not distance
                                 # alone.  A droplet passing through is usually the
@@ -3514,13 +4075,33 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                 # corrected with one click instead of being discovered
                                 # five falls later.
                                 nowSpeed = picked.recentSpeed(spacing)
+                                # ...unless the FIELD changed while the track was
+                                # missing, in which case the droplet is supposed to be
+                                # moving differently and a speed gap says nothing about
+                                # its identity.  Toggling 0V/工作 every fall, an
+                                # operator was warned fifteen times in one session that
+                                # their droplet "may be a DIFFERENT droplet".
+                                # Forgiven only when the field STATE changed across
+                                # the gap -- 0V to working, working to lift.  "The
+                                # voltage moved" was too broad: a lift IS a voltage
+                                # move, so the one hand-over that mattered went
+                                # unreported.  Two droplets rose side by side at
+                                # 0.17 and 0.33 grid/s, the square took the slower one,
+                                # and the aid said nothing.  Inside ONE state a speed
+                                # that jumps is still a different droplet.
+                                nowLevel = fieldLevel(steadyVolts)
+                                fieldMoved = (pickedLevel is not None
+                                              and nowLevel is not None
+                                              and nowLevel != pickedLevel)
                                 pickedDoubt = (now, wasSpeed, nowSpeed,
                                                wasSpeed is not None
                                                and nowSpeed is not None
+                                               and not fieldMoved
                                                and abs(nowSpeed - wasSpeed)
                                                > STEAL_SPEED_GAP)
                                 pickedAt = (float(picked.pos[0]), float(picked.pos[1]))
                                 pickedSeen = now
+                                pickedLevel = fieldLevel(steadyVolts)
                             elif gap > PICK_LOST_S:
                                 # Say which way it went, because the recovery differs:
                                 # off the top means the field is still lifting it, off
@@ -3607,23 +4188,65 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # then 1 of 5 three seconds later.
                     if settledTrack is not None:
                         if chosenX is None:
-                            chosenX = float(settledTrack.pos[0])
+                            chosenX, chosenAt = float(settledTrack.pos[0]), now
                         chosenSeen = now
                     elif balanced is not None:
                         if chosenX is None:
-                            chosenX = balanced["pos"][0]
+                            chosenX, chosenAt = balanced["pos"][0], now
                         chosenSeen = now
                     elif chosenX is not None and any(
                             abs(float(t.pos[0]) - chosenX) <= SAME_DROPLET_X_PX
                             for t in live if not t.miss):
                         chosenSeen = now           # still occupied, between drops
+                    # The operator's click is the subject, and the pin has to agree
+                    # with it.  Pinned on a column that was then sprayed empty, the pin
+                    # kept the banner for its full 90 s idle life while the operator
+                    # tuned a droplet 200 px away: MEASURING -- 0 of 5 falls, no balance
+                    # reading, and the occasional number computed on whatever dust
+                    # drifted through the dead column.  A pin with nothing measured in
+                    # it has no claim on anything.
+                    #
+                    # It MOVES a pin, it does not create one: a click is a question
+                    # about a droplet, not a decision to measure it, and pinning on
+                    # every click would clear the candidate rings the operator is
+                    # still hunting with.
+                    if (picked is not None and chosenX is not None
+                            and not liftWatch.lifting
+                            and abs(float(picked.pos[0]) - chosenX) > SAME_DROPLET_X_PX
+                            and not dropletFalls(falls, chosenX)):
+                        chosenX, chosenAt, chosenSeen = float(picked.pos[0]), now, now
+                    # An empty column with nothing measured in it is released at once,
+                    # not after the idle timer: there is nothing to protect.
+                    if (chosenX is not None and not dropletFalls(falls, chosenX)
+                            and not any(abs(float(t.pos[0]) - chosenX)
+                                        <= SAME_DROPLET_X_PX
+                                        for t in live if not t.miss)):
+                        chosenX, chosenAt = None, None
+                    # ...and so is a FINISHED one nobody is adding to.  Five falls
+                    # were counted at 7:34 and the banner still said so at 14:36, while
+                    # the operator was three falls into a different droplet.
+                    if chosenX is not None:
+                        done = dropletFalls(falls, chosenX)
+                        if (len(done) >= TARGET_FALLS_PER_DROPLET
+                                and now - max((f.tTop or 0.0) for f in done)
+                                > MEASURE_IDLE_S):
+                            chosenX, chosenAt = None, None
                     if noisy:
                         # A spray puts new droplets in every column, so what was
                         # established about the old ones no longer describes what is
                         # being ringed.  The verdict outlives its samples but not this.
                         columnVerdicts.clear()
+                    # A column that has measured nothing is not a measurement.  Pinned
+                    # once, it stayed pinned as long as ANY droplet loitered in it, and
+                    # an operator watched "MEASURING -- 0 of 5 falls" sit on the screen
+                    # for three minutes while the aid said nothing useful about the
+                    # droplet they were actually tuning.
+                    if (chosenX is not None and chosenAt is not None
+                            and now - chosenAt > CHOSEN_IDLE_S
+                            and not dropletFalls(falls, chosenX)):
+                        chosenX, chosenAt = None, None
                     if chosenX is not None and (noisy or now - chosenSeen > CHOSEN_RELEASE_S):
-                        chosenX = None             # sprayed, or the column emptied
+                        chosenX, chosenAt = None, None   # sprayed, or the column emptied
                     if chosenX is not None:
                         ranked = []
                 # Stick with the droplet already named unless it stops qualifying, or
@@ -3668,6 +4291,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # operator asked about THIS droplet, and "this one will not work"
                     # is the most useful thing to say once they have spent time on it.
                     urgent = None
+                    measuringBanner = None
                     reacquired = False
                     if (picked is not None and pickedSeen
                             and now - pickedSeen >= PICK_SEARCH_S):
@@ -3717,9 +4341,15 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         if pv is None:
                             pv = columnChargeState(columnVolts, picked.pos[0], now,
                                                    columnVerdicts)
+                        if now - pickedAuto <= AUTO_PICK_SHOW_S:
+                            bannerAt = now
                         banner, bannerColour, _ok = pickedVerdict(
                             picked, spacing, now, steadyVolts, pv,
-                            freeFallSpeed(columnVolts, picked.pos[0]), own)
+                            freeFallSpeed(columnVolts, picked.pos[0]), own,
+                            now - voltsChangedAt if voltsChangedAt else None,
+                            liftWatch.lifting)
+                        banner, bannerColour = holdText("picked", now, banner,
+                                                        bannerColour)
                         if reacquired:
                             banner += "   (re-acquired -- click again if wrong)"
                         bannerAt = now
@@ -3736,35 +4366,137 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # lines -- so counting traverses made the tally climb on every
                         # downward move rather than on every measurement.
                         mine = dropletFalls(falls, chosenX)
-                        done = len(mine)
-                        # q must be a whole number of electrons, so how far from one it
-                        # lands is a check on the balance voltage -- available the
-                        # moment the first fall completes, and worth far more then than
-                        # after five.
-                        off = None
+                        # Follow the group, not the coordinate.  chosenX was pinned
+                        # where the droplet happened to be when it settled, and the
+                        # count is "the falls nearest that x" -- so when this droplet's
+                        # falls landed 40 px away and an older droplet's fall sat
+                        # nearer the pin, the tally read 1, then 0, then 2 on the same
+                        # droplet.  Re-centre the pin on the falls it is counting;
+                        # that is the median binding already groups on, and it does
+                        # not chase the live droplet, which is what made the tally go
+                        # DOWN when it was tried before.
                         if mine:
-                            volts = next((f.balanceVoltage for f in reversed(mine)
-                                          if getattr(f, "balanceVoltage", None)), None)
-                            got = electronsOff(
-                                float(np.median([f.seconds for f in mine])), volts)
-                            if got is not None:
-                                off = got
+                            chosenX = float(np.median([f.xPx for f in mine]))
+                        done = len(mine)
+                        lastFall = max((f.tTop or 0.0) for f in mine) if mine else None
+                        stale = (lastFall is not None
+                                 and now - lastFall > MEASURE_IDLE_S)
+                        # q/e USED TO BE SHOWN HERE and is deliberately not any more.
+                        # It is the student's own result, and putting it on the screen
+                        # mid-measurement invites tuning the voltage until q/e lands on
+                        # a whole number -- selecting data by the answer, which is the
+                        # very habit this project criticises.  Rubric 三.1.4 wants the
+                        # student's analysis exercised, not performed for them.  The
+                        # balance percentage below says the same thing about the
+                        # voltage without revealing anything about the charge.
                         if done >= TARGET_FALLS_PER_DROPLET:
-                            banner = ("DONE -- %d of %d falls. Spray again for the next "
-                                      "droplet" % (done, TARGET_FALLS_PER_DROPLET))
-                            bannerColour = (0, 255, 0)
+                            mText = ("DONE -- %d of %d falls. Spray again for the next "
+                                     "droplet" % (done, TARGET_FALLS_PER_DROPLET))
+                            mColour = (0, 255, 0)
+                        elif stale:
+                            # Half-measured and untouched for minutes.  It may be the
+                            # same droplet and the operator stepped away, or it may be
+                            # long gone -- the aid cannot tell, so it asks instead of
+                            # asserting.
+                            mText = ("%d of %d falls -- still the same droplet? click "
+                                     "it to keep the count, or spray again to start "
+                                     "over" % (done, TARGET_FALLS_PER_DROPLET))
+                            mColour = (0, 140, 255)
                         else:
-                            banner = "MEASURING -- %d of %d falls" % (
+                            mText = "MEASURING -- %d of %d falls" % (
                                 done, TARGET_FALLS_PER_DROPLET)
-                            bannerColour = (200, 200, 200)
-                        if off is not None:
-                            ratio, gap = off
-                            if gap > INTEGER_WARN:
-                                banner += ("   q/e %.2f -- %.2f off a whole electron, "
-                                           "CHECK THE BALANCE VOLTAGE" % (ratio, gap))
-                                bannerColour = (0, 140, 255)
+                            mColour = (200, 200, 200)
+                        # How well the droplet in this column is balanced, live.
+                        #
+                        # MEASURING used to be the whole line, and on 2026-09-14 an
+                        # operator tuning a drifting droplet was told "MEASURING -- 0 of
+                        # 5" and nothing else: the one thing the aid could usefully say
+                        # -- which way to turn the knob -- was hidden by a progress
+                        # count.  So while nothing is actually falling, the balance
+                        # instruction outranks the count.
+                        chosen = [t for t in live
+                                  if not t.miss and len(t.points) >= CONFIRM_POINTS
+                                  and abs(float(t.pos[0]) - chosenX) <= SAME_DROPLET_X_PX]
+                        timing = any(t.tTop is not None and t.tBottom is None
+                                     for t in live)
+                        q = None
+                        if done >= TARGET_FALLS_PER_DROPLET:
+                            # DONE means stop.  For four minutes after a droplet was
+                            # finished the banner went on asking for 265 V, 272 V,
+                            # 242 V, 236 V about a droplet the operator had left.
+                            pass
+                        elif chosen and (liftWatch.lifting
+                                       or (volts and float(volts) > LIFT_VOLTS)
+                                       or (voltsChangedAt is not None
+                                           and now - voltsChangedAt
+                                           < SETTLE_AFTER_V_S)):
+                            # Mid-lift the droplet is meant to be moving.  "far from
+                            # balance -- LOWER to about 219 V" while the operator holds
+                            # 提升 is advice about a state they created on purpose.
+                            pass
+                        elif chosen:
+                            me = min(chosen, key = lambda t: abs(float(t.pos[0]) - chosenX))
+                            hold = getattr(me, "heldSince", None)
+                            window = (min(BALANCE_FIT_S, now - hold)
+                                      if hold is not None else 0.0)
+                            if voltsChangedAt:
+                                window = max(window, min(BALANCE_FIT_S,
+                                                         now - voltsChangedAt))
+                            q = balanceError(me, spacing, now, volts,
+                                             freeFallSpeed(columnVolts, me.pos[0]),
+                                             window)
+                        if q is not None:
+                            pct, drift, ub, assumed, coarse = q
+                            mark = "~" if assumed or coarse else ""
+                            way = "RAISE" if drift > 0 else "LOWER"
+                            floor = brownianFloorPct(
+                                freeFallSpeed(columnVolts, me.pos[0]), window)
+                            if floor and not coarse and pct <= floor * 1.3:
+                                # The green cue an operator never sees while MEASURING
+                                # owns the banner: this is as good as this droplet gets.
+                                add = ("   balance %s%.1f%% -- as good as it gets, cut "
+                                       "to 0V and time it" % (mark, pct))
+                                addColour = (0, 255, 0)
+                            elif pct <= BALANCE_TARGET_PCT:
+                                add, addColour = "   balance %s%.1f%%" % (mark, pct), None
+                            elif ub is None:
+                                add = ("   balance %s%.1f%% -- retune before the next "
+                                       "fall" % (mark, pct))
+                                addColour = (0, 140, 255)
+                            elif drift > 0 and pct > BALANCE_ADVICE_MAX_PCT:
+                                # The falling case is the one where the implied voltage
+                                # blows up; a rising droplet's target is bounded and
+                                # keeps its number, further down.
+                                add = ("   barely held -- RAISE it, spray again if it "
+                                       "still falls at %g V" % ADVISORY_MAX_V)
+                                addColour = (0, 140, 255)
+                            elif timing:
+                                # "Retune" on its own is not an instruction.  Which way,
+                                # and to what, is the whole content of the message.
+                                add = ("   balance %s%.1f%% -- %s to about %d V before "
+                                       "the next fall" % (mark, pct, way, round(ub)))
+                                addColour = (0, 140, 255)
                             else:
-                                banner += "   q/e %.2f (n=%d)" % (ratio, round(ratio))
+                                add = (" -- off balance by %s%.1f%%, %s to about %d V"
+                                       % (mark, pct, way, round(ub)))
+                                addColour = (0, 140, 255)
+                            add, addColour = holdText("balance", now, add,
+                                                      addColour or mColour)
+                            mText += add
+                            if addColour is not None and addColour != mColour:
+                                mColour = addColour
+                        # Who the line belongs to.  A progress count outranks hunting
+                        # chatter only while it describes the droplet the operator has
+                        # in hand: with falls to its name and their pick inside the
+                        # column.  Otherwise their own droplet has the line back --
+                        # which is how "USABLE" came to be missing for ninety seconds
+                        # while a dead column reported 0 of 5.
+                        inColumn = (picked is not None
+                                    and abs(float(picked.pos[0]) - chosenX)
+                                    <= SAME_DROPLET_X_PX)
+                        if picked is None or (done and inColumn):
+                            banner, bannerColour = mText, mColour
+                            measuringBanner = (mText, mColour)
                         bestNow, bestAt = None, None
                     # Nothing picked, nothing qualifying, and few enough droplets left
                     # that the operator is choosing rather than waiting.  The one with
@@ -3782,10 +4514,22 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         if 0 < len(room) <= CALM_TRACKS:
                             mid = (yTop + yBottom) / 2.0
                             pickMe = min(room, key = lambda t: abs(t.pos[1] - mid))
-                            banner = ("quiet now -- id %d sits nearest the middle, most "
-                                      "room to tune. Click it to choose" % pickMe.id)
+                            # An id is not a way to point at something on a screen:
+                            # the operator sees dots, not numbers, and "id 16391" told
+                            # them nothing about which one.  Say where it is.
+                            banner = ("quiet now -- click the droplet you want, or "
+                                      "wait and the aid picks the one nearest the "
+                                      "middle for you")
                             bannerColour = (0, 220, 255)
                             bannerAt = now
+                    # A droplet with falls to its name outranks every hunting message.
+                    # Mid-measurement an operator was shown "USABLE, balance it on `0`"
+                    # about the very droplet they were four falls into, because the
+                    # pick verdict is written after MEASURING and the pin had been let
+                    # go for a moment.  Urgent messages still win -- those are about
+                    # this droplet too.
+                    if measuringBanner is not None:
+                        banner, bannerColour = measuringBanner
                     # Last word to the urgent ones.  MEASURING is written after the
                     # pick messages and was overwriting them, so "your droplet left the
                     # view" and "re-acquired, this may be a different droplet" were
@@ -3895,19 +4639,66 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # either side belong to different states and the verdict drawn from
                     # them is not about this droplet's charge.  An operator watched
                     # droplets get crossed out mid-lift.
-                    if (t.chargeState() is False
-                            and not liftWatch.lifting
+                    # Cannot be balanced from where the supply is, sustained.  Weaker
+                    # than "uncharged" and far more often available, so it is said in
+                    # weaker words.
+                    vNow = t.recentSpeed(spacing)     # `v` is not set until below
+                    if (volts and vNow is not None and vNow > 0 and t.tTop is None
+                            and now - getattr(t, "lastReachCheck", 0.0) >= 0.5):
+                        t.lastReachCheck = now
+                        if reachableBalance(volts, vNow,
+                                            freeFallSpeed(columnVolts, t.pos[0])) is None:
+                            if getattr(t, "unreachableSince", None) is None:
+                                t.unreachableSince = now
+                        else:
+                            t.unreachableSince = None
+                    elif not volts or t.tTop is not None:
+                        t.unreachableSince = None
+                    # Crossing a droplet out is the most expensive thing the aid
+                    # says -- the operator stops chasing it -- so it has to HOLD.  The
+                    # verdict is recomputed every frame off noisy speeds, and an
+                    # operator watched a droplet that was plainly answering the field
+                    # get crossed out for a moment.  One second of noise must not cost
+                    # a usable droplet.
+                    if t.chargeState() is False:
+                        if getattr(t, "notHeldSince", None) is None:
+                            t.notHeldSince = now
+                    else:
+                        t.notHeldSince = None
+                    # A droplet moving under 提升 is answering the field by moving,
+                    # and one that has ever been held by the field has a charge.  The
+                    # cross appeared on a picked droplet at 460 V, and again at 458 V on
+                    # one that had already given four legal falls.  The lift latch needs
+                    # a 150 V step inside half a second and a slow switch never gives it
+                    # one, so the voltage itself is the backstop.
+                    lifting = liftWatch.lifting or (volts and float(volts) > LIFT_VOLTS)
+                    if (getattr(t, "notHeldSince", None) is not None
+                            and now - t.notHeldSince >= UNREACHABLE_SHOW_S
+                            and not lifting
+                            and not getattr(t, "answeredField", False)
                             and not (t.tTop is not None and t.tBottom is None)):
                         cv2.line(marked, (p[0] - 7, p[1] - 7), (p[0] + 7, p[1] + 7),
                                  (90, 90, 90), 1)
                         cv2.line(marked, (p[0] - 7, p[1] + 7), (p[0] + 7, p[1] - 7),
                                  (90, 90, 90), 1)
                         cv2.circle(marked, p, 9, (90, 90, 90), 1)
-                        cv2.putText(marked, "uncharged", (p[0] + 14, p[1] + 4),
+                        cv2.putText(marked, "won't balance", (p[0] + 14, p[1] + 4),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, (90, 90, 90), 1)
                         continue
                     v = t.recentSpeed(spacing)
                     plausible = v is not None and SCREEN_MIN <= v <= SCREEN_MAX
+                    if (getattr(t, "unreachableSince", None) is not None
+                            and now - t.unreachableSince >= UNREACHABLE_SHOW_S
+                            and not lifting
+                            and not getattr(t, "answeredField", False)):
+                        cv2.line(marked, (p[0] - 7, p[1] - 7), (p[0] + 7, p[1] + 7),
+                                 (90, 90, 90), 1)
+                        cv2.line(marked, (p[0] - 7, p[1] + 7), (p[0] + 7, p[1] - 7),
+                                 (90, 90, 90), 1)
+                        cv2.circle(marked, p, 9, (90, 90, 90), 1)
+                        cv2.putText(marked, "won't balance", (p[0] + 14, p[1] + 4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (90, 90, 90), 1)
+                        continue
                     if v is None:
                         colour = (160, 160, 160)                 # not enough points yet
                     elif plausible:
@@ -4056,7 +4847,8 @@ def _beep():
 
 FALL_COLUMNS = ["id", "startFrame", "startTime", "seconds", "speedGridPerSec",
                 "xPx", "reacquired", "adopted", "kinematicLegal", "fieldOff",
-                "balanceVoltageV", "voltageFrom", "legal"]
+                "balanceVoltageV", "voltageFrom", "balanceDriftPct",
+                "balanceImpliedV", "legal"]
 
 
 def fallRow(f):
@@ -4076,6 +4868,15 @@ def fallRow(f):
             # empty and the voltage was recovered from the live readout instead.  Same
             # quantity, different route, and a reader should be able to tell.
             "voltageFrom": getattr(f, "voltageFrom", None),
+            # How well the droplet was actually balanced before this fall, measured
+            # from its residual drift while it was held on the line, as the percentage
+            # it costs the charge.  Independent of q, n and e: it is a property of the
+            # balancing, not of the answer, so it can be used to judge a fall without
+            # judging it by its result.
+            "balanceDriftPct": (None if getattr(f, "balanceDriftPct", None) is None
+                                else round(f.balanceDriftPct, 2)),
+            "balanceImpliedV": (None if getattr(f, "balanceImpliedV", None) is None
+                                else round(f.balanceImpliedV)),
             "legal": f.legal}
 
 
@@ -4115,6 +4916,85 @@ class FallLog:
             self.file = None
 
 
+CHARGE_MIN_FALLS = 2            # fewer than two falls is not a droplet
+
+
+def dropletGroups(falls):
+    """This session's legal falls, grouped into droplets the way binding groups them.
+
+    Same two-stage rule as `dropletFalls`: the same column, and durations that agree.
+    A droplet's five falls run within a few percent of each other, while a stray that
+    happens to fall down the same column does not.
+    """
+    legal = sorted((f for f in falls
+                    if f.legal and getattr(f, "xPx", None) is not None),
+                   key = lambda f: f.tTop or 0.0)
+    groups = []
+    for f in legal:
+        for g in groups:
+            mean = sum(q.seconds for q in g["rows"]) / len(g["rows"])
+            if (abs(f.xPx - g["x"]) <= SAME_DROPLET_X_PX
+                    and abs(f.seconds - mean) <= DROPLET_TIME_TOL * mean):
+                g["rows"].append(f)
+                g["x"] = float(np.median([q.xPx for q in g["rows"]]))
+                break
+        else:
+            groups.append({"x": float(f.xPx), "rows": [f]})
+    return [g["rows"] for g in groups]
+
+
+def writeCharges(falls, outDir, path):
+    """q, n and e for every droplet the session completed, written beside falls.csv.
+
+    A live run has no video to re-analyse afterwards -- the frames are gone the moment
+    they are tracked -- so `analyze()` cannot produce this, and the physics lived in a
+    separate tool that is not even shipped with the repo.  An operator finished five
+    falls at the bench and had no result: they had to ask someone else to run something
+    they did not have.  The binding is the pipeline's own (same column, durations
+    agreeing) and the voltage is the one it read off the panel, so nothing here needs
+    the operator's notes.
+
+    Layer 2 only: this goes to a file.  q, n and e never enter a dict that crosses to
+    the app or the tutor -- see the allow-list in cv/api.py.
+    """
+    droplets, voltages = [], []
+    for rows in dropletGroups(falls):
+        if len(rows) < CHARGE_MIN_FALLS:
+            continue
+        volts = [float(f.balanceVoltage) for f in rows
+                 if getattr(f, "balanceVoltage", None)]
+        if not volts:
+            continue                    # no voltage was ever read for this droplet
+        # Two falls is enough to be a droplet and not enough to be a RESULT.  IV.4
+        # asks for five, and a session often ends with a droplet at three -- lost, or
+        # the operator stopped -- so the numbers are written rather than thrown away,
+        # and the label says what they are.  Same rule hunttime.py uses for a hunt.
+        label = "Droplet %d" % (len(droplets) + 1)
+        if len(rows) < TARGET_FALLS_PER_DROPLET:
+            label += " (INCOMPLETE, %d of %d falls)" % (len(rows),
+                                                        TARGET_FALLS_PER_DROPLET)
+        droplets.append({"label": label,
+                         "falls": [{"id": f.id, "seconds": f.seconds} for f in rows]})
+        voltages.append(float(np.median(volts)))
+    if not droplets:
+        return None
+    chargeRows, perDroplet, overall = chargeMath.csvRows(droplets, voltages)
+    csvPath = (artefact(outDir, path, "charges.csv") if outDir and path
+               else os.path.join(outDir or ".", "charges.csv"))
+    pd.DataFrame(chargeRows,
+                 columns = chargeMath.CSV_COLUMNS).to_csv(csvPath, index = False)
+    print("\nWrote", csvPath)
+    for d in perDroplet:
+        print("  %-12s U_n %5.0f V  %d falls  mean e %.4e C  sd %.1f%%  error %+.2f%%"
+              % (d["label"], d["balanceVoltage"], d["falls"], d["meanElementaryC"],
+                 d["relativeSdPercent"], d["errorPercent"]), flush = True)
+    if overall and len(perDroplet) > 1:
+        print("  %-12s %11s  %d falls  mean e %.4e C  sd %.1f%%  error %+.2f%%"
+              % ("ALL", "", overall["falls"], overall["meanElementaryC"],
+                 overall["relativeSdPercent"], overall["errorPercent"]), flush = True)
+    return csvPath
+
+
 def report(falls, outDir = None, path = None):
     legal = [f for f in falls if f.legal]
     kin = [f for f in falls if getattr(f, "kinematicLegal", f.legal)]
@@ -4146,6 +5026,15 @@ def report(falls, outDir = None, path = None):
             f.write(census + "\n")
     except Exception as exc:
         print("  could not write the reject census: %s" % exc)
+    # The physics, without a second tool and without the operator's notes.  It belongs
+    # here and not in one caller because a live session ENDS here: the frames are gone
+    # the moment they are tracked, so nothing can re-analyse them afterwards.  Wired
+    # into the batch runner only, an operator finished five falls at the bench and got
+    # falls.csv and no charge at all.
+    try:
+        writeCharges(falls, outDir, path)
+    except Exception as exc:                # never lose falls.csv to the charge maths
+        print("  charges.csv could not be written: %s" % exc, flush = True)
     return sum(1 for f in falls if f.legal), len(falls)
 
 
@@ -4405,6 +5294,16 @@ def main(argv):
 # all three still read 0700.  Until then this returns None, which is the documented
 # contract -- the operator's notes carry the balance voltage and nothing downstream
 # reads this.
+# The supply cannot make more than about 459 V -- the 210 V lift step on top of the
+# working voltage -- so a reading above this is a misread, not a measurement.
+#
+# 2026-09-14, live: the `V:` line read 1111 V for most of a session.  It was shown on
+# the HUD, written into fourteen rows of falls.csv, and -- worst -- it bucketed every
+# charge-test sample at the same impossible voltage, so no droplet could ever be shown
+# to answer the field and nothing was marked uncharged all session.  One misread, three
+# symptoms, exactly like the stale-background case.
+PANEL_MAX_V = 600.0
+
 LATCHED_AGREEMENT = 0.9
 
 DIGIT_SIZE = (24, 22)      # canonical (rows, cols) every glyph is normalised into
