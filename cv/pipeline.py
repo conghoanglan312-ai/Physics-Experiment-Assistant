@@ -5394,6 +5394,20 @@ def main(argv):
                         outDir = outDir),
                outDir, spec)
         return
+    if len(argv) > 1 and argv[1] == "play":
+        # A recorded clip through the LIVE window: same "Droplets" window, same
+        # click-to-pick, paced to real time by the block that already handles files.
+        # The browser app mirrors that window, so the whole integration -- server,
+        # stream, chat, start/stop -- can be exercised with no apparatus and no
+        # dongle, which is the difference between testing it in a lab slot and
+        # testing it at a desk.
+        path = argv[2] if len(argv) > 2 else VIDEO
+        outDir = outDirFor(path)
+        print("Playback -> %s" % outDir)
+        print("Stop with q in the window, or Ctrl+C")
+        report(trackAll(path, show = True, saveVideo = False, outDir = outDir),
+               outDir, path)
+        return
     if len(argv) > 1 and argv[1] == "preview":
         previewAll()
         return

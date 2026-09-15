@@ -42,6 +42,17 @@ dongle on its video output, and a laptop.
 
 A good droplet: five falls, each 16–40 s, same voltage, balance 2% or better.
 
+## Without the apparatus
+
+`python -m cv.pipeline play <clip>` runs a recorded clip through the same window, at
+real speed, with the same click-to-pick. Nothing about the apparatus is needed, so the
+app can be developed and tested away from the lab:
+
+```
+python -m cv.pipeline play "frames:test/fixtures/one_droplet_full"
+python -m cv.pipeline play "path/to/session.mp4"
+```
+
 ## What comes out, and where
 
 The pipeline creates its own output folder — nothing to set up. On a fresh clone it
