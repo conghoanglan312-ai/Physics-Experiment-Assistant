@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Millikan AI Assistant</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="page-glow" aria-hidden="true"></div>
+
+  <main class="app">
+    <section class="title-box">
+      <div class="main-title">🔬 Millikan Oil Drop AI Assistant</div>
+      <div class="subtitle">AI-powered laboratory assistant for oil droplet selection</div>
+    </section>
+
+    <section class="main-grid">
+      <div class="video-column">
+        <div class="video-container" id="videoContainer">
+          <img id="liveFeed" class="live-feed-img hidden" alt="Live microscopic feed" draggable="false" />
+          <video id="fallbackVideo" class="fallback-video hidden" autoplay muted loop playsinline>
+            <source src="/app_test/test_footage.mp4" type="video/mp4" />
+          </video>
+          <div id="videoPlaceholder" class="video-placeholder">MICROSCOPIC CAMERA FEED</div>
+        </div>
+
+        <div class="feed-title">[ LIVE MICROSCOPIC VIEW ]</div>
+        <div id="feedStatus" class="feed-status hidden"></div>
+
+        <div class="feed-controls">
+          <button id="liveButton" class="live-button">▶ Start live feed</button>
+        </div>
+      </div>
+
+      <aside class="info-column">
+        <div class="info-panel">
+          <div class="droplet-preview-box">
+            <div class="droplet-info">
+              <div class="droplet-title">SELECTED DROPLET</div>
+              <div class="droplet-id">ID: #12</div>
+            </div>
+            <div class="droplet-indicator">
+              <div class="droplet-ring suitable"></div>
+            </div>
+          </div>
+
+          <div class="info-item"><span class="info-label">STATUS</span>: Suitable</div>
+          <div class="info-item"><span class="info-label">FALL TIME</span>: 3 s</div>
+          <div class="info-item"><span class="info-label">VELOCITY</span>: 0.03 grid/s</div>
+
+          <div class="divider"></div>
+          <div class="reference-title">REFERENCE DATA</div>
+
+          <div class="reference-item"><span>Oil Density</span><span>981 kg·m⁻³</span></div>
+          <div class="reference-item"><span>Gravity</span><span>9.78 m·s⁻²</span></div>
+          <div class="reference-item"><span>Air Viscosity</span><span>1.83×10⁻⁵ kg·m⁻¹·s⁻¹</span></div>
+          <div class="reference-item"><span>Descent Distance</span><span>1.60×10⁻³ m</span></div>
+          <div class="reference-item"><span>Correction Constant</span><span>8.22×10⁻³ m·Pa</span></div>
+          <div class="reference-item"><span>Atmospheric Pressure</span><span>1.0098×10⁵ Pa</span></div>
+          <div class="reference-item"><span>Plate Distance</span><span>5.00×10⁻³ m</span></div>
+        </div>
+        <div class="feed-title">[ DROPLET ANALYSIS ]</div>
+      </aside>
+    </section>
+
+    <section class="guide-section">
+      <div class="guide-title">📖 GUIDE</div>
+
+      <details class="guide-expander">
+        <summary>What Kind of Oil Droplet is Suitable?</summary>
+        <div class="guide-content">
+          <p>A suitable oil droplet should be neither <strong>too small</strong> nor <strong>too large</strong>.</p>
+          <p><strong>TOO SMALL</strong> - strongly affected by Brownian motion.<br />
+          <strong>TOO LARGE</strong> - falls too quickly, increasing measurement error.</p>
+          <p>A suitable oil droplet should:</p>
+          <ul>
+            <li>Preferably carry fewer than <strong>10 electrons</strong>.</li>
+            <li>Have a falling speed of approximately <strong>0.2–0.5 grid/s</strong> at 0 V.</li>
+            <li>Have a balance voltage of approximately <strong>150–250 V</strong>.</li>
+          </ul>
+        </div>
+      </details>
+
+      <details class="guide-expander">
+        <summary>Selecting a Suitable Oil Droplet</summary>
+        <div class="guide-content">
+          <ol>
+            <li>Press “0V/Work” and set the initial working voltage to approximately 150–250 V.</li>
+            <li>Spray the oil droplets and adjust the focus until most droplets are visible.</li>
+            <li>Wait approximately 10 seconds for the number of visible droplets to decrease.</li>
+            <li>Select a droplet that rises slowly as a temporary target.</li>
+            <li>Switch “0V/Work” so that the voltage between the plates becomes 0 V.</li>
+            <li>Among the temporary target droplets, select one with a falling speed of 0.2–0.5 grid/s.</li>
+            <li>Adjust the focus until the selected droplet appears small and bright.</li>
+          </ol>
+          <p><strong>TIPS AND TRICK</strong><br />
+            To screen droplets with an appropriate charge more quickly:</p>
+          <ol>
+            <li>Set the initial working voltage to approximately <strong>350–400 V</strong>.</li>
+            <li>Droplets carrying more charge will rise and leave the field of view more quickly.</li>
+            <li>Select droplets with a slower rising speed as potential target droplets.</li>
+            <li>Gradually reduce the working voltage to <strong>150–250 V</strong> until the droplet's rising speed slows and reaches a balanced state.</li>
+          </ol>
+        </div>
+      </details>
+
+      <details class="guide-expander">
+        <summary>Precautions</summary>
+        <div class="guide-content">
+          <ol>
+            <li>The mechanical position of the CCD box, screws, and camera lens cannot be changed, otherwise it will affect the image distance and imaging angle.</li>
+            <li>Pay attention to adjusting the oil inlet switch to avoid the influence of external air flow on oil droplet measurement.</li>
+            <li>There is high voltage in the instrument, so avoid touching the electrodes with your hands.</li>
+            <li>Before the experiment, the two plates must be adjusted to be parallel to ensure that the electric field is vertical and parallel to gravity.</li>
+            <li>It is recommended to select an oil droplet with a balance voltage of about 150-250V and a drop time of 16-40s for 1.6 mm. Such an oil droplt has a moderate charge and is suitable for experimental measurement.</li>
+          </ol>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <div id="aiPromptBubble" class="ai-message" aria-hidden="true">
+    <span class="ai-sparkle">✨</span>Ask AI about the experiment
+  </div>
+
+  <button id="aiFab" class="ai-fab" type="button" aria-label="Open AI Assistant" aria-expanded="false">🛸</button>
+
+  <section id="aiPanel" class="ai-panel" aria-hidden="true">
+    <header class="ai-panel-header">
+      <div class="ai-panel-title">
+        <div class="ai-panel-icon">✦</div>
+        <div>
+          <div class="ai-title">AI Assistant</div>
+          <div class="ai-subtitle">Millikan Oil Drop Experiment</div>
+        </div>
+      </div>
+      <button id="aiClose" class="ai-close" type="button" aria-label="Close AI Assistant">×</button>
+    </header>
+
+    <div id="chatHistory" class="chat-history" aria-live="polite"></div>
+
+    <div class="input-area">
+      <textarea
+        id="aiInput"
+        maxlength="2001"
+        rows="3"
+        placeholder="Ask something about the experiment..."
+        aria-label="Ask something about the experiment"
+      ></textarea>
+      <div class="input-row">
+        <div id="charCounter" class="ai-char-counter">0 / 2000</div>
+        <button id="sendButton" class="send-button" type="button" disabled>Send</button>
+      </div>
+    </div>
+  </section>
+
+  <script>window.MathJax = { tex: { inlineMath: [["\\(", "\\)"], ["$", "$"], ["\\[", "\\]"]], displayMath: [["\\[", "\\]"], ["$$", "$$"]] }, options: { skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"] } };</script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+  <script src="app.js" defer></script>
+</body>
+</html>
