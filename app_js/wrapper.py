@@ -184,15 +184,27 @@ def _mirror_window(hwnd, streamer, stop_event, fps = 12):
         time.sleep(max(0.0, period - (time.time() - t0)))
 
 
-def start_live(stream_port = None, window_timeout = WINDOW_TIMEOUT_S):
+def start_live(stream_port = None, window_timeout = WINDOW_TIMEOUT_S, source = None):
     """Run the bench check, launch the live pipeline in the background with
     its normal native window, then start mirroring that window over HTTP.
 
+    `source` skips the bench check.  A number is a camera index; anything else
+    is a recorded clip, which the pipeline plays through the same window at
+    real speed with click-to-pick working -- so the whole app can be exercised
+    at a desk instead of in a lab slot with the dongle wired in.
+
     Returns a handle dict; pass it to stop_live() when the UI is done.
     """
-    device = _bench_check()
+    if source is None or str(source).strip() == "":
+        device = _bench_check()
+        command = [sys.executable, "-m", "cv.pipeline", "live", str(device)]
+    elif str(source).strip().isdigit():
+        device = int(str(source).strip())
+        command = [sys.executable, "-m", "cv.pipeline", "live", str(device)]
+    else:
+        device = str(source).strip()
+        command = [sys.executable, "-m", "cv.pipeline", "play", device]
     port = stream_port or _find_free_port()
-    command = [sys.executable, "-m", "cv.pipeline", "live", str(device)]
     print("Command:", " ".join(command))
     process = subprocess.Popen(command)
 

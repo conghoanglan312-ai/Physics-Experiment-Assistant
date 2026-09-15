@@ -126,14 +126,24 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"url": handle["url"], "device": handle["device"], "token": token})
             return
 
+        # An optional {"source": ...} plays a recorded clip instead of running the
+        # bench check, so the UI can be developed and tested with no apparatus.
         try:
-            handle = start_live()
+            payload = self._read_json()
+        except Exception:
+            payload = {}
+        source = str(payload.get("source", "")).strip() or None
+
+        try:
+            handle = start_live(source = source)
             token = secrets.token_urlsafe(24)
             set_live(handle, token)
             self._json({"url": handle["url"], "device": handle["device"], "token": token})
-        except Exception:
+        except Exception as exc:
             clear_live()
-            self._json({"error": "Please plug in the dongle first."}, status=500)
+            self._json({"error": "Please plug in the dongle first."
+                                 if source is None else
+                                 "Could not play %s: %s" % (source, exc)}, status=500)
 
     def _stop_live(self):
         try:
