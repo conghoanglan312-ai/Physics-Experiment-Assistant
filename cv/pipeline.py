@@ -1686,6 +1686,32 @@ SLOW_DRIFT_MAX = 0.10              # grid/s -- superseded by slowDriftMax(), kep
 SLOW_DRIFT_FREE = 0.35
 
 
+MEASURED_FREE = {}          # column key -> descent rates from completed legal falls
+
+
+def noteMeasuredFree(x, seconds):
+    """A legal fall IS the free-fall speed: 8 divisions in a measured time, field off.
+
+    Everything on the screen is a fraction of v_free -- the balance percentage, the
+    Brownian floor, "barely held" -- and until now v_free was a median of smoothed
+    per-frame velocities pooled over the column.  That estimate ran low, and a low
+    v_free inflates every percentage computed from it: an operator was told a droplet
+    sitting at 163 V was "4.1% out, the Brownian limit over 45 s" when the floor for a
+    droplet falling 0.47 gr/s over 45 s is nearer 0.9%, and was told another was
+    "barely held" while it was almost stationary.
+
+    A completed traverse needs no fitting and no pooling: it is the manual's own
+    measurement, 8 divisions against a clock.
+    """
+    if not seconds or seconds <= 0:
+        return
+    key = int(round(float(x) / CHARGE_COLUMN_PX))
+    rates = MEASURED_FREE.setdefault(key, [])
+    rates.append(FALL_DIVISIONS / float(seconds))
+    if len(rates) > 8:
+        del rates[0]
+
+
 def freeFallSpeed(columns, x):
     """This droplet's OWN descent rate with the field off, if it has been seen at 0 V.
 
@@ -1698,9 +1724,16 @@ def freeFallSpeed(columns, x):
     outside the range a usable droplet can have, in which case the caller falls back
     to SLOW_DRIFT_FREE.
     """
+    key = int(round(float(x) / CHARGE_COLUMN_PX))
+    # A measured fall outranks any fit.  Neighbouring columns too: a droplet drifts
+    # sideways across a traverse and the pin follows the group, not the pixel.
+    measured = []
+    for k in (key - 1, key, key + 1):
+        measured += MEASURED_FREE.get(k, [])
+    if measured:
+        return float(np.median(measured))
     if columns is None:
         return None
-    key = int(round(float(x) / CHARGE_COLUMN_PX))
     rates = []
     for k in (key - 1, key, key + 1):
         rates += [r for _ts, r in columns.get(k, {}).get(0, [])]
@@ -2612,18 +2645,27 @@ def answersField(t, now, speed, vFree):
     return bool(getattr(t, "answeredField", False))
 
 
-def steadySpeed(t, now, speed):
-    """This droplet's fall speed over the last few seconds, not this frame's."""
+def steadySpeed(t, now, speed, sinceChange = None):
+    """This droplet's fall speed over the last few seconds, not this frame's.
+
+    Samples from before the last voltage change are dropped.  A droplet released from
+    balance was held still a moment ago, so a window spanning the cut averages "not
+    moving" with "falling" and reports a speed far too slow -- which is why a droplet
+    was called TOO SLOW for a few seconds after every crossing of `0`.
+    """
     hist = getattr(t, "speedHistory", None)
     if hist is None:
         hist = t.speedHistory = []
     hist.append((float(now), float(speed)))
-    while hist and now - hist[0][0] > SPEED_MEDIAN_S:
+    cut = now - SPEED_MEDIAN_S
+    if sinceChange:
+        cut = max(cut, now - float(sinceChange))
+    while len(hist) > 1 and hist[0][0] < cut:
         hist.pop(0)
     return float(np.median([v for _ts, v in hist]))
 
 
-def usableSpeed(t, now, speed):
+def usableSpeed(t, now, speed, sinceChange = None):
     """(speed to report, is it in the legal band) -- with hysteresis on the band.
 
     A droplet drifting at the 0.2 gr/s gate crosses it constantly, and each crossing
@@ -2631,7 +2673,7 @@ def usableSpeed(t, now, speed):
     DISCARD, USABLE over ten seconds.  Once a verdict is given it takes a clear
     crossing to reverse it.
     """
-    v = steadySpeed(t, now, speed)
+    v = steadySpeed(t, now, speed, sinceChange)
     hist = t.speedHistory
     span = hist[-1][0] - hist[0][0] if len(hist) > 1 else 0.0
     was = getattr(t, "speedVerdict", None)
@@ -2696,6 +2738,48 @@ def fieldLevel(volts):
     return "lift" if float(volts) > LIFT_VOLTS else "work"
 
 
+DRIFT_HISTORY = {}          # column key -> [(t, drift)], survives the track
+TARGET_HISTORY = {}         # column key -> [(t, implied balance voltage)]
+# How tightly the last few seconds of implied balance voltages must agree before one
+# of them is put on the screen as an instruction, and how much of the way to it the
+# operator is asked to move while they do not.
+TARGET_STABLE_FRAC = 0.12
+TARGET_MIN_SAMPLES = 6
+TARGET_HALF_STEP = 0.5
+
+
+def steadyTarget(t, now, ub, volts):
+    """(target, is it trustworthy, how far to move meanwhile).
+
+    U_b = U / (1 - v/v_free) is exact and, far from balance, useless as an
+    instruction: v is a drifting droplet's speed, so the answer swings either side of
+    the truth and only settles as the droplet slows.  The operator put it exactly --
+    the suggestion becomes correct only about half way to balance, and until then it
+    is noise being handed out as a number.
+
+    So while the estimates disagree, say so, and ask for a move that is deliberately
+    SHORT of the estimate: half way slows the droplet, which tightens the next
+    estimate, which is the thing that actually has to happen.  Overshooting does the
+    opposite.
+    """
+    if ub is None or not volts:
+        return None, False, None
+    key = int(round(float(t.pos[0]) / CHARGE_COLUMN_PX))
+    hist = TARGET_HISTORY.setdefault(key, [])
+    hist.append((float(now), float(ub)))
+    while len(hist) > 1 and now - hist[0][0] > BALANCE_TARGET_MEMORY_S:
+        hist.pop(0)
+    values = [u for _ts, u in hist]
+    target = float(np.median(values))
+    step = TARGET_HALF_STEP * (target - float(volts))
+    step = float(np.sign(step) * max(5.0, round(abs(step) / 5.0) * 5.0))
+    if len(values) < TARGET_MIN_SAMPLES or hist[-1][0] - hist[0][0] < 3.0:
+        return target, False, step
+    lo, hi = np.percentile(values, [25, 75])
+    spread = (hi - lo) / max(abs(target), 1.0)
+    return target, spread <= TARGET_STABLE_FRAC, step
+
+
 def steadyDrift(t, now, drift, sinceChange = None):
     """This droplet's drift over the last few seconds, not this frame's.
 
@@ -2708,9 +2792,12 @@ def steadyDrift(t, now, drift, sinceChange = None):
     the old samples describe a field that is gone, and averaging across the change is
     how an aid lags behind the person using it.
     """
-    hist = getattr(t, "driftHistory", None)
-    if hist is None:
-        hist = t.driftHistory = []
+    # Keyed by column, not by track.  Five falls of one droplet carried four track
+    # ids, and a history kept on the track object started empty each time -- so the
+    # "smoothed" percentage was one raw sample and swung from 2% to 36% between
+    # seconds.  The column is what survives a lift, which is why binding uses it.
+    key = int(round(float(t.pos[0]) / CHARGE_COLUMN_PX))
+    hist = DRIFT_HISTORY.setdefault(key, [])
     hist.append((float(now), float(drift)))
     cut = now - BALANCE_TARGET_MEMORY_S
     if sinceChange:
@@ -2823,6 +2910,12 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
     speed = t.recentSpeed(spacing)
     if speed is None:
         return "picked id %d -- watching it" % t.id, (0, 220, 255), None
+    # Before anything else.  This test used to sit below the field-off branch, so a
+    # droplet cut to 0V was judged TOO SLOW on a speed still averaging the second it
+    # spent balanced.
+    if sinceChange is not None and sinceChange < SETTLE_AFTER_V_S:
+        return ("picked id %d -- settling after the voltage change" % t.id,
+                (0, 220, 255), None)
     if volts is None:
         # Not the same as zero.  `if not volts` treated an unreadable panel as a field
         # that is off and judged the droplet's speed against the falling band, which
@@ -2838,7 +2931,7 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
         # an operator watched a droplet fall on 0 V and be told it did not react, and a
         # droplet falling too slowly be told the same instead of that it was too slow.
         # Both were the wrong question answered first.
-        shown, ok = usableSpeed(t, now, speed)
+        shown, ok = usableSpeed(t, now, speed, sinceChange)
         if ok:
             return ("picked id %d falls %.2f gr/s -- USABLE, balance it on `0`"
                     % (t.id, shown), (0, 255, 0), True)
@@ -2872,15 +2965,20 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
     # to 250 V and was told "no reachable balance, DISCARD" about a droplet that was
     # simply still falling at its free-fall pace, which is what U_b = U/(1 - v/v_free)
     # returns when v is momentarily v_free.
-    if sinceChange is not None and sinceChange < SETTLE_AFTER_V_S:
-        return ("picked id %d -- settling after the voltage change" % t.id,
-                (0, 220, 255), None)
     # A droplet being carried up by 提升 is moving because the operator is moving it.
     # Balance is not a question during a lift, and answering it anyway produced
     # "balance ~1106.9%" and a target hundreds of volts away, on the screen of an
     # operator who was simply holding the button.  The latch misses a ramped press, so
     # the voltage itself is the backstop.
     if lifting or (volts and float(volts) > LIFT_VOLTS):
+        # ...but a droplet that keeps falling at its free-fall pace while the plates
+        # are at 360 V is not being carried by anything.  That is the clearest charge
+        # test the apparatus offers, and it does not need five samples in two buckets:
+        # an operator toggled to 提升 three times on one droplet, watched it drift
+        # down unchanged each time, and was told only that a lift was in progress.
+        if vFree and speed is not None and abs(speed - float(vFree)) <= 0.15 * float(vFree):
+            return ("picked id %d does NOT answer 提升 -- no charge, spray again"
+                    % t.id, (0, 0, 255), False)
         return ("picked id %d -- lifting; balance is not measured during a lift"
                 % t.id, (0, 220, 255), None)
     # How well it is balanced, as the percentage it will cost the charge.  One answer
@@ -2961,10 +3059,15 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
                     "holding it yet" % t.id, (0, 220, 255), None)
         return ("picked id %d drifts %+.3f gr/s -- no reachable balance, DISCARD"
                 % (t.id, drift), (0, 0, 255), False)
-    warn = "" if ADVISORY_MIN_V <= ub <= ADVISORY_MAX_V else "  (outside %g-%g V)" % (
+    target, steady, step = steadyTarget(t, now, ub, volts)
+    if not steady:
+        return ("picked id %d off balance by %s%.1f%% -- still calculating; %s by "
+                "about %d V to slow it down" % (t.id, about, pct, way, abs(step)),
+                (0, 140, 255), None)
+    warn = "" if ADVISORY_MIN_V <= target <= ADVISORY_MAX_V else "  (outside %g-%g V)" % (
         ADVISORY_MIN_V, ADVISORY_MAX_V)
     return ("picked id %d off balance by %s%.1f%% -- %s to about %d V%s"
-            % (t.id, about, pct, way, round(ub), warn), (0, 140, 255), None)
+            % (t.id, about, pct, way, round(target), warn), (0, 140, 255), None)
 
 
 def updateDivision(t, gridRows):
@@ -3739,6 +3842,9 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                liftWatch.lifting)
                     finished = updateCrossings(t, yTop, yBottom, spacing,
                                                zeroCrossings)
+                    if finished is not None and finished.legal:
+                        noteMeasuredFree(finished.xs[-1] if getattr(finished, "xs", None)
+                                         else finished.pos[0], finished.seconds)
                     if finished is not None:
                         if not src.isLive:      # a frame index to seek back to, files only
                             t.fTop, t.fBottom = t.tTop * fps, t.tBottom * fps
@@ -3995,6 +4101,33 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # neighbourhood, and in a crowded frame it changes its mind: two
                     # droplets 30 px apart handed the square back and forth.
                     if picked is not None:
+                        # A coasting pick is still aimed at its droplet, but it has not
+                        # SEEN it, and "lost your droplet" is written off pickedSeen:
+                        # an operator watched the square sit on their droplet for seven
+                        # seconds while the banner insisted it was lost.  The track's
+                        # own last sighting is the honest answer to "when was it seen".
+                        if picked in live and not picked.miss:
+                            pickedSeen = max(pickedSeen, float(picked.lastT))
+                        if picked in live and picked.miss and (
+                                now - float(picked.lastT)) > PICK_SEARCH_S:
+                            # Coasting long enough to be worth a second look: a
+                            # confirmed track sitting where the droplet should be IS
+                            # the droplet, and taking it back keeps the square with it
+                            # during a lift, which is when tracks break most.
+                            aim = picked.predict(now)
+                            reach = PICK_LIFT_PX if liftWatch.lifting else PICK_FOLLOW_PX
+                            near = [q for q in live
+                                    if q is not picked and not q.miss
+                                    and len(q.points) >= CONFIRM_POINTS
+                                    and abs(q.pos[0] - aim[0]) <= s["reidX"]
+                                    and np.hypot(q.pos[0] - aim[0],
+                                                 q.pos[1] - aim[1]) <= reach]
+                            if near:
+                                picked = min(near, key = lambda q: np.hypot(
+                                    q.pos[0] - aim[0], q.pos[1] - aim[1]))
+                                pickedAt = (float(picked.pos[0]), float(picked.pos[1]))
+                                pickedSeen = now
+                                pickedLevel = fieldLevel(steadyVolts)
                         if picked in live:
                             # A COASTING track (miss > 0) is still live and still aimed
                             # at its droplet.  Treating it as lost and re-selecting the
@@ -4379,8 +4512,11 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             chosenX = float(np.median([f.xPx for f in mine]))
                         done = len(mine)
                         lastFall = max((f.tTop or 0.0) for f in mine) if mine else None
+                        # A click is the operator saying "yes, this one".  The
+                        # prompt asked exactly that and then ignored the answer.
+                        since = max(lastFall or 0.0, lastClickAt or 0.0)
                         stale = (lastFall is not None
-                                 and now - lastFall > MEASURE_IDLE_S)
+                                 and now - since > MEASURE_IDLE_S)
                         # q/e USED TO BE SHOWN HERE and is deliberately not any more.
                         # It is the student's own result, and putting it on the screen
                         # mid-measurement invites tuning the voltage until q/e lands on
@@ -4470,15 +4606,21 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                 add = ("   barely held -- RAISE it, spray again if it "
                                        "still falls at %g V" % ADVISORY_MAX_V)
                                 addColour = (0, 140, 255)
-                            elif timing:
-                                # "Retune" on its own is not an instruction.  Which way,
-                                # and to what, is the whole content of the message.
-                                add = ("   balance %s%.1f%% -- %s to about %d V before "
-                                       "the next fall" % (mark, pct, way, round(ub)))
-                                addColour = (0, 140, 255)
                             else:
-                                add = (" -- off balance by %s%.1f%%, %s to about %d V"
-                                       % (mark, pct, way, round(ub)))
+                                target, steady, step = steadyTarget(me, now, ub, volts)
+                                if not steady:
+                                    add = ("   balance %s%.1f%% -- still calculating; "
+                                           "%s by about %d V" % (mark, pct, way,
+                                                                 abs(step)))
+                                elif timing:
+                                    # "Retune" on its own is not an instruction.  Which
+                                    # way, and to what, is the whole content of it.
+                                    add = ("   balance %s%.1f%% -- %s to about %d V "
+                                           "before the next fall"
+                                           % (mark, pct, way, round(target)))
+                                else:
+                                    add = (" -- off balance by %s%.1f%%, %s to about "
+                                           "%d V" % (mark, pct, way, round(target)))
                                 addColour = (0, 140, 255)
                             add, addColour = holdText("balance", now, add,
                                                       addColour or mColour)
@@ -4926,8 +5068,14 @@ def dropletGroups(falls):
     A droplet's five falls run within a few percent of each other, while a stray that
     happens to fall down the same column does not.
     """
+    # A fall whose panel reading is a LIFT voltage cannot be a balance measurement --
+    # nothing balances at 360 V.  One such stray pinned the banner at "1 of 5 falls"
+    # for three minutes and then asked the operator whether they were still measuring
+    # a droplet that was never theirs.
     legal = sorted((f for f in falls
-                    if f.legal and getattr(f, "xPx", None) is not None),
+                    if f.legal and getattr(f, "xPx", None) is not None
+                    and not (getattr(f, "balanceVoltage", None)
+                             and float(f.balanceVoltage) > LIFT_VOLTS)),
                    key = lambda f: f.tTop or 0.0)
     groups = []
     for f in legal:
