@@ -44,7 +44,7 @@ import win32con
 import win32gui
 import win32ui
 
-from app_test.stream_server import FrameStreamer
+from app_js.stream_server import FrameStreamer
 
 # Must match the title pipeline.py passes to cv2.namedWindow(...) -- it always
 # does, so this is a contract with that file, not a change to it.
