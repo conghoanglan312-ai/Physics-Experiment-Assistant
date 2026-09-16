@@ -108,18 +108,18 @@ class Handler(BaseHTTPRequestHandler):
             running = process_is_running(handle)
             if handle is not None and not running:
                 clear_live()
-try:
-    status = live_status()
-except Exception:
-    status = None
-if status and not running and status.get("phase") != "finished":
-    status["phase"] = "stopped"
-self._json({
-    "running": running,
-    "device": handle.get("device") if running else None,
-    "source": handle.get("source") if running else None,
-    "status": status,
-})
+        try:
+            status = live_status()
+        except Exception:
+            status = None
+        if status and not running and status.get("phase") != "finished":
+            status["phase"] = "stopped"
+            self._json({
+                "running": running,
+                "device": handle.get("device") if running else None,
+                "source": handle.get("source") if running else None,
+                "status": status,
+            })
             return
 
         if path == "/health":
@@ -165,26 +165,26 @@ self._json({
         # An optional {"source": ...} plays a recorded clip instead of running the
         # bench check, so the UI can be developed and tested with no apparatus.
         try:
-payload = self._read_json()
-except Exception:
-    payload = {}
-source = str(payload.get("source", "")).strip() or None
+            payload = self._read_json()
+        except Exception:
+            payload = {}
+            source = str(payload.get("source", "")).strip() or None
 
-try:
-    handle = start_live(source=source)
-    token = secrets.token_urlsafe(24)
-    set_live(handle, token)
-    self._json({
-        "url": handle["url"],
-        "device": handle["device"],
-        "source": handle.get("source"),
-        "token": token,
-    })
-except Exception as exc:
-    clear_live()
-    self._json({"error": "Please plug in the dongle first."
-                         if source is None else
-                         "Could not play %s: %s" % (source, exc)}, status=500)
+        try:
+            handle = start_live(source=source)
+            token = secrets.token_urlsafe(24)
+            set_live(handle, token)
+            self._json({
+                "url": handle["url"],
+                "device": handle["device"],
+                "source": handle.get("source"),
+                "token": token,
+            })
+        except Exception as exc:
+            clear_live()
+            self._json({"error": "Please plug in the dongle first."
+                                if source is None else
+                                "Could not play %s: %s" % (source, exc)}, status=500)
 
 def _click(self):
     """{"x": 0.42, "y": 0.63, "token": "..."} -- fractions of the frame."""
