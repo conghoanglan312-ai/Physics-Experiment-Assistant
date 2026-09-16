@@ -18,6 +18,7 @@ from pathlib import Path
 
 from llm.main import getResponseFromGemini
 from app_js.wrapper import start_live, stop_live
+from cv.api import live_status
 
 ROOT = Path(__file__).resolve().parent
 HOST = "127.0.0.1"
@@ -95,7 +96,23 @@ class Handler(BaseHTTPRequestHandler):
             running = process_is_running(handle)
             if handle is not None and not running:
                 clear_live()
-            self._json({"running": running, "device": handle.get("device") if running else None})
+            # What the pipeline itself says it is doing, straight from cv/api.py:
+            # the phase (it spends the first 30 s learning the background, which is
+            # why a browser used to sit on a blank box), the counts the HUD draws,
+            # the plate voltage and the picked droplet's clock.  None until a
+            # session has run.  NOT for prompts -- see THE SEAL in cv/api.py.
+            try:
+                status = live_status()
+            except Exception:
+                status = None
+            # A stopped session is killed, not asked to exit, so the last thing it
+            # wrote still says "running".  The process is the authority on whether
+            # anything is live; the file is only the authority on what it was doing.
+            if status and not running and status.get("phase") != "finished":
+                status["phase"] = "stopped"
+            self._json({"running": running,
+                        "device": handle.get("device") if running else None,
+                        "status": status})
             return
 
         if path == "/health":

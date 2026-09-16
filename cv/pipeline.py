@@ -32,6 +32,7 @@ import pandas as pd
 
 import os
 import csv
+import json
 import glob
 import sys
 try:
@@ -369,6 +370,40 @@ def artefact(outDir, path, name):
     if os.path.basename(os.path.normpath(outDir)) != stem:
         name = stem + "_" + name
     return os.path.join(outDir, name)
+
+
+LIVE_STATUS_S = 1.0             # how often the live status file is rewritten
+_liveStatusAt = [0.0]
+
+
+def liveStatusPath():
+    """Where a running session publishes what it is doing, for the app to read.
+
+    A file, not a socket or a pipe: it survives the app restarting, it needs no
+    handshake, and a reader that arrives late still gets the current state.  The app
+    launches the pipeline as a subprocess and mirrors its window, so until now the
+    only thing it knew was whether that window existed -- which is why a browser
+    watching a live session sat on a blank box for the thirty seconds of background
+    learning with nothing to show.
+    """
+    os.makedirs(OUTPUT, exist_ok = True)
+    return os.path.join(OUTPUT, "live_status.json")
+
+
+def writeLiveStatus(**fields):
+    """Publish the current state, at most once a second.  Never raises."""
+    now = time.time()
+    if fields.get("phase") != "learning" and now - _liveStatusAt[0] < LIVE_STATUS_S:
+        return
+    _liveStatusAt[0] = now
+    fields["updatedAt"] = now
+    try:
+        tmp = liveStatusPath() + ".tmp"
+        with open(tmp, "w", encoding = "utf-8") as f:
+            json.dump(fields, f)
+        os.replace(tmp, liveStatusPath())       # readers never see half a file
+    except Exception:
+        pass                                    # a status file is never load-bearing
 
 
 def outDirFor(path):
@@ -3456,6 +3491,10 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
         # then subtracted away for the rest of the session.
         print("  %s\n  learning the background for %.0f s -- no droplets yet, please"
               % (src.describe(), LIVE_LEARN_S), flush = True)
+        writeLiveStatus(phase = "learning", learnSeconds = float(LIVE_LEARN_S),
+                        startedAt = time.time(),
+                        message = "Learning the background for %.0f s -- do not spray "
+                                  "yet" % LIVE_LEARN_S)
         fullBackground = src.learnBackground(seconds = LIVE_LEARN_S)
     else:
         fullBackground = buildBackground(path)
@@ -4866,6 +4905,40 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
                 nTracked = sum(1 for t in live
                                if t.miss == 0 and len(t.points) >= CONFIRM_POINTS)
+                # The same numbers the HUD draws, published for the app.  The operator
+                # decided on 2026-09-16 that the balance voltage may cross to the APP:
+                # it is the apparatus's own panel reading, which they can see with
+                # their eyes, and showing it is advice rather than the student's
+                # arithmetic.  It still does NOT enter an LLM prompt -- q = K(t)*d/U_n
+                # and the tutor has the manual, so `seconds` plus `U_n` together would
+                # let it produce the answer the student is meant to produce.  See
+                # LLM_KEYS in cv/api.py, which is unchanged.
+                picked_ = None
+                if picked is not None:
+                    v_ = picked.recentSpeed(spacing)
+                    picked_ = {
+                        "id": int(picked.id),
+                        "speedGridPerSec": None if v_ is None else round(float(v_), 3),
+                        "fallSeconds": (round(now - picked.tTop, 2)
+                                        if picked.tTop is not None
+                                        and picked.tBottom is None else None),
+                        "balancePercent": (round(float(picked.balanceDriftPct), 1)
+                                           if getattr(picked, "balanceDriftPct", None)
+                                           is not None else None),
+                    }
+                writeLiveStatus(
+                    phase = "running",
+                    elapsedSeconds = round(float(now - (firstT or 0)), 1),
+                    tracked = int(nTracked),
+                    falls = len(falls),
+                    legalFalls = sum(1 for f in falls if f.legal),
+                    voltageV = None if steadyVolts is None else int(steadyVolts),
+                    fieldState = fieldLevel(steadyVolts),
+                    message = banner or "",
+                    picked = picked_,
+                    dropletsCompleted = len(dropletGroups(falls)),
+                    targetFallsPerDroplet = TARGET_FALLS_PER_DROPLET,
+                )
                 hud = "tracked %d   falls %d   legal %d   V %s" % (
                     nTracked, len(falls), sum(1 for f in falls if f.legal),
                     "?" if steadyVolts is None else "%d" % steadyVolts)
@@ -5160,6 +5233,11 @@ def report(falls, outDir = None, path = None):
                      "%.1fs" % f.tTop if f.tTop is not None else "-")
             print("%6d %10s %9.2f %11.3f %8s"
                   % (f.id, start, f.seconds, FALL_DIVISIONS / f.seconds, f.legal))
+    try:
+        writeLiveStatus(phase = "finished", legalFalls = sum(1 for f in falls if f.legal),
+                        falls = len(falls), message = "Session finished")
+    except Exception:
+        pass
     csvPath = artefact(outDir, path, "falls.csv") if outDir and path \
         else (os.path.join(outDir, "falls.csv") if outDir else "falls.csv")
     os.makedirs(os.path.dirname(os.path.abspath(csvPath)), exist_ok = True)
