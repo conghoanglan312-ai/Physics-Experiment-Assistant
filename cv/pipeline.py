@@ -931,6 +931,25 @@ SECOND_CHANCE_PX = 14.0
 SECOND_CHANCE_GROW = 12.0     # px of radius per second a track has been missing
 SECOND_CHANCE_MAX_PX = 30.0
 SECOND_CHANCE_AREA_FRAC = 0.6
+# A track whose CLOCK IS RUNNING carries a measurement nothing else can reproduce, and
+# it knows where its droplet is to within a few pixels.  Inside that radius the gates
+# are answering a question that has already been answered, so for that track only they
+# relax further: the area floor drops again, and the grid mask does not apply -- the
+# `16` line IS a grid row, so the one moment a fall must be seen is a moment the mask
+# blinds us.  Circularity still applies: a smear that is not round is not the droplet.
+#
+# Gated one relaxation at a time on one_droplet_slow, for a mid-fall track within
+# 15 px:
+#
+#   area floor x0.35   keeps all 5 reference falls, 50 traverses vs 46   -> shipped
+#   grid mask off      LOSES 33.44 s, 53 traverses                       -> rejected
+#   both               LOSES 33.44 s                                     -> rejected
+#
+# So the area floor relaxes and the grid mask does not -- not for any track, by any
+# rule tried, however narrow.  A droplet parked on a line stays invisible, and that
+# stays an operator rule: park just above `0`, not on it.
+MEASURE_RESCUE_PX = 15.0
+MEASURE_RESCUE_AREA_FRAC = 0.35
 RECOVERED = [0]
 # Where this frame's rejected contours were, and why they were rejected.  Cleared every
 # frame, so it costs one list per frame and answers the only question that matters when
@@ -998,7 +1017,8 @@ def _nearTrack(cx, cy, keepNear):
     return False
 
 
-def detectDroplets(gray, background, s, allAreas = None, keepNear = None):
+def detectDroplets(gray, background, s, allAreas = None, keepNear = None,
+                   measuring = None):
     diff = cv2.absdiff(gray, background)
     blurred = cv2.GaussianBlur(diff, (5, 5), sigmaX = 0)
     levelOtsu, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
@@ -1028,8 +1048,12 @@ def detectDroplets(gray, background, s, allAreas = None, keepNear = None):
         # depends on whether a track is already pointing here.
         cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
         near = bool(keepNear) and _nearTrack(cx, cy, keepNear)
-        areaFloor = (s["areaMin"] * SECOND_CHANCE_AREA_FRAC if near
-                     else s["areaMin"])
+        timing = bool(measuring) and _nearTrack(cx, cy, measuring)
+        areaFloor = s["areaMin"]
+        if timing:
+            areaFloor *= MEASURE_RESCUE_AREA_FRAC
+        elif near:
+            areaFloor *= SECOND_CHANCE_AREA_FRAC
         circularity = 4 * np.pi * cArea / (perimeter ** 2)
         if cArea < areaFloor:
             _reject("area<min")
@@ -1058,6 +1082,8 @@ def detectDroplets(gray, background, s, allAreas = None, keepNear = None):
         inPicture = (cx < s["roiW"] - s["panelClear"]
                      and min(cx, cy, s["roiW"] - cx, s["roiH"] - cy) > s["edgeClear"])
         if inPicture and not onGrid:
+            if timing and cArea < s["areaMin"]:
+                RECOVERED[0] += 1
             centres.append((cx, cy, cArea))
         else:
             if onGrid and min(abs(cy - r) for r in s["gridRows"]) <= s["gridClear"]:
@@ -3918,7 +3944,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 while latched and now - latched[0][0] > MAX_FALL_S + 5.0:
                     latched.popleft()
             # Where the tracker is already looking, and how sure it still is.
-            keepNear = []
+            keepNear, measuring = [], []
             for t in live:
                 if len(t.points) < CONFIRM_POINTS:
                     continue                  # a probationary track proves nothing
@@ -3927,7 +3953,10 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 keepNear.append((float(px), float(py),
                                  min(SECOND_CHANCE_MAX_PX,
                                      SECOND_CHANCE_PX + SECOND_CHANCE_GROW * gap)))
-            centres, _, _ = detectDroplets(gray, background, s, keepNear = keepNear)
+                if t.tTop is not None and t.tBottom is None:
+                    measuring.append((float(px), float(py), MEASURE_RESCUE_PX))
+            centres, _, _ = detectDroplets(gray, background, s, keepNear = keepNear,
+                                           measuring = measuring)
             detections += len(centres)
             detSeries.append((now, len(centres)))
 
