@@ -1,6 +1,6 @@
 # Millikan oil-drop measurements
 
-Every droplet measured, across seven sessions. `n` is q/e rounded, per the manual
+Every droplet measured, across thirteen sessions and two operators. `n` is q/e rounded, per the manual
 VI.2; `e_i = q_i / n_i`. Values recomputed from each fall's own time and voltage.
 
 | droplet | falls | U_n (V) | mean t (s) | n | mean e_i (C) | scatter | error vs e | q/e |
