@@ -22,6 +22,13 @@ door; what sits behind it will keep moving.
                   the resulting charge would look perfectly normal. Without a
                   binding, `droplets` comes back empty and you want survey().
 
+  live_status()   What a RUNNING session is doing, for the app to display beside
+                  the video: the phase (still learning the background, or
+                  running), the counts the HUD shows, the plate voltage, and the
+                  picked droplet's clock and speed. Returns None when no session
+                  has ever run, and a `phase` of "finished" once one has ended.
+                  Poll it; it is rewritten about once a second.
+
   sample()        The shapes with fake values, for building UI without footage.
 
 Key names, nesting and units are FINAL. Which layer gets what, and why, is in
@@ -49,6 +56,7 @@ ONLY `legal` decides whether a fall counts, and it is exactly
 # Re-exported: these ARE the implementation, imported so there is one import path.
 from cv.pipeline import survey, analyze                      # noqa: F401
 from cv.pipeline import TARGET_DROPLETS, TARGET_FALLS_PER_DROPLET
+from cv.pipeline import liveStatusPath                       # noqa: F401
 
 CONTRACT_VERSION = 2
 
@@ -69,6 +77,16 @@ CONTRACT_VERSION = 2
 #  model nicely.
 #
 #  LLM_KEYS is an ALLOW-list. Add a key here only after deciding it is safe.
+#
+#  ONE EXCEPTION, decided by the operator on 2026-09-16 and deliberately narrow:
+#  the plate voltage MAY cross to the APP, through live_status() only, so the
+#  browser can show what the apparatus's own panel already shows to anyone
+#  standing in front of it. Advising a voltage is not computing a charge.
+#
+#  It does NOT enter LLM_KEYS, and live_status() output must not be put in a
+#  prompt. The reason is unchanged and specific: q = K(t) * d / U_n, the tutor
+#  has the manual in retrieval, and `seconds` together with `U_n` is the
+#  student's final answer. q, n and e still never leave this module at all.
 # --------------------------------------------------------------------------
 
 LLM_KEYS = (
@@ -97,6 +115,38 @@ def llm_context(d):
     if not isinstance(d, dict):
         return d
     return {k: llm_context(v) for k, v in d.items() if k in LLM_KEYS}
+
+
+LIVE_KEYS = (
+    "phase", "message", "elapsedSeconds", "learnSeconds", "startedAt", "updatedAt",
+    "tracked", "falls", "legalFalls", "dropletsCompleted", "targetFallsPerDroplet",
+    "voltageV", "fieldState",           # the panel reading -- app only, see THE SEAL
+    "frameWidth", "frameHeight",        # so a click can be sent as a fraction
+    "picked", "id", "speedGridPerSec", "fallSeconds", "balancePercent",
+)
+
+
+def live_status():
+    """What the running session is doing, or None if nothing has ever run.
+
+    For the app's own display. Not for prompts -- see THE SEAL above; this carries
+    the plate voltage, which llm_context() would strip.
+    """
+    import json as _json
+    try:
+        with open(liveStatusPath(), encoding = "utf-8") as f:
+            raw = _json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+
+    def keep(d):
+        if isinstance(d, dict):
+            return {k: keep(v) for k, v in d.items() if k in LIVE_KEYS}
+        return d
+
+    return keep(raw)
 
 
 def sample():

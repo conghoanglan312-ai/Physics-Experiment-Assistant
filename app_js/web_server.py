@@ -17,7 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from llm.main import getResponseFromGemini
-from app_js.wrapper import start_live, stop_live, click_live
+from app_js.wrapper import start_live, stop_live, click_live, send_click
+from cv.api import live_status
 
 ROOT = Path(__file__).resolve().parent
 HOST = "127.0.0.1"
@@ -107,11 +108,18 @@ class Handler(BaseHTTPRequestHandler):
             running = process_is_running(handle)
             if handle is not None and not running:
                 clear_live()
-            self._json({
-                "running": running,
-                "device": handle.get("device") if running else None,
-                "source": handle.get("source") if running else None,
-            })
+try:
+    status = live_status()
+except Exception:
+    status = None
+if status and not running and status.get("phase") != "finished":
+    status["phase"] = "stopped"
+self._json({
+    "running": running,
+    "device": handle.get("device") if running else None,
+    "source": handle.get("source") if running else None,
+    "status": status,
+})
             return
 
         if path == "/health":
@@ -126,6 +134,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/live/start":
             self._start_live()
             return
+        if path == "/api/live/click":
+            self._click()
+            return
+
         if path == "/api/live/stop":
             self._stop_live()
             return
@@ -150,29 +162,51 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        # An optional {"source": ...} plays a recorded clip instead of running the
+        # bench check, so the UI can be developed and tested with no apparatus.
         try:
-            body = self._read_json()
-        except Exception:
-            body = {}
-        source = body.get("source") if isinstance(body, dict) else None
+payload = self._read_json()
+except Exception:
+    payload = {}
+source = str(payload.get("source", "")).strip() or None
 
-        try:
-            handle = start_live(source=source)
-            token = secrets.token_urlsafe(24)
-            set_live(handle, token)
-            self._json({
-                "url": handle["url"],
-                "device": handle["device"],
-                "source": handle.get("source"),
-                "token": token,
-            })
-        except Exception as exc:
-            clear_live()
-            message = (
-                "Please plug in the dongle first." if source is None
-                else "Could not start playback for that source: %s" % exc
-            )
-            self._json({"error": message}, status=500)
+try:
+    handle = start_live(source=source)
+    token = secrets.token_urlsafe(24)
+    set_live(handle, token)
+    self._json({
+        "url": handle["url"],
+        "device": handle["device"],
+        "source": handle.get("source"),
+        "token": token,
+    })
+except Exception as exc:
+    clear_live()
+    self._json({"error": "Please plug in the dongle first."
+                         if source is None else
+                         "Could not play %s: %s" % (source, exc)}, status=500)
+
+def _click(self):
+    """{"x": 0.42, "y": 0.63, "token": "..."} -- fractions of the frame."""
+    handle, token = get_live()
+    if not process_is_running(handle):
+        self._json({"error": "No live session."}, status=409)
+        return
+    try:
+        payload = self._read_json()
+        if str(payload.get("token", "")) != str(token):
+            self._json({"error": "Wrong token."}, status=403)
+            return
+        x, y = float(payload["x"]), float(payload["y"])
+    except Exception:
+        self._json({"error": "Send x and y as fractions of the frame."}, status=400)
+        return
+    try:
+        send_click(handle, x, y)
+    except Exception as exc:
+        self._json({"error": str(exc)}, status=500)
+        return
+    self._json({"ok": True})
 
     def _stop_live(self):
         try:

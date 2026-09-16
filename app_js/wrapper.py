@@ -35,6 +35,7 @@ the actual screen grab), on top of what pipeline.py already needs:
 This only works on Windows, same as the rest of this lab's toolchain.
 """
 
+import json
 import re
 import socket
 import subprocess
@@ -190,7 +191,25 @@ def _capture_window(hwnd):
             win32gui.ReleaseDC(hwnd, hwnd_dc)
 
 
-def _mirror_window(hwnd, streamer, stop_event, fps = 12):
+# The pipeline delivers about 23 fps to its own window and this mirrored 12, which is
+# exactly how it looked: a stream sample measured 73 frames in 6 s.
+#
+# 23 is not reachable by this method.  Measured on the bench laptop, one mirrored frame
+# costs about 59 ms, and the split is not where you would guess: JPEG encoding the
+# 1272x689 frame is 4.3 ms, so the other ~55 ms is PrintWindow rendering the window
+# into an off-screen DC.  Lowering quality saves 0.1 ms and downscaling saves 1.2 ms --
+# neither touches the real cost.  The ceiling is about 17 fps.
+#
+# So 15: a clear improvement on 12, and it still SLEEPS between frames rather than
+# pinning a core on a machine that is also tracking droplets.  The tracker's frames are
+# the measurement; the browser's are a convenience.
+#
+# Going beyond this means not capturing a window at all -- the pipeline already has the
+# frame in memory and could publish it for 4 ms instead of 59.  See issue #13.
+MIRROR_FPS = 15.0
+
+
+def _mirror_window(hwnd, streamer, stop_event, fps = MIRROR_FPS):
     period = 1.0 / fps
     while not stop_event.is_set():
         t0 = time.time()
@@ -206,40 +225,38 @@ def _mirror_window(hwnd, streamer, stop_event, fps = 12):
 
 
 def start_live(source = None, stream_port = None, window_timeout = WINDOW_TIMEOUT_S):
-    """Launch the pipeline in the background with its normal native
+    """Run the bench check and launch the live pipeline in the background with its native
     "Droplets" window, then start mirroring that window over HTTP.
 
-    `source` is optional and does not change any existing behaviour when
-    omitted:
+    `source` is optional and skips the bench check:
+      - None (default): runs the bench check to pick a real camera/dongle, then
+        `python -m cv.pipeline live <device>`.
+      - a number (int or numeric string): uses that camera index.
+      - anything else (a string): treated as a recorded clip; runs
+        `python -m cv.pipeline play <source>` through the same window (click-to-pick still works).
+    """
 
-      - None (default): unchanged -- runs the bench check to pick a real
-        camera/dongle, then `python -m cv.pipeline live <device>`.
-      - a number (int, or a numeric string): skips the bench check and uses
-        that value directly as the camera index for `live <index>`.
-      - anything else (a string): a clip spec -- a file path, or a
-        "frames:DIR" directory -- run through `python -m cv.pipeline play
-        <source>` instead. Same "Droplets" window, paced to real time,
-        click-to-pick still working, no apparatus or dongle required. This
-        is pipeline.py's own `play` entry point (see its module docstring);
-        nothing about pipeline.py changes here, this just chooses which of
-        its existing CLI commands to run.
+    `source` skips the bench check.  A number is a camera index; anything else
+    is a recorded clip, which the pipeline plays through the same window at
+    real speed with click-to-pick working -- so the whole app can be exercised
+    at a desk instead of in a lab slot with the dongle wired in.
 
     Returns a handle dict; pass it to stop_live() when the UI is done.
     """
-    device = None
-    if source is None:
-        device = _bench_check()
-        command_args = ["live", str(device)]
-    elif _looksNumeric(source):
-        device = int(str(source).strip())
-        command_args = ["live", str(device)]
-    else:
-        command_args = ["play", str(source)]
-
-    port = stream_port or _find_free_port()
-    command = [sys.executable, "-m", "cv.pipeline"] + command_args
+if source is None or str(source).strip() == "":
+    device = _bench_check()
+    command = [sys.executable, "-m", "cv.pipeline", "live", str(device)]
+elif str(source).strip().isdigit():
+    device = int(str(source).strip())
+    command = [sys.executable, "-m", "cv.pipeline", "live", str(device)]
+else:
+    device = str(source).strip()
+    command = [sys.executable, "-m", "cv.pipeline", "play", device]
+port = stream_port or _find_free_port()
     print("Command:", " ".join(command))
-    process = subprocess.Popen(command)
+    # stdin stays open for the life of the session: the browser's clicks go down it,
+    # one JSON object per line.  See send_click().
+    process = subprocess.Popen(command, stdin = subprocess.PIPE)
 
     hwnd = _find_window(WINDOW_TITLE, timeout = window_timeout)
     if hwnd is None:
@@ -291,24 +308,28 @@ def start_live(source = None, stream_port = None, window_timeout = WINDOW_TIMEOU
     }
 
 
+def send_click(handle, x, y):
+    """Forward a click from the browser to the running pipeline.
+
+    `x` and `y` are fractions of the frame; the pipeline converts them to pixels.
+    """
+    if handle is None:
+        raise RuntimeError("no live session")
+    process = handle.get("process")
+    if process is None or process.poll() is not None or process.stdin is None:
+        raise RuntimeError("the pipeline is not running")
+    x = min(1.0, max(0.0, float(x)))
+    y = min(1.0, max(0.0, float(y)))
+    line = json.dumps({"x": x, "y": y}) + "\n"
+    process.stdin.write(line.encode("utf-8"))
+    process.stdin.flush()
+
+
 def click_live(handle, x, y):
-    """Forward one left-click to the pipeline's own "Droplets" window, at
-    client coordinates (x, y), exactly as if the operator had physically
-    clicked the (now bottom-of-z-order, browser-only) native window there.
+    """Forward one left-click to the pipeline's native window at pixel coords (x, y).
 
-    pipeline.py is never touched. It already selects a droplet purely
-    through cv2.setMouseCallback("Droplets", onMouse), which OpenCV backs
-    with the window's ordinary Win32 message loop -- onMouse reads its
-    (mx, my) straight out of the WM_LBUTTONDOWN message's lParam. Posting
-    that same message ourselves, with the coordinates the browser reports,
-    is indistinguishable to pipeline.py from a real click; nothing about
-    its own selection/tracking logic needs to know the click didn't come
-    from a mouse in the room.
-
-    PostMessage (not SendMessage) queues the message and returns
-    immediately without waiting for pipeline.py's message loop to process
-    it, and without moving the real system cursor -- appropriate for a
-    window that is not meant to be interacted with directly any more.
+    This posts Win32 mouse messages so pipeline.py receives the same WM_LBUTTON events
+    as a real mouse click.
     """
     if not handle:
         raise RuntimeError("no live session")

@@ -161,7 +161,7 @@ flowchart LR
 
 ## Chapter 6 — Development history
 
-### 6.1 Timeline (57 commits, 2026-08-12 → 09-11)
+### 6.1 Timeline (72 commits, 2026-08-12 → 09-15)
 
 | date | what changed | why | result |
 |---|---|---|---|
@@ -178,6 +178,8 @@ flowchart LR
 | 09-09 | area cap 100 → 900·mag²; first aided hunt; LLM model config + session flow | pipeline found only 1 of 15 stopwatch falls | 15 of 15; first aided hunt 319 s |
 | 09-10 | hunt aid, position binding, live panel reading; shape-gate sweep; `llm/` merged; lift detector; fall recovery; click-to-select | hunting took 81% of lab time; operator reports from live tests | aided hunt median 219 s vs 463 s unaided; 11 droplets, 55 falls |
 | 09-11 | field state decides the verdict; live-line voltage; recovery threshold | wrong verdict at 0 V; 12 of 35 falls lacked a voltage; recovery refused the real lost fall | offline checks pass; live test pending |
+| 09-14 | the pipeline writes `charges.csv` itself; balance guidance rebuilt; operator guide | five falls measured at the bench produced no result without a second tool; four live sessions exposed nine faults in the guidance | 5 droplets measured live, charge written automatically |
+| 09-15 | v_free from a measured fall; smoothing keyed to the column; the target is withheld until it settles; playback mode | every percentage on screen is a fraction of v_free, and v_free was estimated too low | a droplet reads ~1% where it read 4%; the app can be tested without the apparatus |
 
 ### 6.2 Growth record (the "training log" equivalent)
 
@@ -215,7 +217,7 @@ Two recordings served as benchmarks:
 | background sampling 1.000 → 1.067 s | 13 → 37 traverses, 0 → 2 legal falls |
 | panel vote gate 0.9 | 15 falls: 14 correct, 1 refused, 0 wrong |
 
-**Droplets measured (cumulative):** 5 by 09-08 → 8 by 09-09 → **11** by 09-10 (55 falls).
+**Droplets measured (cumulative):** 5 by 09-08 → 8 by 09-09 → 11 by 09-10 → 16 by 09-14 → **17** by 09-15 (85 falls).
 
 **What this means**
 
@@ -247,6 +249,13 @@ Two recordings served as benchmarks:
 | Wrong verdict at 0 V | falling droplet called "no reaction" | charge question asked before field state | field state first |
 | Missing voltage | 12 / 35 legal falls without U | latched line shows +0000V | fall back to the live `V:` line |
 | Fall-recovery threshold | would refuse the real lost fall (38% tracked) | 50% was a guess | 35% + unit test |
+| Charge never written live | five falls measured, no result; a second tool was needed | `analyze()` needs the video, and a live run has none | the pipeline writes `charges.csv` itself |
+| Balance advice during a lift | “balance ~1106.9%”, targets hundreds of volts out | the lift latch needs a 150 V step in 0.5 s; a slow switch never gives one | any reading above 300 V counts as a lift |
+| v_free measured too low | every percentage inflated together; a 0.9% droplet called 4.1% | pooled per-frame velocities instead of a measured fall | a completed legal fall sets v_free |
+| Smoothing keyed to the track | percentages swung 2% → 36% between seconds | five falls carried four track ids, each starting empty | keyed to the column |
+| Target handed over too early | operator sent to 220 V, 200 V, 250 V, 220 V on consecutive seconds | U/(1 − v/v_free) only settles near balance | withheld until the estimates agree; a half-step asked for meanwhile |
+| Progress count went backwards | “DONE 5 of 5” then “MEASURING 4 of 5” | column first, duration second put the median between two droplets | one rule, the one `charges.csv` binds on |
+| Droplet invisible on a grid line | a full 21 s fall never timed | grid lines are masked so they are not read as droplets | park above the line; a track keeps faint blobs |
 
 How they were found: replaying against stopwatch times (area cap, shape gate), the
 acceptance recording (starved droplet, rising tracks), frame-by-frame review of the
@@ -372,7 +381,7 @@ timestamps, so each is located to ~22 ms — **0.1%** of a 20 s fall.
 | Fall-recovery unit test | geometry of a real lost fall; 4 cases that should be recovered, 4 impostors | all 8 correct | on demand, automatic |
 | Panel reading | 15 falls of the 09-08 session vs the known voltages | 14 correct, 1 refused, 0 wrong | once, automatic |
 | Physics self-check | q/e distance from a whole number | warns above 0.20 | live, every fall |
-| Accepted value | e vs 1.602×10⁻¹⁹ C | −3.13% over 55 falls | per result set, automatic |
+| Accepted value | e vs 1.602×10⁻¹⁹ C | −2.97% over 85 falls | per result set, automatic |
 
 **Per-frame detection accuracy (asked for in chapter 8) — done, results in 8.5**
 
@@ -424,25 +433,35 @@ so there are no rising times. Constants from manual Ⅴ: l = 1.60 mm, d = 5.00 m
 | 9 | 219 | 36.86 | 0.212 | 1 | 1.7300 | 1.58e-21 | 5.2e-22 | 1.66e-21 | 1.0% | +7.99% |
 | 10 | 140 | 27.34 | 0.094 | 3 | 1.4469 | 7.77e-22 | 6.6e-22 | 1.02e-21 | 0.7% | −9.68% |
 | 11 | 271 | 36.28 | 0.198 | 1 | 1.4336 | 1.26e-21 | 3.8e-22 | 1.31e-21 | 0.9% | −10.51% |
+| 12 | 234 | 18.82 | 0.096 | 3 | 1.5575 | 1.27e-21 | 6.0e-22 | 1.40e-21 | 0.9% | −2.78% |
+| 13 | 169 | 18.92 | 0.166 | 4 | 1.6044 | 2.21e-21 | 7.2e-22 | 2.32e-21 | 1.4% | +0.15% |
+| 14 | 176 | 23.00 | 0.146 | 3 | 1.5119 | 1.50e-21 | 6.2e-22 | 1.63e-21 | 1.1% | −5.63% |
+| 15 | 192 | 26.56 | 0.322 | 2 | 1.6585 | 3.15e-21 | 6.1e-22 | 3.21e-21 | 1.9% | +3.53% |
+| 16 | 248 | 37.96 | 0.445 | 1 | 1.4593 | 2.70e-21 | 4.0e-22 | 2.73e-21 | 1.9% | −8.90% |
+| 17 | 163 | 17.08 | 0.094 | 5 | 1.5601 | 1.34e-21 | 7.5e-22 | 1.54e-21 | 1.0% | −2.61% |
 
-**All 55 falls:** e = 1.5518×10⁻¹⁹ C, sd 9.5×10⁻²¹ C, u_A(mean) 1.3×10⁻²¹ C,
-**error −3.13%**. Electron counts observed: **1, 2, 3**. Per-fall radius, q, n, e_i:
+**All 85 falls:** e = 1.5544×10⁻¹⁹ C, sd 8.9×10⁻²¹ C, u_A(mean) 1.0×10⁻²¹ C,
+**error −2.97%**. Electron counts observed: **1, 2, 3, 4, 5**. Per-fall radius, q, n, e_i:
 `charges_all.csv`.
 
 Notes:
 - Within a droplet, falls scatter 1.2–5.1% and u_c is 0.6–2.3%. Between droplets the
-  error spreads with sd 5.6%. So most of the error is fixed per droplet, not timing or
+  error spreads with sd 5.1 percentage points. So most of the error is fixed per droplet, not timing or
   voltage resolution. Balance voltage, fall time and n do not predict it (|r| ≤ 0.36,
   `BENCHMARK.md`). For scale: a droplet still drifting 0.02 div/s when judged balanced
   shifts q by 0.02/v_free = 4–10%, the size of the spread. Drift at balance was not
   logged.
 - Droplet 4 fall 5 (17.49 s) was measured from the session recording after the live
   tracker lost the track mid-fall (`README.md`).
+- Droplets 12–17 were measured live on 09-14 and 09-15, with the charge written by the
+  pipeline itself at the end of each run rather than by a separate tool. Droplet 17 is
+  the first five-electron droplet; droplet 16, at one electron and 38 s falls, sits one
+  second inside the 40 s legality limit.
 
 **What this means**
 
-- Measured e = 1.552×10⁻¹⁹ C, 3.1% below the accepted value, from 11 droplets carrying 1, 2 or 3 electrons: charge came in whole-number steps, which is what the experiment sets out to show.
-- Each droplet is measured precisely (about 1% uncertainty), but droplets disagree with each other by about 6%. The error is something fixed per droplet, not timing; a small leftover drift when a droplet was judged balanced is enough to explain it.
+- Measured e = 1.554×10⁻¹⁹ C, 3.0% below the accepted value, from 17 droplets carrying 1 to 5 electrons: charge came in whole-number steps, which is what the experiment sets out to show.
+- Each droplet is measured precisely (about 1% uncertainty), but droplets disagree with each other by about 5%. The error is something fixed per droplet, not timing; a small leftover drift when a droplet was judged balanced is enough to explain it.
 - More droplets would shrink the overall error. Timing precision is not the limit.
 
 ### 8.2 Machine vs manual
@@ -536,10 +555,10 @@ apparatus and operator.
 | Operator-timed falls kept, older one-droplet recording | 5 / 5 | re-run after every code change; all five still found each time |
 | Timing error vs stopwatch | −0.11 ± 0.23 s (15 falls); −0.27 ± 0.42 s (5 falls) | pipeline duration minus stopwatch duration, mean ± SD; the 5-fall set paired shortest with shortest |
 | e: pipeline vs hand times | within 0.9 percentage points per droplet | e computed twice for droplets 1–3, once from each set of times, same voltages (8.2) |
-| Legal falls lost to tracking breaks | 4, across 4 sessions | completed falls the pipeline never recorded because the droplet's track broke mid-fall; recovery added 09-10, corrected 09-11 |
+| Legal falls lost to tracking breaks | 6, across 6 sessions | completed falls the pipeline never recorded because the droplet's track broke mid-fall; recovery added 09-10, corrected 09-11. The two on 09-14 were diagnosed from the annotated video: one droplet was parked on a grid line, where nothing is detected, and one track broke with only 20% of the fall left, below the 35% the recovery requires |
 | Voltage read per legal fall | 23 / 35 (66%); every droplet still got its voltage from its other falls | legal falls with a panel reading in the pipeline output, all 09-10 lab sessions; fallback to the live `V:` line added 09-11, not yet tested live |
 | Panel reading | 14 correct, 1 refused, 0 wrong | the 15 falls of the 09-08 session against the known 151 / 176 / 200 V; the refused one is D3 f3 (8.2) |
-| q/e distance from a whole number | 0.02–0.16 for 10 of 11 droplets; 0.29 for droplet 10 (−9.7%), which the live warning flags | each droplet's q divided by e = 1.602×10⁻¹⁹ C, distance to the nearest whole number |
+| q/e distance from a whole number | 0.01–0.17 for 16 of 17 droplets; 0.29 for droplet 10 (−9.7%), which the live warning flags | each droplet's q divided by e = 1.602×10⁻¹⁹ C, distance to the nearest whole number |
 | Limit of that check | droplet 11 (n = 1, −10.5%) sits only 0.11 from 1 | a 10% error moves q/e by 0.1 when n = 1, but by 0.3 when n = 3 |
 | Per-frame detection, tracked droplets | precision 95.8%, recall 85.4%, F1 90.3% | 150 hand-labelled frames, blind, after a blind second look (8.5) |
 
