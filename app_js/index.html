@@ -5,12 +5,27 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Millikan AI Assistant</title>
   <link rel="stylesheet" href="styles.css" />
+  <script>
+    // Applied before first paint so the page never flashes the wrong theme.
+    (function () {
+      try {
+        var saved = localStorage.getItem("millikanTheme");
+        var theme = saved === "light" || saved === "dark"
+          ? saved
+          : (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+        document.documentElement.dataset.theme = theme;
+      } catch (_) {
+        document.documentElement.dataset.theme = "dark";
+      }
+    })();
+  </script>
 </head>
 <body>
   <div class="page-glow" aria-hidden="true"></div>
 
   <main class="app">
     <section class="title-box">
+      <button id="themeToggle" class="theme-toggle" type="button" aria-label="Switch to light mode">🌙</button>
       <div class="main-title">🔬 Millikan Oil Drop AI Assistant</div>
       <div class="subtitle">AI-powered laboratory assistant for oil droplet selection</div>
     </section>
@@ -30,7 +45,22 @@
 
         <div class="feed-controls">
           <button id="liveButton" class="live-button">▶ Start live feed</button>
+          <input
+            id="liveSourceInput"
+            class="live-source-input"
+            type="text"
+            placeholder="Camera index or clip path (optional)"
+            aria-label="Camera index or clip path"
+            autocomplete="off"
+          />
+          <button
+            id="demoClipButton"
+            class="demo-button"
+            type="button"
+            title="Runs a bundled test clip through the pipeline -- no apparatus or dongle needed"
+          >🎬 Try demo clip</button>
         </div>
+        <div id="feedHint" class="feed-hint hidden">🖱️ Click a droplet in the feed to select it</div>
       </div>
 
       <aside class="info-column">
@@ -45,20 +75,24 @@
             </div>
           </div>
 
-          <div class="info-item"><span class="info-label">STATUS</span>: Suitable</div>
-          <div class="info-item"><span class="info-label">FALL TIME</span>: 3 s</div>
-          <div class="info-item"><span class="info-label">VELOCITY</span>: 0.03 grid/s</div>
+          <div class="info-stats">
+            <div class="info-item"><span class="info-label">STATUS</span>: Suitable</div>
+            <div class="info-item"><span class="info-label">FALL TIME</span>: 3 s</div>
+            <div class="info-item"><span class="info-label">VELOCITY</span>: 0.03 grid/s</div>
+          </div>
 
-          <div class="divider"></div>
-          <div class="reference-title">REFERENCE DATA</div>
+          <div class="reference-block">
+            <div class="divider"></div>
+            <div class="reference-title">REFERENCE DATA</div>
 
-          <div class="reference-item"><span>Oil Density</span><span>981 kg·m⁻³</span></div>
-          <div class="reference-item"><span>Gravity</span><span>9.78 m·s⁻²</span></div>
-          <div class="reference-item"><span>Air Viscosity</span><span>1.83×10⁻⁵ kg·m⁻¹·s⁻¹</span></div>
-          <div class="reference-item"><span>Descent Distance</span><span>1.60×10⁻³ m</span></div>
-          <div class="reference-item"><span>Correction Constant</span><span>8.22×10⁻³ m·Pa</span></div>
-          <div class="reference-item"><span>Atmospheric Pressure</span><span>1.0098×10⁵ Pa</span></div>
-          <div class="reference-item"><span>Plate Distance</span><span>5.00×10⁻³ m</span></div>
+            <div class="reference-item"><span>Oil Density</span><span>981 kg·m⁻³</span></div>
+            <div class="reference-item"><span>Gravity</span><span>9.78 m·s⁻²</span></div>
+            <div class="reference-item"><span>Air Viscosity</span><span>1.83×10⁻⁵ kg·m⁻¹·s⁻¹</span></div>
+            <div class="reference-item"><span>Descent Distance</span><span>1.60×10⁻³ m</span></div>
+            <div class="reference-item"><span>Correction Constant</span><span>8.22×10⁻³ m·Pa</span></div>
+            <div class="reference-item"><span>Atmospheric Pressure</span><span>1.0098×10⁵ Pa</span></div>
+            <div class="reference-item"><span>Plate Distance</span><span>5.00×10⁻³ m</span></div>
+          </div>
         </div>
         <div class="feed-title">[ DROPLET ANALYSIS ]</div>
       </aside>

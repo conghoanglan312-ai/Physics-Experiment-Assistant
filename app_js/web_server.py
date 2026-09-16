@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from llm.main import getResponseFromGemini
-from app_js.wrapper import start_live, stop_live
+from app_js.wrapper import start_live, stop_live, click_live
 
 ROOT = Path(__file__).resolve().parent
 HOST = "127.0.0.1"
@@ -26,6 +26,18 @@ PORT = 8502
 _live_lock = threading.Lock()
 _live_handle = None
 _live_token = None
+
+# Tracks the currently in-flight /api/chat generation per sessionID (the
+# frontend always sends the same fixed sessionID, so back-to-back messages
+# share one Gemini session). Without this, a request that times out on the
+# client leaves its server-side worker thread possibly still blocked inside
+# getResponseFromGemini() for that session; the *next* message's own
+# generation can then get stuck contending for the same session before its
+# own watchdog has a chance to do any real work, making it look like the new
+# response is still governed by the previous timeout instead of starting a
+# fresh, independent one.
+_chat_lock = threading.Lock()
+_chat_sessions: dict[str, dict] = {}
 
 
 def json_bytes(payload: dict) -> bytes:
@@ -95,7 +107,11 @@ class Handler(BaseHTTPRequestHandler):
             running = process_is_running(handle)
             if handle is not None and not running:
                 clear_live()
-            self._json({"running": running, "device": handle.get("device") if running else None})
+            self._json({
+                "running": running,
+                "device": handle.get("device") if running else None,
+                "source": handle.get("source") if running else None,
+            })
             return
 
         if path == "/health":
@@ -113,6 +129,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/live/stop":
             self._stop_live()
             return
+        if path == "/api/live/click":
+            self._click_live()
+            return
         if path == "/api/chat":
             self._chat()
             return
@@ -123,17 +142,37 @@ class Handler(BaseHTTPRequestHandler):
         global _live_handle
         handle, token = get_live()
         if process_is_running(handle):
-            self._json({"url": handle["url"], "device": handle["device"], "token": token})
+            self._json({
+                "url": handle["url"],
+                "device": handle["device"],
+                "source": handle.get("source"),
+                "token": token,
+            })
             return
 
         try:
-            handle = start_live()
+            body = self._read_json()
+        except Exception:
+            body = {}
+        source = body.get("source") if isinstance(body, dict) else None
+
+        try:
+            handle = start_live(source=source)
             token = secrets.token_urlsafe(24)
             set_live(handle, token)
-            self._json({"url": handle["url"], "device": handle["device"], "token": token})
-        except Exception:
+            self._json({
+                "url": handle["url"],
+                "device": handle["device"],
+                "source": handle.get("source"),
+                "token": token,
+            })
+        except Exception as exc:
             clear_live()
-            self._json({"error": "Please plug in the dongle first."}, status=500)
+            message = (
+                "Please plug in the dongle first." if source is None
+                else "Could not start playback for that source: %s" % exc
+            )
+            self._json({"error": message}, status=500)
 
     def _stop_live(self):
         try:
@@ -155,12 +194,40 @@ class Handler(BaseHTTPRequestHandler):
             clear_live()
         self._json({"ok": True})
 
+    def _click_live(self):
+        try:
+            body = self._read_json()
+        except Exception:
+            self._json({"error": "Invalid click request."}, status=400)
+            return
+
+        handle, token = get_live()
+        if handle is None or not process_is_running(handle):
+            self._json({"error": "The live feed is not running."}, status=409)
+            return
+        if body.get("token") != token:
+            self._json({"error": "Invalid live-session token."}, status=403)
+            return
+
+        try:
+            x = float(body.get("x"))
+            y = float(body.get("y"))
+        except (TypeError, ValueError):
+            self._json({"error": "x and y must be numbers."}, status=400)
+            return
+
+        try:
+            click_live(handle, x, y)
+            self._json({"ok": True})
+        except Exception:
+            self._json({"error": "Could not forward the click to the pipeline."}, status=500)
+
     def _chat(self):
-        """Stream Gemini output with a 30s first-chunk and 5s inter-chunk timeout."""
+        """Stream Gemini output with a 60s first-chunk and 5s inter-chunk timeout."""
         import queue
         import time
 
-        FIRST_RESPONSE_TIMEOUT = 30.0
+        FIRST_RESPONSE_TIMEOUT = 60.0
         BETWEEN_CHUNKS_TIMEOUT = 5.0
         STREAM_END = object()
 
@@ -183,6 +250,24 @@ class Handler(BaseHTTPRequestHandler):
         first_chunk = threading.Event()
         last_generated = time.monotonic()
         state_lock = threading.Lock()
+
+        # Retire any generation still running for this same session before
+        # starting this one, so this request's watchdog always measures a
+        # clean, independent timeout window rather than one contending with
+        # leftover work from an earlier (possibly already-timed-out) request.
+        with _chat_lock:
+            previous = _chat_sessions.get(session_id)
+            _chat_sessions[session_id] = {"cancel": cancel, "thread": None}
+        if previous is not None:
+            previous["cancel"].set()
+            stale_thread = previous.get("thread")
+            if stale_thread is not None and stale_thread.is_alive():
+                # Best-effort: give a cooperative previous worker a brief
+                # window to notice cancel and unwind before we proceed. We
+                # can't forcibly kill a blocked thread, but this avoids the
+                # common case of two requests racing to use the same
+                # underlying Gemini session at once.
+                stale_thread.join(timeout=1.0)
 
         def push(payload):
             events.put(payload)
@@ -212,9 +297,10 @@ class Handler(BaseHTTPRequestHandler):
                         break
             except Exception:
                 if not cancel.is_set():
+                    traceback.print_exc()  # server-side only; never shown to the browser
                     push({
                         "type": "error",
-                        "data": "Unable to get a response from the AI assistant.",
+                        "data": "Unable to reach the AI assistant. It may not be configured correctly (e.g. a missing or invalid API key) -- check the server console for details.",
                     })
             finally:
                 worker_done.set()
@@ -235,7 +321,7 @@ class Handler(BaseHTTPRequestHandler):
                         cancel.set()
                         push({
                             "type": "timeout",
-                            "data": "The AI assistant did not respond within 30 seconds.",
+                            "data": "The AI assistant did not respond within 60 seconds.",
                         })
                         return
                 else:
@@ -256,8 +342,40 @@ class Handler(BaseHTTPRequestHandler):
 
         worker = threading.Thread(target=produce, daemon=True, name="gemini-stream")
         timer = threading.Thread(target=watchdog, daemon=True, name="gemini-timeout-watchdog")
+        with _chat_lock:
+            if _chat_sessions.get(session_id, {}).get("cancel") is cancel:
+                _chat_sessions[session_id]["thread"] = worker
         worker.start()
         timer.start()
+
+        def deregister():
+            with _chat_lock:
+                if _chat_sessions.get(session_id, {}).get("cancel") is cancel:
+                    del _chat_sessions[session_id]
+
+        # Give an outright, fast failure -- most commonly the Gemini client
+        # couldn't even be constructed, e.g. a missing or invalid API key --
+        # a chance to surface as a plain, immediate 500 the UI can show,
+        # instead of always committing to an SSE stream that a construction
+        # failure would otherwise leave hanging with no visible response.
+        # A real, working request routinely takes far longer than this to
+        # produce its first chunk, so the grace window is invisible to it;
+        # a broken configuration typically fails within milliseconds, well
+        # inside it.
+        EARLY_FAILURE_GRACE = 2.5
+        try:
+            pending_item = events.get(timeout=EARLY_FAILURE_GRACE)
+        except queue.Empty:
+            pending_item = None
+
+        if isinstance(pending_item, dict) and pending_item.get("type") == "error":
+            cancel.set()
+            deregister()
+            self._json({
+                "error": pending_item.get("data")
+                or "The AI assistant is not configured. Please check the server's API key configuration.",
+            }, status=500)
+            return
 
         # Explicit SSE headers prevent browser/proxy buffering.
         self.send_response(200)
@@ -275,10 +393,17 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             self.wfile.flush()
 
+        def next_event(timeout):
+            nonlocal pending_item
+            if pending_item is not None:
+                item, pending_item = pending_item, None
+                return item
+            return events.get(timeout=timeout)
+
         try:
             while True:
                 try:
-                    item = events.get(timeout=0.5)
+                    item = next_event(0.5)
                 except queue.Empty:
                     # SSE heartbeat keeps the browser connection alive and
                     # prevents intermediaries from deciding the stream is idle.
@@ -308,6 +433,7 @@ class Handler(BaseHTTPRequestHandler):
             cancel.set()
         finally:
             cancel.set()
+            deregister()
 
     def _serve_static(self, url_path):
         if url_path == "/":

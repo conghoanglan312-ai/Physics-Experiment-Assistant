@@ -11,5 +11,6 @@ langchain-community
 langchain-text-splitters
 pypdf
 openai
+scipy
 pywin32
 pillow

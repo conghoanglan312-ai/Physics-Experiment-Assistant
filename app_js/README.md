@@ -147,9 +147,32 @@ Frame capture / MJPEG stream
 Browser <img>
 ```
 
-The browser only displays the streamed image.
+The browser displays the streamed image, and clicking on it selects a droplet.
 
-The camera feed itself is intentionally non-interactive from the browser side. The frontend does not send mouse or keyboard actions back into the CV pipeline.
+Clicking the live feed is forwarded to the pipeline's own window as a real click:
+
+```text
+Browser click on <img>
+   │
+   │ POST /api/live/click  { x, y, token }
+   ▼
+web_server.py
+   │
+   │ wrapper.click_live(handle, x, y)
+   ▼
+PostMessage(hwnd, WM_LBUTTONDOWN / WM_LBUTTONUP, ...)
+   │
+   ▼
+pipeline.py's own cv2.setMouseCallback("Droplets", onMouse)
+```
+
+`pipeline.py` itself is never modified or aware that the click didn't come
+from a physical mouse: it already reads click coordinates out of the
+window's ordinary Win32 mouse messages, so posting the same message it would
+normally receive is enough to select a droplet, same as clicking the native
+window directly. The frontend maps the click through the `<img>`'s
+`object-fit: contain` letterboxing so it lands on the correct pixel even
+when the displayed feed is scaled or padded to fit the panel.
 
 ### Starting the feed
 
@@ -159,13 +182,23 @@ Click:
 ▶ Start live feed
 ```
 
-The backend first performs its normal camera/dongle check. If the required device is unavailable, the frontend shows a user-facing message instead of exposing backend details.
+with the source field left blank. The backend first performs its normal camera/dongle check. If the required device is unavailable, the frontend shows a user-facing message instead of exposing backend details.
 
 When successful, the button changes to:
 
 ```text
 ■ Stop live feed
 ```
+
+### Developing without the apparatus
+
+The source field next to the button accepts:
+
+- nothing (default) — unchanged behavior, runs the bench check against a real camera/dongle.
+- a number — used directly as a camera index, skipping the bench check.
+- anything else — a clip spec (a file path, or `frames:DIR`) played back through the pipeline's own `Droplets` window at real speed, with click-to-pick still working. No apparatus or dongle required.
+
+The **🎬 Try demo clip** button fills the field with a bundled test fixture and starts it immediately, for a one-click way to exercise the whole stack (server, stream, click-to-pick) from a desk.
 
 ### Stopping the feed
 
@@ -304,7 +337,7 @@ The frontend/backend bridge uses two timeout rules.
 If the AI does not produce its first response within:
 
 ```text
-30 seconds
+60 seconds
 ```
 
 the request is treated as timed out.
@@ -581,7 +614,7 @@ Check that:
 
 The frontend expects:
 
-- the first response within 30 seconds
+- the first response within 60 seconds
 - subsequent chunks at intervals of no more than 5 seconds
 
 A slow or stalled backend stream will therefore be terminated from the frontend's point of view.
