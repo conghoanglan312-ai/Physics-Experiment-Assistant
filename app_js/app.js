@@ -20,6 +20,14 @@ const videoContainer = document.getElementById("videoContainer");
 const feedHint = document.getElementById("feedHint");
 const feedStatus = document.getElementById("feedStatus");
 
+const dropletLabel = document.getElementById("dropletLabel");
+const dropletRing = document.getElementById("dropletRing");
+const dropletStatus = document.getElementById("dropletStatus");
+const dropletVoltage = document.getElementById("dropletVoltage");
+const dropletFallTime = document.getElementById("dropletFallTime");
+const dropletVelocity = document.getElementById("dropletVelocity");
+const dropletNote = document.getElementById("dropletNote");
+
 const state = {
   messages: [],
   generating: false,
@@ -467,7 +475,7 @@ async function sendQuery() {
 // A bundled fixture that ships with the pipeline's own test suite -- lets
 // the feed be tried with no camera or dongle attached. Adjust this if your
 // checkout keeps its fixtures somewhere else.
-const DEMO_CLIP_SOURCE = "frames:test/fixtures/one_droplet_full";
+const DEMO_CLIP_SOURCE = "app_js/fixtures/demo_clip.mp4";
 
 async function startLive(explicitSource) {
   const source = (explicitSource ?? liveSourceInput.value).trim();
@@ -494,7 +502,7 @@ async function startLive(explicitSource) {
     showLiveFeed(payload.url, payload.device, payload.source);
     liveButton.textContent = "■ Stop live feed";
     liveButton.disabled = false;
-    pollLiveState();
+    scheduleLivePoll(0);
   } catch (error) {
     state.live = null;
     showFallback();
@@ -561,6 +569,9 @@ async function sendLiveClick(x, y) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ x, y, token: state.live.token }),
     });
+    // The pick changes on the pipeline's next pass. Look sooner than the
+    // ordinary poll would so the panel keeps up with the click.
+    scheduleLivePoll(300);
   } catch (_) {
     // Best-effort -- a dropped click just means the operator clicks again.
   }
@@ -587,12 +598,14 @@ liveFeed.addEventListener("click", (event) => {
   const localY = event.clientY - rect.top - offsetY;
   if (localX < 0 || localY < 0 || localX > dispW || localY > dispH) return; // clicked the letterbox margin, not the frame
 
-  const frameX = localX / scale;
-  const frameY = localY / scale;
-
   showClickRipple(event.clientX - videoContainer.getBoundingClientRect().left,
                    event.clientY - videoContainer.getBoundingClientRect().top);
-  sendLiveClick(frameX, frameY);
+
+  // A FRACTION of the frame, not a pixel of it. cv/pipeline.py's
+  // readRemoteClicks() takes fractions precisely so the sender can scale the
+  // picture to whatever size its panel happens to be; sending pixels meant
+  // every click was clamped to 1.0 and landed in the bottom-right corner.
+  sendLiveClick(localX / dispW, localY / dispH);
 });
 
 async function stopLive() {
@@ -609,33 +622,84 @@ async function stopLive() {
     feedStatus.className = "feed-status error";
   } finally {
     state.live = null;
-    if (state.livePoll) clearTimeout(state.livePoll);
     showFallback();
     liveButton.textContent = "▶ Start live feed";
     liveButton.disabled = false;
+    scheduleLivePoll(0);   // clears the panel back to placeholders
   }
 }
 
-function pollLiveState() {
-  if (!state.live) return;
-  fetch("/api/live/status")
-    .then(r => r.json())
-    .then(payload => {
-      if (!state.live) return;
-      if (!payload.running) {
-        state.live = null;
-        showFallback();
-        feedStatus.textContent = "The live session ended.";
-        feedStatus.className = "feed-status error";
-        liveButton.textContent = "▶ Start live feed";
-        liveButton.disabled = false;
-        return;
-      }
-      state.livePoll = setTimeout(pollLiveState, 1000);
-    })
-    .catch(() => {
-      if (state.live) state.livePoll = setTimeout(pollLiveState, 1500);
-    });
+// ---------------------------------------------------------------------------
+//  The Selected Droplet panel.
+//
+//  Pipeline click -> cv/pipeline.py's `picked` -> cv/api.live_status() ->
+//  /api/live/status -> here. Nothing on this side works anything out: it prints
+//  the numbers the CV API sent and the verdict the server reached from them. A
+//  value the API did not provide is shown as a dash rather than guessed at, and
+//  the physics stays in Python.
+// ---------------------------------------------------------------------------
+const MISSING = "—";
+
+const SUITABILITY = {
+  yes: { text: "Suitable", ring: "suitable" },
+  no: { text: "Not suitable", ring: "unsuitable" },
+  unknown: { text: "Not enough data", ring: "unknown" },
+};
+
+function showMeasurement(element, value, unit, digits) {
+  const missing = value === null || value === undefined || Number.isNaN(Number(value));
+  element.textContent = missing ? MISSING : `${Number(value).toFixed(digits)} ${unit}`;
+}
+
+function renderSelectedDroplet(selected) {
+  const data = selected || {};
+  const verdict = SUITABILITY[data.suitable] || SUITABILITY.unknown;
+
+  dropletLabel.textContent = data.label || MISSING;
+  dropletStatus.textContent = verdict.text;
+  dropletRing.className = `droplet-ring ${verdict.ring}`;
+  dropletRing.title = data.note || verdict.text;
+
+  showMeasurement(dropletVoltage, data.voltageV, "V", 0);
+  showMeasurement(dropletFallTime, data.fallSeconds, "s", 1);
+  showMeasurement(dropletVelocity, data.speedGridPerSec, "grid/s", 2);
+
+  dropletNote.textContent = data.note || "";
+}
+
+// The pipeline rewrites its status about once a second, so polling faster than
+// that only re-reads the same file. When nothing is running there is nothing to
+// keep up with, so ease off rather than stopping: the page then picks up a
+// session started from elsewhere without anyone reloading it.
+const LIVE_POLL_MS = 1000;
+const IDLE_POLL_MS = 5000;
+
+function scheduleLivePoll(delay) {
+  if (state.livePoll) clearTimeout(state.livePoll);
+  state.livePoll = setTimeout(pollLiveState, delay ?? LIVE_POLL_MS);
+}
+
+async function pollLiveState() {
+  let payload;
+  try {
+    const response = await fetch("/api/live/status");
+    payload = await response.json();
+  } catch (_) {
+    scheduleLivePoll(1500);
+    return;
+  }
+
+  if (state.live && !payload.running) {
+    state.live = null;
+    showFallback();
+    feedStatus.textContent = "The live session ended.";
+    feedStatus.className = "feed-status error";
+    liveButton.textContent = "▶ Start live feed";
+    liveButton.disabled = false;
+  }
+
+  renderSelectedDroplet(payload.selected);
+  scheduleLivePoll(payload.running ? LIVE_POLL_MS : IDLE_POLL_MS);
 }
 
 const THEME_KEY = "millikanTheme";
@@ -691,3 +755,5 @@ fallbackVideo.addEventListener("error", () => {
 
 updateInputState();
 showFallback();
+renderSelectedDroplet(null);
+pollLiveState();

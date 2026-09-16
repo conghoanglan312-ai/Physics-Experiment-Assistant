@@ -15,9 +15,10 @@ import threading
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from llm.main import getResponseFromGemini
-from app_js.wrapper import start_live, stop_live, click_live, send_click
+from app_js.wrapper import start_live, stop_live, send_click
 from cv.api import live_status
 
 ROOT = Path(__file__).resolve().parent
@@ -28,17 +29,98 @@ _live_lock = threading.Lock()
 _live_handle = None
 _live_token = None
 
-# Tracks the currently in-flight /api/chat generation per sessionID (the
-# frontend always sends the same fixed sessionID, so back-to-back messages
-# share one Gemini session). Without this, a request that times out on the
-# client leaves its server-side worker thread possibly still blocked inside
-# getResponseFromGemini() for that session; the *next* message's own
-# generation can then get stuck contending for the same session before its
-# own watchdog has a chance to do any real work, making it look like the new
-# response is still governed by the previous timeout instead of starting a
-# fresh, independent one.
+# ---------------------------------------------------------------------------
+#  Chat session accounting.
+#
+#  Two separate things used to be one dict, which is what let a timed-out
+#  request leave the session looking busy:
+#
+#  _chat_active  is the count the server answers "is this session generating?"
+#                with. It is claimed once per request and released in ONE
+#                finally that every exit path runs through -- normal end,
+#                timeout, a client disconnect, a construction failure such as a
+#                missing API key, or any other exception. Zero is represented by
+#                the sessionID being absent, so a session can never be left
+#                holding a stale count.
+#
+#  _chat_workers is bookkeeping for a generation THREAD that outlived its
+#                request. A request that times out releases its slot at once --
+#                that is the required behaviour -- but its worker may still be
+#                blocked inside getResponseFromGemini(). Keeping a handle on it
+#                lets the next request cancel it instead of racing it for the
+#                same underlying Gemini session; the worker drops its own entry
+#                as it unwinds, so a finished thread leaves nothing behind.
+#
+#  The frontend always sends the same fixed sessionID, so back-to-back messages
+#  share one Gemini session and this matters on every message, not just on
+#  concurrent ones.
+# ---------------------------------------------------------------------------
 _chat_lock = threading.Lock()
-_chat_sessions: dict[str, dict] = {}
+_chat_active: dict[str, int] = {}
+_chat_workers: dict[str, dict] = {}
+
+
+def active_generations(session_id: str) -> int:
+    """How many generations the server currently considers in flight for a session.
+
+    0 before a request starts, 1 while one is really running, and 0 again the
+    moment it ends, however it ends.
+    """
+    with _chat_lock:
+        return _chat_active.get(session_id, 0)
+
+
+def begin_generation(session_id: str) -> dict:
+    """Claim the session's active-generation slot. Pair with end_generation()."""
+    with _chat_lock:
+        _chat_active[session_id] = _chat_active.get(session_id, 0) + 1
+    return {"session": session_id, "released": False}
+
+
+def end_generation(slot: dict) -> None:
+    """Release a slot claimed by begin_generation(). Idempotent and never raises."""
+    if not slot:
+        return
+    with _chat_lock:
+        if slot.get("released"):
+            return
+        slot["released"] = True
+        session_id = slot["session"]
+        remaining = _chat_active.get(session_id, 1) - 1
+        if remaining > 0:
+            _chat_active[session_id] = remaining
+        else:
+            _chat_active.pop(session_id, None)   # absent == zero active generations
+
+
+def register_worker(session_id: str, record: dict) -> None:
+    with _chat_lock:
+        _chat_workers[session_id] = record
+
+
+def release_worker(session_id: str, record: dict) -> None:
+    """Called by the worker thread itself as it unwinds."""
+    with _chat_lock:
+        if _chat_workers.get(session_id) is record:
+            del _chat_workers[session_id]
+
+
+def retire_previous_worker(session_id: str, timeout: float = 1.0) -> None:
+    """Cancel any generation thread left over from an earlier request.
+
+    Signal it, give a cooperative worker a brief moment to notice and unwind,
+    then forget it either way. A thread blocked in a library call cannot be
+    killed, and waiting on the same dead worker again on every later request
+    would let one broken request slow every request that follows it.
+    """
+    with _chat_lock:
+        previous = _chat_workers.pop(session_id, None)
+    if previous is None:
+        return
+    previous["cancel"].set()
+    thread = previous.get("thread")
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=timeout)
 
 
 def json_bytes(payload: dict) -> bytes:
@@ -66,6 +148,171 @@ def clear_live():
 
 def process_is_running(handle) -> bool:
     return bool(handle and handle.get("process") is not None and handle["process"].poll() is None)
+
+
+# ---------------------------------------------------------------------------
+#  The selected droplet.
+#
+#  cv/pipeline.py already knows which droplet the operator clicked: it keeps it
+#  as `picked` and republishes it about once a second in the live status file,
+#  and cv/api.live_status() is the door onto that file. So there is no second
+#  selection mechanism here -- this reads the one that already exists and
+#  decides only what a browser panel may say about it right now.
+#
+#  Nothing below measures anything. The numbers are handed over exactly as the
+#  CV API produced them; the only arithmetic is comparing them against the two
+#  bands the lab manual gives for choosing a droplet, which cv/pipeline.py
+#  states as MIN_SPEED/MAX_SPEED and ADVISORY_MIN_V/ADVISORY_MAX_V. Those are
+#  not re-exported through cv/api.py, so they are repeated here as display
+#  thresholds. q, n and e stay behind the seal in cv/api.py and are not
+#  involved. The plate voltage crossing to the app is the exception that file
+#  documents, and it goes no further than this panel -- never into a prompt.
+# ---------------------------------------------------------------------------
+FALL_SPEED_MIN, FALL_SPEED_MAX = 0.2, 0.5        # grid/s, with the field off
+BALANCE_VOLTS_MIN, BALANCE_VOLTS_MAX = 150.0, 250.0
+# How near balance the droplet has to be held before the plate voltage counts as
+# THIS droplet's balance voltage rather than just wherever the knob happens to
+# be -- cv/pipeline.py's own BALANCE_TARGET_PCT.
+BALANCED_WITHIN_PCT = 2.0
+
+_selection_lock = threading.Lock()
+_selection = {
+    "id": None,        # the picked track the panel is currently describing
+    "label": None,     # "Droplet 3": cv/api.py's convention is a label, never an id
+    "picks": 0,        # how many distinct droplets have been picked this session
+    "speed": None,     # the speed last seen while the plates were at 0 V...
+    "speedOk": None,
+    "volts": None,     # ...and the voltage it was last held balanced at
+    "voltsOk": None,
+}
+
+
+def reset_selection():
+    """Forget the current droplet. Called when a session starts or stops."""
+    with _selection_lock:
+        _selection.update(id=None, label=None, picks=0,
+                          speed=None, speedOk=None, volts=None, voltsOk=None)
+
+
+def _number(value):
+    """A float the browser can print, or None. Never a guess."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _blank_selection():
+    return {
+        "picked": False,
+        "label": None,
+        "voltageV": None,
+        "fallSeconds": None,
+        "speedGridPerSec": None,
+        "balancePercent": None,
+        "fieldState": None,
+        "suitable": "unknown",
+        "note": "",
+    }
+
+
+def selection_view(status, running):
+    """What the Selected Droplet panel should show, from the live status file.
+
+    Every field is either a value cv/api.py provided or None -- a missing value
+    stays missing all the way to the browser, which prints a dash for it.
+
+    `suitable` is "yes" / "no" / "unknown". The manual asks two questions about a
+    candidate droplet and they are answered at different moments: Ⅳ.2 times the
+    fall with the field OFF, Ⅳ.3 balances it with the field ON. So each answer is
+    kept for as long as the same droplet stays picked, and the verdict is
+    "unknown" until both have actually been observed. It is never inferred from
+    the one that has.
+    """
+    if not running or not isinstance(status, dict):
+        reset_selection()
+        return _blank_selection()
+
+    voltage = _number(status.get("voltageV"))
+    field = status.get("fieldState")
+    picked = status.get("picked")
+
+    if not isinstance(picked, dict):
+        reset_selection()
+        view = _blank_selection()
+        # The plate voltage is the apparatus's own panel reading, not a property
+        # of any droplet, so it is worth showing even with nothing picked.
+        view["voltageV"] = voltage
+        view["fieldState"] = field
+        view["note"] = "Click a droplet in the feed to select it."
+        return view
+
+    droplet_id = picked.get("id")
+    speed = _number(picked.get("speedGridPerSec"))
+    fall = _number(picked.get("fallSeconds"))
+    balance = _number(picked.get("balancePercent"))
+
+    with _selection_lock:
+        if _selection["id"] != droplet_id:
+            _selection.update(
+                id=droplet_id,
+                picks=_selection["picks"] + 1,
+                speed=None, speedOk=None, volts=None, voltsOk=None,
+            )
+            _selection["label"] = "Droplet %d" % _selection["picks"]
+
+        if field == "off" and speed is not None:
+            # Field off, so this speed IS the free-fall speed Ⅳ.2 judges.
+            _selection["speed"] = speed
+            _selection["speedOk"] = FALL_SPEED_MIN <= speed <= FALL_SPEED_MAX
+        if (field == "work" and voltage is not None and balance is not None
+                and abs(balance) <= BALANCED_WITHIN_PCT):
+            # Held still against a live field: this voltage is its balance voltage.
+            _selection["volts"] = voltage
+            _selection["voltsOk"] = BALANCE_VOLTS_MIN <= voltage <= BALANCE_VOLTS_MAX
+
+        label = _selection["label"]
+        free_fall = _selection["speed"]
+        speed_ok = _selection["speedOk"]
+        balance_volts = _selection["volts"]
+        volts_ok = _selection["voltsOk"]
+
+    if speed_ok is False or volts_ok is False:
+        suitable = "no"
+    elif speed_ok and volts_ok:
+        suitable = "yes"
+    else:
+        suitable = "unknown"
+
+    if speed_ok is False:
+        note = "Falls at %.2f grid/s, outside %g-%g grid/s." % (
+            free_fall, FALL_SPEED_MIN, FALL_SPEED_MAX)
+    elif volts_ok is False:
+        note = "Balances at %d V, outside %g-%g V." % (
+            round(balance_volts), BALANCE_VOLTS_MIN, BALANCE_VOLTS_MAX)
+    elif suitable == "yes":
+        note = "Falls at %.2f grid/s and balances at %d V." % (
+            free_fall, round(balance_volts))
+    elif speed_ok is None and volts_ok is None:
+        note = "Balance it, then cut to 0 V to time its fall."
+    elif speed_ok is None:
+        note = "Balanced at %d V. Cut to 0 V to measure its falling speed." % round(balance_volts)
+    else:
+        note = "Falls at %.2f grid/s. Balance it to read its balance voltage." % free_fall
+
+    return {
+        "picked": True,
+        "label": label,
+        "voltageV": voltage,
+        "fallSeconds": fall,
+        "speedGridPerSec": speed,
+        "balancePercent": balance,
+        "fieldState": field,
+        "suitable": suitable,
+        "note": note,
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -104,22 +351,20 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
 
         if path == "/api/live/status":
-            handle, token = get_live()
-            running = process_is_running(handle)
-            if handle is not None and not running:
-                clear_live()
-            try:
-                status = live_status()
-            except Exception:
-                status = None
-            if status and not running and status.get("phase") != "finished":
-                status["phase"] = "stopped"
-                self._json({
-                    "running": running,
-                    "device": handle.get("device") if running else None,
-                    "source": handle.get("source") if running else None,
-                    "status": status,
-                })
+            self._live_status()
+            return
+
+        if path == "/api/chat/status":
+            # What the server believes about a chat session right now. The browser
+            # does not need it; it makes "a timed-out request leaves 0 active
+            # generations behind" something that can be checked rather than
+            # assumed. See the accounting block at the top of this file.
+            query = parse_qs(urlparse(self.path).query)
+            session_id = (query.get("sessionID") or ["millikan_test_session"])[0]
+            self._json({
+                "sessionID": session_id,
+                "activeGenerations": active_generations(session_id),
+            })
             return
 
         if path == "/health":
@@ -141,14 +386,42 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/live/stop":
             self._stop_live()
             return
-        if path == "/api/live/click":
-            self._click_live()
-            return
         if path == "/api/chat":
             self._chat()
             return
 
         self._json({"error": "Not found"}, status=404)
+
+    def _live_status(self):
+        """Live session state plus the droplet the operator currently has picked.
+
+        Always answers. The earlier version only wrote a response when a stale
+        status file was found for a session that had already stopped, so the
+        browser's poll got an empty reply for every running session and the page
+        could never learn anything about one.
+        """
+        handle, token = get_live()
+        running = process_is_running(handle)
+        if handle is not None and not running:
+            clear_live()
+
+        try:
+            status = live_status()
+        except Exception:
+            status = None
+
+        if status and not running and status.get("phase") != "finished":
+            # The status file outlives the process that wrote it, so a session
+            # that died mid-run would otherwise keep reporting itself as running.
+            status = dict(status, phase="stopped")
+
+        self._json({
+            "running": running,
+            "device": handle.get("device") if running else None,
+            "source": handle.get("source") if running else None,
+            "status": status,
+            "selected": selection_view(status, running),
+        })
 
     def _start_live(self):
         global _live_handle
@@ -167,11 +440,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
         except Exception:
-                payload = {}
+            payload = {}
         source = str(payload.get("source", "")).strip() or None
 
         try:
             handle = start_live(source=source)
+            reset_selection()          # a new session picks its own droplets
             token = secrets.token_urlsafe(24)
             set_live(handle, token)
             self._json({
@@ -187,7 +461,17 @@ class Handler(BaseHTTPRequestHandler):
                            "Could not play %s: %s" % (source, exc)}, status=500)
 
     def _click(self):
-        """{"x": 0.42, "y": 0.63, "token": "..."} -- fractions of the frame."""
+        """{"x": 0.42, "y": 0.63, "token": "..."} -- fractions of the frame.
+
+        Down the pipeline's stdin, via wrapper.send_click(). That is the path
+        cv/pipeline.py documents for exactly this (readRemoteClicks: "the browser
+        app mirrors this window as pixels... picking a droplet is the whole
+        interaction and the click had nowhere to go"), it needs no window to have
+        focus, and it is the same event its own mouse callback produces.
+        wrapper.click_live() posts Win32 messages instead and is left in place for
+        anyone who wants it, but this route is the one the browser uses -- there
+        used to be two routes on this path and the second could never be reached.
+        """
         handle, token = get_live()
         if not process_is_running(handle):
             self._json({"error": "No live session."}, status=409)
@@ -226,45 +510,21 @@ class Handler(BaseHTTPRequestHandler):
             stop_live(handle)
         finally:
             clear_live()
+            reset_selection()
         self._json({"ok": True})
 
-    def _click_live(self):
-        try:
-            body = self._read_json()
-        except Exception:
-            self._json({"error": "Invalid click request."}, status=400)
-            return
-
-        handle, token = get_live()
-        if handle is None or not process_is_running(handle):
-            self._json({"error": "The live feed is not running."}, status=409)
-            return
-        if body.get("token") != token:
-            self._json({"error": "Invalid live-session token."}, status=403)
-            return
-
-        try:
-            x = float(body.get("x"))
-            y = float(body.get("y"))
-        except (TypeError, ValueError):
-            self._json({"error": "x and y must be numbers."}, status=400)
-            return
-
-        try:
-            click_live(handle, x, y)
-            self._json({"ok": True})
-        except Exception:
-            self._json({"error": "Could not forward the click to the pipeline."}, status=500)
-
     def _chat(self):
-        """Stream Gemini output with a 60s first-chunk and 5s inter-chunk timeout."""
-        import queue
-        import time
+        """Claim the session's generation slot, stream the answer, always release.
 
-        FIRST_RESPONSE_TIMEOUT = 60.0
-        BETWEEN_CHUNKS_TIMEOUT = 5.0
-        STREAM_END = object()
-
+        The slot is claimed here and released in the finally below, and the whole
+        of the streaming lives in between. That is the entire fix for the stale
+        session state: there is one place the count goes up, one place it comes
+        back down, and no way to leave by any other door -- a normal finish, a
+        60s or 5s timeout, a Gemini client that could not be constructed because
+        the API key is missing or invalid, a browser that hung up mid-stream, or
+        an exception nobody predicted all land on the same finally. The next
+        request therefore always starts from zero.
+        """
         try:
             payload = self._read_json()
             user_query = str(payload.get("userQuery", ""))
@@ -278,36 +538,49 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "Query must contain between 1 and 2000 characters."}, status=400)
             return
 
-        events: queue.Queue[object] = queue.Queue()
+        # Rejected requests above never started a generation, so they never
+        # claimed a slot: the count stays 0 rather than going 1 and back.
         cancel = threading.Event()
+        slot = begin_generation(session_id)
+        try:
+            self._chat_stream(session_id, user_query, cancel)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass                       # the browser closed the tab; nothing to send
+        except Exception:
+            traceback.print_exc()      # server-side only; never shown to the browser
+        finally:
+            cancel.set()               # stop this request's worker and watchdog
+            end_generation(slot)
+
+    def _chat_stream(self, session_id, user_query, cancel):
+        """Stream Gemini output with a 60s first-chunk and 5s inter-chunk timeout."""
+        import queue
+        import time
+
+        FIRST_RESPONSE_TIMEOUT = 60.0
+        BETWEEN_CHUNKS_TIMEOUT = 5.0
+        STREAM_END = object()
+
+        events: queue.Queue[object] = queue.Queue()
         worker_done = threading.Event()
         first_chunk = threading.Event()
         last_generated = time.monotonic()
         state_lock = threading.Lock()
 
-        # Retire any generation still running for this same session before
-        # starting this one, so this request's watchdog always measures a
-        # clean, independent timeout window rather than one contending with
-        # leftover work from an earlier (possibly already-timed-out) request.
-        with _chat_lock:
-            previous = _chat_sessions.get(session_id)
-            _chat_sessions[session_id] = {"cancel": cancel, "thread": None}
-        if previous is not None:
-            previous["cancel"].set()
-            stale_thread = previous.get("thread")
-            if stale_thread is not None and stale_thread.is_alive():
-                # Best-effort: give a cooperative previous worker a brief
-                # window to notice cancel and unwind before we proceed. We
-                # can't forcibly kill a blocked thread, but this avoids the
-                # common case of two requests racing to use the same
-                # underlying Gemini session at once.
-                stale_thread.join(timeout=1.0)
+        # Cancel a worker left behind by an earlier request for this session, so
+        # this request's watchdog measures a clean, independent timeout window
+        # instead of contending with leftover work for the same Gemini session.
+        # The slot that request held was released when it ended; this is only its
+        # thread, which may still be blocked inside the library.
+        retire_previous_worker(session_id)
+        worker_record = {"cancel": cancel, "thread": None}
 
         def push(payload):
             events.put(payload)
 
         def produce():
             nonlocal last_generated
+            stream = None
             try:
                 stream = getResponseFromGemini(
                     userQuery=user_query,
@@ -337,8 +610,24 @@ class Handler(BaseHTTPRequestHandler):
                         "data": "Unable to reach the AI assistant. It may not be configured correctly (e.g. a missing or invalid API key) -- check the server console for details.",
                     })
             finally:
+                # Give the LLM layer its own chance to unwind before this worker
+                # disappears. Breaking out of a generator only suspends it, so
+                # anything it does in its own finally -- releasing a session,
+                # clearing an "active input" -- would otherwise wait on garbage
+                # collection rather than happening here, on the cancel and
+                # timeout paths where it matters most.
+                if stream is not None:
+                    try:
+                        close = getattr(stream, "close", None)
+                        if callable(close):
+                            close()
+                    except Exception:
+                        pass       # the LLM layer's cleanup is not ours to police
                 worker_done.set()
                 events.put(STREAM_END)
+                # A worker that has finished is not something a later request
+                # needs to wait on, whether or not its request is still here.
+                release_worker(session_id, worker_record)
 
         def watchdog():
             timed_out = False
@@ -376,16 +665,10 @@ class Handler(BaseHTTPRequestHandler):
 
         worker = threading.Thread(target=produce, daemon=True, name="gemini-stream")
         timer = threading.Thread(target=watchdog, daemon=True, name="gemini-timeout-watchdog")
-        with _chat_lock:
-            if _chat_sessions.get(session_id, {}).get("cancel") is cancel:
-                _chat_sessions[session_id]["thread"] = worker
+        worker_record["thread"] = worker
+        register_worker(session_id, worker_record)
         worker.start()
         timer.start()
-
-        def deregister():
-            with _chat_lock:
-                if _chat_sessions.get(session_id, {}).get("cancel") is cancel:
-                    del _chat_sessions[session_id]
 
         # Give an outright, fast failure -- most commonly the Gemini client
         # couldn't even be constructed, e.g. a missing or invalid API key --
@@ -403,8 +686,10 @@ class Handler(BaseHTTPRequestHandler):
             pending_item = None
 
         if isinstance(pending_item, dict) and pending_item.get("type") == "error":
+            # A configuration failure -- a missing or invalid API key is the usual
+            # one. Returning here still runs _chat()'s finally, so the session is
+            # back to zero active generations before the browser sees the 500.
             cancel.set()
-            deregister()
             self._json({
                 "error": pending_item.get("data")
                 or "The AI assistant is not configured. Please check the server's API key configuration.",
@@ -416,7 +701,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.send_header("Pragma", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        # Not keep-alive. The body has no Content-Length and is not chunked, so the
+        # close IS how a reader learns the stream ended -- and BaseHTTPRequestHandler
+        # reads this header back: "keep-alive" left the socket, and the thread
+        # serving it, parked waiting for a request that never came, one per message.
+        self.send_header("Connection", "close")
         self.send_header("X-Accel-Buffering", "no")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
@@ -463,11 +752,10 @@ class Handler(BaseHTTPRequestHandler):
                 if item.get("type") in ("error", "done", "timeout"):
                     break
 
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            cancel.set()
         finally:
+            # Stop the worker and the watchdog as soon as this stream is over.
+            # The slot itself is released by _chat(), which cannot be skipped.
             cancel.set()
-            deregister()
 
     def _serve_static(self, url_path):
         if url_path == "/":

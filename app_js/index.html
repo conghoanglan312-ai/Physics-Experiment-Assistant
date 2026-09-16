@@ -68,17 +68,21 @@
           <div class="droplet-preview-box">
             <div class="droplet-info">
               <div class="droplet-title">SELECTED DROPLET</div>
-              <div class="droplet-id">ID: #12</div>
+              <div class="droplet-id" id="dropletLabel">—</div>
             </div>
             <div class="droplet-indicator">
-              <div class="droplet-ring suitable"></div>
+              <div class="droplet-ring unknown" id="dropletRing"></div>
             </div>
           </div>
 
+          <!-- Every value here comes from cv/api.py through /api/live/status.
+               A field the CV API did not provide stays a dash. -->
           <div class="info-stats">
-            <div class="info-item"><span class="info-label">STATUS</span>: Suitable</div>
-            <div class="info-item"><span class="info-label">FALL TIME</span>: 3 s</div>
-            <div class="info-item"><span class="info-label">VELOCITY</span>: 0.03 grid/s</div>
+            <div class="info-item"><span class="info-label">STATUS</span>: <span id="dropletStatus">—</span></div>
+            <div class="info-item"><span class="info-label">VOLTAGE</span>: <span id="dropletVoltage">—</span></div>
+            <div class="info-item"><span class="info-label">FALL TIME</span>: <span id="dropletFallTime">—</span></div>
+            <div class="info-item"><span class="info-label">VELOCITY</span>: <span id="dropletVelocity">—</span></div>
+            <div class="droplet-note" id="dropletNote"></div>
           </div>
 
           <div class="reference-block">

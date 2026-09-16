@@ -261,8 +261,14 @@ def start_live(source = None, stream_port = None, window_timeout = WINDOW_TIMEOU
     hwnd = _find_window(WINDOW_TITLE, timeout = window_timeout)
     if hwnd is None:
         process.terminate()
+        # command is [python, -m, cv.pipeline, live|play, source] -- only a live
+        # run spends its first ~30s learning the background before the window
+        # appears, so only a live run gets the extra explanation. (This used to
+        # test command[0], which is the interpreter and is never "live", so the
+        # placeholder text on the other branch went out to the operator.)
         learning_note = (
-            " (including the background-learning wait)" if command[0] == "live" else "What is command[0]"
+            " (including the background-learning wait)"
+            if len(command) > 3 and command[3] == "live" else ""
         )
         raise RuntimeError(
             "The pipeline started but its '%s' window never appeared within "

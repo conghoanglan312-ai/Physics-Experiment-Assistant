@@ -39,6 +39,8 @@
 
   --success: #22c55e;
   --success-glow: rgba(34, 197, 94, 0.6);
+  --warning: #f59e0b;
+  --warning-glow: rgba(245, 158, 11, 0.55);
   --danger: #ef4444;
   --danger-bg: rgba(239, 68, 68, 0.14);
   --danger-border: rgba(239, 68, 68, 0.28);
@@ -240,7 +242,7 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 .live-button:disabled { background: var(--disabled-bg); color: var(--disabled-text); cursor: not-allowed; }
 
 .info-panel {
-  height: 500px;
+  min-height: 500px;
   background: var(--panel-bg);
   backdrop-filter: blur(15px);
   -webkit-backdrop-filter: blur(15px);
@@ -264,6 +266,10 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 .droplet-ring { width:55px; height:55px; border-radius:50%; border:7px solid grey; position:relative; }
 .droplet-ring.suitable { border-color:var(--success); box-shadow:0 0 15px var(--success-glow); }
 .droplet-ring.unsuitable { border-color:var(--danger); box-shadow:0 0 15px rgba(239,68,68,.6); }
+/* Suitability has three answers, not two: the third is "not enough data yet",
+   which must not be shown as either a pass or a fail. */
+.droplet-ring.unknown { border-color:var(--warning); box-shadow:0 0 15px var(--warning-glow); }
+.droplet-note { font-size:13px; line-height:1.35; opacity:.7; margin-top:8px; }
 .info-item { font-size:18px; margin:5px 0; }
 .info-label { font-weight:700; display:inline-block; width:90px; }
 .divider { height:1px; background:var(--divider); margin:10px 0; }
