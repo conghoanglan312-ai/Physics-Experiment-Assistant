@@ -217,7 +217,7 @@ Two recordings served as benchmarks:
 | background sampling 1.000 → 1.067 s | 13 → 37 traverses, 0 → 2 legal falls |
 | panel vote gate 0.9 | 15 falls: 14 correct, 1 refused, 0 wrong |
 
-**Droplets measured (cumulative):** 5 by 09-08 → 8 by 09-09 → 11 by 09-10 → 16 by 09-14 → **17** by 09-15 (85 falls).
+**Droplets measured (cumulative):** 5 by 09-08 → 8 by 09-09 → 11 by 09-10 → 16 by 09-14 → 17 by 09-15 → **24** by 09-16 (120 falls).
 
 **What this means**
 
@@ -381,7 +381,7 @@ timestamps, so each is located to ~22 ms — **0.1%** of a 20 s fall.
 | Fall-recovery unit test | geometry of a real lost fall; 4 cases that should be recovered, 4 impostors | all 8 correct | on demand, automatic |
 | Panel reading | 15 falls of the 09-08 session vs the known voltages | 14 correct, 1 refused, 0 wrong | once, automatic |
 | Physics self-check | q/e distance from a whole number | warns above 0.20 | live, every fall |
-| Accepted value | e vs 1.602×10⁻¹⁹ C | −2.97% over 85 falls | per result set, automatic |
+| Accepted value | e vs 1.602×10⁻¹⁹ C | −2.20% over 120 falls | per result set, automatic |
 
 **Per-frame detection accuracy (asked for in chapter 8) — done, results in 8.5**
 
@@ -439,14 +439,21 @@ so there are no rising times. Constants from manual Ⅴ: l = 1.60 mm, d = 5.00 m
 | 15 | 192 | 26.56 | 0.322 | 2 | 1.6585 | 3.15e-21 | 6.1e-22 | 3.21e-21 | 1.9% | +3.53% |
 | 16 | 248 | 37.96 | 0.445 | 1 | 1.4593 | 2.70e-21 | 4.0e-22 | 2.73e-21 | 1.9% | −8.90% |
 | 17 | 163 | 17.08 | 0.094 | 5 | 1.5601 | 1.34e-21 | 7.5e-22 | 1.54e-21 | 1.0% | −2.61% |
+| 18 | 171 | 28.83 | 0.313 | 2 | 1.6356 | 2.84e-21 | 6.4e-22 | 2.91e-21 | 1.8% | +2.09% |
+| 19 | 140 | 20.99 | 0.150 | 4 | 1.6450 | 1.88e-21 | 8.1e-22 | 2.05e-21 | 1.2% | +2.68% |
+| 20 | 195 | 27.20 | 0.184 | 2 | 1.5712 | 1.66e-21 | 5.6e-22 | 1.76e-21 | 1.1% | −1.92% |
+| 21 | 250 | 22.69 | 0.227 | 2 | 1.6312 | 2.61e-21 | 5.5e-22 | 2.67e-21 | 1.6% | +1.82% |
+| 22 | 265 | 22.11 | 0.125 | 2 | 1.6021 | 1.43e-21 | 5.3e-22 | 1.52e-21 | 0.9% | +0.00% |
+| 23 | 228 | 24.42 | 0.201 | 2 | 1.5931 | 2.05e-21 | 5.4e-22 | 2.12e-21 | 1.3% | −0.56% |
+| 24 | 141 | 22.18 | 0.094 | 4 | 1.4900 | 1.95e-21 | 7.2e-22 | 2.08e-21 | 1.4% | −6.80% |
 
-**All 85 falls:** e = 1.5544×10⁻¹⁹ C, sd 8.9×10⁻²¹ C, u_A(mean) 1.0×10⁻²¹ C,
-**error −2.97%**. Electron counts observed: **1, 2, 3, 4, 5**. Per-fall radius, q, n, e_i:
+**All 120 falls:** e = 1.5667×10⁻¹⁹ C, sd 8.4×10⁻²¹ C, u_A(mean) 0.8×10⁻²¹ C,
+**error −2.20%**. Electron counts observed: **1, 2, 3, 4, 5**. Per-fall radius, q, n, e_i:
 `charges_all.csv`.
 
 Notes:
 - Within a droplet, falls scatter 1.2–5.1% and u_c is 0.6–2.3%. Between droplets the
-  error spreads with sd 5.1 percentage points. So most of the error is fixed per droplet, not timing or
+  error spreads with sd 4.7 percentage points. So most of the error is fixed per droplet, not timing or
   voltage resolution. Balance voltage, fall time and n do not predict it (|r| ≤ 0.36,
   `BENCHMARK.md`). For scale: a droplet still drifting 0.02 div/s when judged balanced
   shifts q by 0.02/v_free = 4–10%, the size of the spread. Drift at balance was not
@@ -457,11 +464,17 @@ Notes:
   pipeline itself at the end of each run rather than by a separate tool. Droplet 17 is
   the first five-electron droplet; droplet 16, at one electron and 38 s falls, sits one
   second inside the 40 s legality limit.
+- Droplets 18–24 were measured on 09-16 across two operators and four sessions.
+  Droplets 20 and 21 were recorded with six falls each because the progress banner was
+  not working that evening; the first five as recorded were kept, which is a rule fixed
+  before the numbers were looked at and which moved the overall mean the wrong way.
+  Droplet 23's falls were split in two by a binding fault and rejoined by hand once the
+  fault was found; the five falls are as measured.
 
 **What this means**
 
-- Measured e = 1.554×10⁻¹⁹ C, 3.0% below the accepted value, from 17 droplets carrying 1 to 5 electrons: charge came in whole-number steps, which is what the experiment sets out to show.
-- Each droplet is measured precisely (about 1% uncertainty), but droplets disagree with each other by about 5%. The error is something fixed per droplet, not timing; a small leftover drift when a droplet was judged balanced is enough to explain it.
+- Measured e = 1.567×10⁻¹⁹ C, 2.2% below the accepted value, from 24 droplets carrying 1 to 5 electrons: charge came in whole-number steps, which is what the experiment sets out to show.
+- Each droplet is measured precisely (about 1% uncertainty), but droplets disagree with each other by about 4.7%. The error is something fixed per droplet, not timing; a small leftover drift when a droplet was judged balanced is enough to explain it.
 - More droplets would shrink the overall error. Timing precision is not the limit.
 
 ### 8.2 Machine vs manual
@@ -558,7 +571,7 @@ apparatus and operator.
 | Legal falls lost to tracking breaks | 6, across 6 sessions | completed falls the pipeline never recorded because the droplet's track broke mid-fall; recovery added 09-10, corrected 09-11. The two on 09-14 were diagnosed from the annotated video: one droplet was parked on a grid line, where nothing is detected, and one track broke with only 20% of the fall left, below the 35% the recovery requires |
 | Voltage read per legal fall | 23 / 35 (66%); every droplet still got its voltage from its other falls | legal falls with a panel reading in the pipeline output, all 09-10 lab sessions; fallback to the live `V:` line added 09-11, not yet tested live |
 | Panel reading | 14 correct, 1 refused, 0 wrong | the 15 falls of the 09-08 session against the known 151 / 176 / 200 V; the refused one is D3 f3 (8.2) |
-| q/e distance from a whole number | 0.01–0.17 for 16 of 17 droplets; 0.29 for droplet 10 (−9.7%), which the live warning flags | each droplet's q divided by e = 1.602×10⁻¹⁹ C, distance to the nearest whole number |
+| q/e distance from a whole number | 0.00–0.20 for 22 of 24 droplets; 0.29 for droplet 10 (−9.7%), which the live warning flags | each droplet's q divided by e = 1.602×10⁻¹⁹ C, distance to the nearest whole number |
 | Limit of that check | droplet 11 (n = 1, −10.5%) sits only 0.11 from 1 | a 10% error moves q/e by 0.1 when n = 1, but by 0.3 when n = 3 |
 | Per-frame detection, tracked droplets | precision 95.8%, recall 85.4%, F1 90.3% | 150 hand-labelled frames, blind, after a blind second look (8.5) |
 
