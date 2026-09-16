@@ -21,8 +21,8 @@ has a plain-language "What this means" under each table of numbers.
 
 ## The result in one paragraph
 
-11 droplets and 55 falls, carrying n = 1, 2 and 3 electrons. Mean e = 1.5518×10⁻¹⁹ C,
-−3.13% against the accepted 1.602×10⁻¹⁹ C. Pipeline timing agrees with a stopwatch to
+24 droplets and 120 falls, carrying n = 1 to 5 electrons. Mean e = 1.5667×10⁻¹⁹ C,
+−2.20% against the accepted 1.602×10⁻¹⁹ C. Pipeline timing agrees with a stopwatch to
 −0.11 ± 0.23 s over 15 falls. Tracked droplets are detected with 95.8% precision and 85.4%
 recall. With the hunt aid, the median time to find a usable droplet fell from 463 s to
 219 s.
