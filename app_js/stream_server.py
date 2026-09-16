@@ -99,6 +99,20 @@ class FrameStreamer:
             self._seq += 1
             self._cond.notify_all()
 
+    def push_jpeg(self, jpeg_bytes):
+        """Already encoded, straight from the pipeline -- no decode, no re-encode.
+
+        The pipeline draws the frame, so it can encode it for the 4 ms an encode
+        costs.  Capturing its window instead cost 59 ms, nearly all of it Windows
+        re-rendering a picture that already existed.
+        """
+        if not jpeg_bytes:
+            return
+        with self._cond:
+            self._jpeg = jpeg_bytes
+            self._seq += 1
+            self._cond.notify_all()
+
     def latest_jpeg(self):
         with self._cond:
             return self._jpeg

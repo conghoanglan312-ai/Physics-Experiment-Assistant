@@ -372,8 +372,74 @@ def artefact(outDir, path, name):
     return os.path.join(outDir, name)
 
 
+# Publishing frames to whoever launched us, instead of being screen-captured.
+#
+# The app used to mirror this window with PrintWindow, which costs about 55 ms a frame
+# against the 4.3 ms it costs to JPEG-encode the same picture -- so the browser was
+# capped near 17 fps while the window ran at 23, and the difference was pure Windows
+# re-rendering a window we had already drawn.
+#
+# The socket is OUTBOUND: the app listens, we connect.  A measurement process should
+# not be binding ports, waiting on firewall prompts or handling a port conflict
+# mid-session.  One slot, newest wins: if the consumer is slow the browser loses a
+# frame, which costs nothing, rather than the tracker being held up, which costs a
+# measurement.
+PUBLISH_QUALITY = 80
+_publishSlot = [None]
+_publishWake = threading.Event()
+
 LIVE_STATUS_S = 1.0             # how often the live status file is rewritten
 _liveStatusAt = [0.0]
+
+
+def publishFrame(display):
+    """Hand the drawn frame to the publisher thread, if one is running."""
+    if _publishPort[0] is None:
+        return
+    _publishSlot[0] = display            # newest wins; a dropped frame is not a fault
+    _publishWake.set()
+
+
+_publishPort = [None]
+
+
+def startPublisher(port):
+    """Connect back to the launcher and stream JPEG frames, length-prefixed."""
+    import socket as _socket
+    _publishPort[0] = int(port)
+
+    def run():
+        try:
+            sock = _socket.create_connection(("127.0.0.1", int(port)), timeout = 5.0)
+        except OSError as exc:
+            print("  frame publishing off: %s" % exc, flush = True)
+            _publishPort[0] = None
+            return
+        print("  publishing frames to 127.0.0.1:%s" % port, flush = True)
+        try:
+            while True:
+                _publishWake.wait(1.0)
+                _publishWake.clear()
+                frame = _publishSlot[0]
+                _publishSlot[0] = None
+                if frame is None:
+                    continue
+                ok, buf = cv2.imencode(".jpg", frame,
+                                       [int(cv2.IMWRITE_JPEG_QUALITY), PUBLISH_QUALITY])
+                if not ok:
+                    continue
+                payload = buf.tobytes()
+                sock.sendall(len(payload).to_bytes(4, "big") + payload)
+        except Exception:
+            pass                          # the viewer went away; the session has not
+        finally:
+            _publishPort[0] = None
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    threading.Thread(target = run, daemon = True).start()
 
 
 def liveStatusPath():
@@ -866,6 +932,14 @@ SECOND_CHANCE_GROW = 12.0     # px of radius per second a track has been missing
 SECOND_CHANCE_MAX_PX = 30.0
 SECOND_CHANCE_AREA_FRAC = 0.6
 RECOVERED = [0]
+# Where this frame's rejected contours were, and why they were rejected.  Cleared every
+# frame, so it costs one list per frame and answers the only question that matters when
+# a track dies mid-fall: was the droplet INVISIBLE, or was it seen and gated out?  The
+# area floor is 5.8 px at the bench magnification and the tracks that die were carrying
+# 4 to 16 px, so the area gate cannot be the whole story -- but "nothing was detected
+# nearby" and "a contour was there and circularity refused it" need opposite fixes, and
+# until now the log could not tell them apart.
+REJECT_POINTS = []
 
 NEAR_MISSES = []            # (area, circularity) of contours that failed ONLY the
                             # shape test, which is where a flickering droplet lives
@@ -904,6 +978,18 @@ def rejectCensus():
     return "\n".join(out)
 
 
+def nearestRejected(x, y):
+    """(distance, reason, area, circularity) for the rejected contour nearest here."""
+    if not REJECT_POINTS:
+        return None
+    best, bestD = None, None
+    for cx, cy, why, area, circ in REJECT_POINTS:
+        d = (cx - x) ** 2 + (cy - y) ** 2
+        if bestD is None or d < bestD:
+            best, bestD = (d ** 0.5, why, area, circ), d
+    return best
+
+
 def _nearTrack(cx, cy, keepNear):
     """Is this contour where a confirmed track is already pointing?"""
     for x, y, r in keepNear:
@@ -927,6 +1013,7 @@ def detectDroplets(gray, background, s, allAreas = None, keepNear = None):
     opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, s["kernel"])
     cleaned = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, s["kernel"])
     contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    del REJECT_POINTS[:]
     centres = []
     for cnt in contours:
         cArea = cv2.contourArea(cnt)
@@ -943,15 +1030,18 @@ def detectDroplets(gray, background, s, allAreas = None, keepNear = None):
         near = bool(keepNear) and _nearTrack(cx, cy, keepNear)
         areaFloor = (s["areaMin"] * SECOND_CHANCE_AREA_FRAC if near
                      else s["areaMin"])
+        circularity = 4 * np.pi * cArea / (perimeter ** 2)
         if cArea < areaFloor:
             _reject("area<min")
+            REJECT_POINTS.append((cx, cy, "area<min", cArea, circularity))
             continue
         if cArea > s["areaMax"]:
             _reject("area>max")
+            REJECT_POINTS.append((cx, cy, "area>max", cArea, circularity))
             continue
-        circularity = 4 * np.pi * cArea / (perimeter ** 2)
         if circularity < CIRCULARITY_MIN:
             _reject("circularity", cArea, circularity)
+            REJECT_POINTS.append((cx, cy, "circularity", cArea, circularity))
             continue
         if near and cArea < s["areaMin"]:
             RECOVERED[0] += 1
@@ -960,6 +1050,7 @@ def detectDroplets(gray, background, s, allAreas = None, keepNear = None):
             iy, ix = int(round(cy)), int(round(cx))
             if 0 <= iy < mask.shape[0] and 0 <= ix < mask.shape[1] and mask[iy, ix]:
                 _reject("static mark")
+                REJECT_POINTS.append((cx, cy, "static mark", cArea, circularity))
                 continue                # sitting on something the apparatus drew
         onGrid = (min(abs(cy - r) for r in s["gridRows"]) <= s["gridClear"]
                   or (s["gridCols"]
@@ -970,13 +1061,15 @@ def detectDroplets(gray, background, s, allAreas = None, keepNear = None):
             centres.append((cx, cy, cArea))
         else:
             if onGrid and min(abs(cy - r) for r in s["gridRows"]) <= s["gridClear"]:
-                _reject("grid row")
+                why = "grid row"
             elif s["gridCols"] and min(abs(cx - c) for c in s["gridCols"]) <= s["gridClear"]:
-                _reject("grid col")
+                why = "grid col"
             elif cx >= s["roiW"] - s["panelClear"]:
-                _reject("panel margin")
+                why = "panel margin"
             else:
-                _reject("frame edge")
+                why = "frame edge"
+            _reject(why)
+            REJECT_POINTS.append((cx, cy, why, cArea, circularity))
     return centres, levelOtsu, len(contours)
 
 
@@ -3999,12 +4092,19 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # 2026-09-14, so the live run is asked instead.
                         near = min((float(np.hypot(c[0] - t.pos[0], c[1] - t.pos[1])),
                                     float(c[2])) for c in centres) if centres else None
+                        # ROI coordinates: REJECT_POINTS is recorded in the same frame
+                        # of reference the tracks live in.
+                        gated = nearestRejected(t.pos[0], t.pos[1])
                         print("  mid-fall track %d died at x=%.0f y=%.0f after %.1f s "
-                              "dark (limit %.1f); nearest blob %s"
-                              % (t.id, t.pos[0], t.pos[1], waited, allowed,
-                                 "none" if near is None else
-                                 "%.0f px, area %.0f vs its own %.0f"
-                                 % (near[0], near[1], t.area)), flush = True)
+                              "dark (limit %.1f); own area %.0f; nearest ACCEPTED %s; "
+                              "nearest REJECTED %s"
+                              % (t.id, t.pos[0], t.pos[1], waited, allowed, t.area,
+                                 "none" if near is None else "%.0f px (area %.0f)"
+                                 % (near[0], near[1]),
+                                 "none" if gated is None else
+                                 "%.0f px (%s, area %.0f, circ %.2f)"
+                                 % (gated[0], gated[1], gated[2], gated[3])),
+                              flush = True)
                     buried.append(t)                 # only confirmed tracks are worth keeping
             live = keep
             morgue.extend(buried)
@@ -5026,6 +5126,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         display[Y:Y + H, X:X + W] = plain
                         cv2.rectangle(display, (X, Y), (X + W, Y + H), (0, 160, 0), 1)
                         drawHud(display)
+                    publishFrame(display.copy())
                     cv2.imshow("Droplets", display)
                     if src.isLive:
                         delay = 1           # a camera sets its own pace; never wait on it
@@ -5490,6 +5591,17 @@ def analyze(videoPath = VIDEO, binding = None, voltages = None,
             "droplets": droplets}
 
 
+def publishTo(argv):
+    """--publish PORT: stream frames back to the launcher instead of being captured."""
+    for i, a in enumerate(argv):
+        if a == "--publish" and i + 1 < len(argv):
+            startPublisher(argv[i + 1])
+            return
+        if a.startswith("--publish="):
+            startPublisher(a.split("=", 1)[1])
+            return
+
+
 def main(argv):
     if len(argv) > 1 and argv[1] == "live":
         # --blind shows the raw frame and nothing else: no reticle lines, no track
@@ -5502,6 +5614,7 @@ def main(argv):
         # the dongle, so the lab monitor is dark and this window is the operator's only
         # picture.  Blind means unannotated, not absent.
         blind = "--blind" in argv[1:]
+        publishTo(argv)
         rest = [a for a in argv[2:] if not a.startswith("-")]
         spec = "cam:" + (rest[0] if rest else "0")
         outDir = outDirFor(spec)
@@ -5520,7 +5633,8 @@ def main(argv):
         # stream, chat, start/stop -- can be exercised with no apparatus and no
         # dongle, which is the difference between testing it in a lab slot and
         # testing it at a desk.
-        path = argv[2] if len(argv) > 2 else VIDEO
+        publishTo(argv)
+        path = next((a for a in argv[2:] if not a.startswith("-")), VIDEO)
         outDir = outDirFor(path)
         print("Playback -> %s" % outDir)
         print("Stop with q in the window, or Ctrl+C")

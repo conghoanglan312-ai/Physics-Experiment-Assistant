@@ -55,6 +55,7 @@ WINDOW_TITLE = "Droplets"
 # (see pipeline.py's own docstring/comments) -- give it real room, or a slow
 # machine looks like a launch failure when it's just still warming up.
 WINDOW_TIMEOUT_S = 45.0
+PUBLISH_WAIT_S = 20.0       # how long to wait for the pipeline's outbound connection
 
 _COMMAND_RE = re.compile(r"^python -m cv\.pipeline live (\d+)\s*$")
 
@@ -188,6 +189,47 @@ def _capture_window(hwnd):
 MIRROR_FPS = 15.0
 
 
+def _serve_published_frames(listener, streamer, stop_event):
+    """Accept the pipeline's outbound connection and forward its frames.
+
+    Length-prefixed JPEGs, newest served to every reader.  The pipeline connects to
+    us rather than listening itself, so the process that must not fall over
+    mid-measurement never binds a port.
+    """
+    try:
+        listener.settimeout(PUBLISH_WAIT_S)
+        conn, _ = listener.accept()
+    except OSError:
+        return False
+    conn.settimeout(5.0)
+    try:
+        while not stop_event.is_set():
+            head = b""
+            while len(head) < 4:
+                chunk = conn.recv(4 - len(head))
+                if not chunk:
+                    return True
+                head += chunk
+            size = int.from_bytes(head, "big")
+            if size <= 0 or size > 32 * 1024 * 1024:
+                return True                     # framing lost; give up cleanly
+            payload = b""
+            while len(payload) < size:
+                chunk = conn.recv(size - len(payload))
+                if not chunk:
+                    return True
+                payload += chunk
+            streamer.push_jpeg(payload)
+    except OSError:
+        pass
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+    return True
+
+
 def _mirror_window(hwnd, streamer, stop_event, fps = MIRROR_FPS):
     period = 1.0 / fps
     while not stop_event.is_set():
@@ -223,6 +265,15 @@ def start_live(stream_port = None, window_timeout = WINDOW_TIMEOUT_S, source = N
     else:
         device = str(source).strip()
         command = [sys.executable, "-m", "cv.pipeline", "play", device]
+
+    # Ask the pipeline to send us its frames directly.  We listen, it connects: no
+    # port bound by the measurement process.  If it never connects -- an older
+    # pipeline, a firewall -- we fall back to capturing its window.
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    command += ["--publish", str(listener.getsockname()[1])]
     port = stream_port or _find_free_port()
     print("Command:", " ".join(command))
     # stdin stays open for the life of the session: the browser's clicks go down it,
@@ -258,9 +309,16 @@ def start_live(stream_port = None, window_timeout = WINDOW_TIMEOUT_S, source = N
 
     streamer = FrameStreamer(port).start()
     stop_event = threading.Event()
-    mirror_thread = threading.Thread(
-        target = _mirror_window, args = (hwnd, streamer, stop_event), daemon = True
-    )
+
+    def feed():
+        # Published frames cost the pipeline 4 ms each; capturing its window costs
+        # 59 ms and caps the browser near 17 fps.  Prefer the cheap one, keep the
+        # other as the fallback it now is.
+        if not _serve_published_frames(listener, streamer, stop_event):
+            print("Pipeline did not publish frames; mirroring its window instead.")
+            _mirror_window(hwnd, streamer, stop_event)
+
+    mirror_thread = threading.Thread(target = feed, daemon = True)
     mirror_thread.start()
 
     return {
