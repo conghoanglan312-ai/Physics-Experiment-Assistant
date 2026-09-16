@@ -372,8 +372,74 @@ def artefact(outDir, path, name):
     return os.path.join(outDir, name)
 
 
+# Publishing frames to whoever launched us, instead of being screen-captured.
+#
+# The app used to mirror this window with PrintWindow, which costs about 55 ms a frame
+# against the 4.3 ms it costs to JPEG-encode the same picture -- so the browser was
+# capped near 17 fps while the window ran at 23, and the difference was pure Windows
+# re-rendering a window we had already drawn.
+#
+# The socket is OUTBOUND: the app listens, we connect.  A measurement process should
+# not be binding ports, waiting on firewall prompts or handling a port conflict
+# mid-session.  One slot, newest wins: if the consumer is slow the browser loses a
+# frame, which costs nothing, rather than the tracker being held up, which costs a
+# measurement.
+PUBLISH_QUALITY = 80
+_publishSlot = [None]
+_publishWake = threading.Event()
+
 LIVE_STATUS_S = 1.0             # how often the live status file is rewritten
 _liveStatusAt = [0.0]
+
+
+def publishFrame(display):
+    """Hand the drawn frame to the publisher thread, if one is running."""
+    if _publishPort[0] is None:
+        return
+    _publishSlot[0] = display            # newest wins; a dropped frame is not a fault
+    _publishWake.set()
+
+
+_publishPort = [None]
+
+
+def startPublisher(port):
+    """Connect back to the launcher and stream JPEG frames, length-prefixed."""
+    import socket as _socket
+    _publishPort[0] = int(port)
+
+    def run():
+        try:
+            sock = _socket.create_connection(("127.0.0.1", int(port)), timeout = 5.0)
+        except OSError as exc:
+            print("  frame publishing off: %s" % exc, flush = True)
+            _publishPort[0] = None
+            return
+        print("  publishing frames to 127.0.0.1:%s" % port, flush = True)
+        try:
+            while True:
+                _publishWake.wait(1.0)
+                _publishWake.clear()
+                frame = _publishSlot[0]
+                _publishSlot[0] = None
+                if frame is None:
+                    continue
+                ok, buf = cv2.imencode(".jpg", frame,
+                                       [int(cv2.IMWRITE_JPEG_QUALITY), PUBLISH_QUALITY])
+                if not ok:
+                    continue
+                payload = buf.tobytes()
+                sock.sendall(len(payload).to_bytes(4, "big") + payload)
+        except Exception:
+            pass                          # the viewer went away; the session has not
+        finally:
+            _publishPort[0] = None
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    threading.Thread(target = run, daemon = True).start()
 
 
 def liveStatusPath():
@@ -865,7 +931,34 @@ SECOND_CHANCE_PX = 14.0
 SECOND_CHANCE_GROW = 12.0     # px of radius per second a track has been missing
 SECOND_CHANCE_MAX_PX = 30.0
 SECOND_CHANCE_AREA_FRAC = 0.6
+# A track whose CLOCK IS RUNNING carries a measurement nothing else can reproduce, and
+# it knows where its droplet is to within a few pixels.  Inside that radius the gates
+# are answering a question that has already been answered, so for that track only they
+# relax further: the area floor drops again, and the grid mask does not apply -- the
+# `16` line IS a grid row, so the one moment a fall must be seen is a moment the mask
+# blinds us.  Circularity still applies: a smear that is not round is not the droplet.
+#
+# Gated one relaxation at a time on one_droplet_slow, for a mid-fall track within
+# 15 px:
+#
+#   area floor x0.35   keeps all 5 reference falls, 50 traverses vs 46   -> shipped
+#   grid mask off      LOSES 33.44 s, 53 traverses                       -> rejected
+#   both               LOSES 33.44 s                                     -> rejected
+#
+# So the area floor relaxes and the grid mask does not -- not for any track, by any
+# rule tried, however narrow.  A droplet parked on a line stays invisible, and that
+# stays an operator rule: park just above `0`, not on it.
+MEASURE_RESCUE_PX = 15.0
+MEASURE_RESCUE_AREA_FRAC = 0.35
 RECOVERED = [0]
+# Where this frame's rejected contours were, and why they were rejected.  Cleared every
+# frame, so it costs one list per frame and answers the only question that matters when
+# a track dies mid-fall: was the droplet INVISIBLE, or was it seen and gated out?  The
+# area floor is 5.8 px at the bench magnification and the tracks that die were carrying
+# 4 to 16 px, so the area gate cannot be the whole story -- but "nothing was detected
+# nearby" and "a contour was there and circularity refused it" need opposite fixes, and
+# until now the log could not tell them apart.
+REJECT_POINTS = []
 
 NEAR_MISSES = []            # (area, circularity) of contours that failed ONLY the
                             # shape test, which is where a flickering droplet lives
@@ -904,6 +997,18 @@ def rejectCensus():
     return "\n".join(out)
 
 
+def nearestRejected(x, y):
+    """(distance, reason, area, circularity) for the rejected contour nearest here."""
+    if not REJECT_POINTS:
+        return None
+    best, bestD = None, None
+    for cx, cy, why, area, circ in REJECT_POINTS:
+        d = (cx - x) ** 2 + (cy - y) ** 2
+        if bestD is None or d < bestD:
+            best, bestD = (d ** 0.5, why, area, circ), d
+    return best
+
+
 def _nearTrack(cx, cy, keepNear):
     """Is this contour where a confirmed track is already pointing?"""
     for x, y, r in keepNear:
@@ -912,7 +1017,8 @@ def _nearTrack(cx, cy, keepNear):
     return False
 
 
-def detectDroplets(gray, background, s, allAreas = None, keepNear = None):
+def detectDroplets(gray, background, s, allAreas = None, keepNear = None,
+                   measuring = None):
     diff = cv2.absdiff(gray, background)
     blurred = cv2.GaussianBlur(diff, (5, 5), sigmaX = 0)
     levelOtsu, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
@@ -927,6 +1033,7 @@ def detectDroplets(gray, background, s, allAreas = None, keepNear = None):
     opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, s["kernel"])
     cleaned = cv2.morphologyEx(opened, cv2.MORPH_CLOSE, s["kernel"])
     contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    del REJECT_POINTS[:]
     centres = []
     for cnt in contours:
         cArea = cv2.contourArea(cnt)
@@ -941,17 +1048,24 @@ def detectDroplets(gray, background, s, allAreas = None, keepNear = None):
         # depends on whether a track is already pointing here.
         cx, cy = M["m10"] / M["m00"], M["m01"] / M["m00"]
         near = bool(keepNear) and _nearTrack(cx, cy, keepNear)
-        areaFloor = (s["areaMin"] * SECOND_CHANCE_AREA_FRAC if near
-                     else s["areaMin"])
+        timing = bool(measuring) and _nearTrack(cx, cy, measuring)
+        areaFloor = s["areaMin"]
+        if timing:
+            areaFloor *= MEASURE_RESCUE_AREA_FRAC
+        elif near:
+            areaFloor *= SECOND_CHANCE_AREA_FRAC
+        circularity = 4 * np.pi * cArea / (perimeter ** 2)
         if cArea < areaFloor:
             _reject("area<min")
+            REJECT_POINTS.append((cx, cy, "area<min", cArea, circularity))
             continue
         if cArea > s["areaMax"]:
             _reject("area>max")
+            REJECT_POINTS.append((cx, cy, "area>max", cArea, circularity))
             continue
-        circularity = 4 * np.pi * cArea / (perimeter ** 2)
         if circularity < CIRCULARITY_MIN:
             _reject("circularity", cArea, circularity)
+            REJECT_POINTS.append((cx, cy, "circularity", cArea, circularity))
             continue
         if near and cArea < s["areaMin"]:
             RECOVERED[0] += 1
@@ -960,6 +1074,7 @@ def detectDroplets(gray, background, s, allAreas = None, keepNear = None):
             iy, ix = int(round(cy)), int(round(cx))
             if 0 <= iy < mask.shape[0] and 0 <= ix < mask.shape[1] and mask[iy, ix]:
                 _reject("static mark")
+                REJECT_POINTS.append((cx, cy, "static mark", cArea, circularity))
                 continue                # sitting on something the apparatus drew
         onGrid = (min(abs(cy - r) for r in s["gridRows"]) <= s["gridClear"]
                   or (s["gridCols"]
@@ -967,16 +1082,20 @@ def detectDroplets(gray, background, s, allAreas = None, keepNear = None):
         inPicture = (cx < s["roiW"] - s["panelClear"]
                      and min(cx, cy, s["roiW"] - cx, s["roiH"] - cy) > s["edgeClear"])
         if inPicture and not onGrid:
+            if timing and cArea < s["areaMin"]:
+                RECOVERED[0] += 1
             centres.append((cx, cy, cArea))
         else:
             if onGrid and min(abs(cy - r) for r in s["gridRows"]) <= s["gridClear"]:
-                _reject("grid row")
+                why = "grid row"
             elif s["gridCols"] and min(abs(cx - c) for c in s["gridCols"]) <= s["gridClear"]:
-                _reject("grid col")
+                why = "grid col"
             elif cx >= s["roiW"] - s["panelClear"]:
-                _reject("panel margin")
+                why = "panel margin"
             else:
-                _reject("frame edge")
+                why = "frame edge"
+            _reject(why)
+            REJECT_POINTS.append((cx, cy, why, cArea, circularity))
     return centres, levelOtsu, len(contours)
 
 
@@ -1853,6 +1972,13 @@ BALANCE_ADVICE_MAX_PCT = 40.0
 # A Brownian floor larger than this is not a floor, it is a window too short to fit:
 # the aid called 28.8% "as good as it gets" because a 2 s window makes the floor huge.
 BALANCE_FLOOR_MAX_PCT = 4.0
+# How far out a droplet already called balanced must drift before it is called off
+# balance again, as a multiple of the target.
+BALANCE_HYSTERESIS = 1.8
+# ...and how much settled hold the Brownian-limit claim needs.  Over a 9 s window the
+# floor lands near its cap, so "that is the Brownian limit, tuning cannot do better"
+# was said about a droplet sitting 4.8% out.  Over 20 s the floor is a real floor.
+FLOOR_CLAIM_MIN_S = 20.0
 # 提升 sits far above the balance band, so a reading up here is a lift whatever the
 # latch thinks.  Balance means nothing while the operator is carrying the droplet up.
 LIFT_VOLTS = 300.0
@@ -2842,7 +2968,7 @@ def steadyDrift(t, now, drift, sinceChange = None):
     return float(np.median([d for _ts, d in hist]))
 
 
-def balanceError(t, spacing, now, volts, vFree, seconds):
+def balanceError(t, spacing, now, volts, vFree, seconds, sinceChange = None):
     """What the residual drift at this voltage will cost the charge, in percent.
 
     Returns (percent, drift grid/s, implied balance voltage, assumed) or None while
@@ -2860,6 +2986,16 @@ def balanceError(t, spacing, now, volts, vFree, seconds):
     # the one available while the operator is still turning the knob, which is exactly
     # when they need to be told which way.  Marked `coarse` so the text can say `~`.
     windows = ([seconds] if seconds >= BALANCE_MIN_FIT_S else []) + [BALANCE_MIN_FIT_S, 5.0]
+    # ...but never across a voltage change.  The fit runs over the track's own points,
+    # and those points remember the field that was applied when they were recorded: for
+    # up to 45 s after a toggle the window mixed two states.  That is how a droplet
+    # balancing at 171 V was reported "barely held, 67% of free fall", and why the
+    # percentage swung 27% -> 3% -> 18% inside seven seconds.  Below FIT_MIN_S of
+    # settled field there is nothing honest to say, so say nothing.
+    if sinceChange is not None:
+        windows = [w for w in windows if w <= float(sinceChange)]
+        if not windows:
+            return None
     fit, used = None, None
     for w in windows:
         fit = t.windowFit(spacing, now, w)
@@ -2919,7 +3055,7 @@ def updateHold(t, yTop, spacing, now, volts = None, columns = None,
             and float(now) - getattr(t, "lastBalanceCheck", 0.0) >= BALANCE_CHECK_S):
         t.lastBalanceCheck = float(now)
         got = balanceError(t, spacing, now, volts, freeFallSpeed(columns, t.pos[0]),
-                           window)
+                           window, sinceChange)
         if got is not None:
             pct, drift, impliedV, _assumed, coarse = got
             # A droplet nowhere near balance has no balance quality to record: the
@@ -3024,7 +3160,7 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
     steady = held is not None and float(now) - held >= SETTLED_S
     quality = balanceError(t, spacing, now, volts, vFree,
                            min(BALANCE_FIT_S, float(now) - held)
-                           if held is not None else 0.0)
+                           if held is not None else 0.0, sinceChange)
     if quality is None:
         return "picked id %d -- watching it" % t.id, (0, 220, 255), None
     pct, drift, ub, assumed, coarse = quality
@@ -3036,11 +3172,19 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
     window = min(BALANCE_FIT_S, float(now) - held) if held is not None else 0.0
     if sinceChange:
         window = max(window, min(BALANCE_FIT_S, float(sinceChange)))
+    # Once a droplet has been called balanced it takes a clear excursion to un-call it.
+    # At the 2% line Brownian motion crosses back and forth, and the banner alternated
+    # BALANCED / off balance / BALANCED / off balance on readings of 1.3, 1.7, 4.1,
+    # 1.5, 3.1 and 0.3 percent -- all of them the same droplet, sitting still.
+    wasBalanced = bool(getattr(t, "balancedVerdict", False))
+    limit = BALANCE_TARGET_PCT * (BALANCE_HYSTERESIS if wasBalanced else 1.0)
+    t.balancedVerdict = pct <= limit
     floor = brownianFloorPct(vFree, window)
     # `coarse` means the fit fell back to a short window, where the floor is not a
     # floor and the percentage is a guess.  No green cue is given on a guess.
-    atFloor = floor is not None and not coarse and pct <= floor * 1.3
-    if pct <= BALANCE_TARGET_PCT or atFloor:
+    atFloor = (floor is not None and not coarse and pct <= floor * 1.3
+               and window >= FLOOR_CLAIM_MIN_S)
+    if pct <= limit or atFloor:
         if not ADVISORY_MIN_V <= volts <= ADVISORY_MAX_V:
             return ("picked id %d balances at %d V, outside the manual's %g-%g V"
                     % (t.id, volts, ADVISORY_MIN_V, ADVISORY_MAX_V), (0, 140, 255), False)
@@ -3825,7 +3969,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 while latched and now - latched[0][0] > MAX_FALL_S + 5.0:
                     latched.popleft()
             # Where the tracker is already looking, and how sure it still is.
-            keepNear = []
+            keepNear, measuring = [], []
             for t in live:
                 if len(t.points) < CONFIRM_POINTS:
                     continue                  # a probationary track proves nothing
@@ -3834,7 +3978,10 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 keepNear.append((float(px), float(py),
                                  min(SECOND_CHANCE_MAX_PX,
                                      SECOND_CHANCE_PX + SECOND_CHANCE_GROW * gap)))
-            centres, _, _ = detectDroplets(gray, background, s, keepNear = keepNear)
+                if t.tTop is not None and t.tBottom is None:
+                    measuring.append((float(px), float(py), MEASURE_RESCUE_PX))
+            centres, _, _ = detectDroplets(gray, background, s, keepNear = keepNear,
+                                           measuring = measuring)
             detections += len(centres)
             detSeries.append((now, len(centres)))
 
@@ -3999,12 +4146,19 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # 2026-09-14, so the live run is asked instead.
                         near = min((float(np.hypot(c[0] - t.pos[0], c[1] - t.pos[1])),
                                     float(c[2])) for c in centres) if centres else None
+                        # ROI coordinates: REJECT_POINTS is recorded in the same frame
+                        # of reference the tracks live in.
+                        gated = nearestRejected(t.pos[0], t.pos[1])
                         print("  mid-fall track %d died at x=%.0f y=%.0f after %.1f s "
-                              "dark (limit %.1f); nearest blob %s"
-                              % (t.id, t.pos[0], t.pos[1], waited, allowed,
-                                 "none" if near is None else
-                                 "%.0f px, area %.0f vs its own %.0f"
-                                 % (near[0], near[1], t.area)), flush = True)
+                              "dark (limit %.1f); own area %.0f; nearest ACCEPTED %s; "
+                              "nearest REJECTED %s"
+                              % (t.id, t.pos[0], t.pos[1], waited, allowed, t.area,
+                                 "none" if near is None else "%.0f px (area %.0f)"
+                                 % (near[0], near[1]),
+                                 "none" if gated is None else
+                                 "%.0f px (%s, area %.0f, circ %.2f)"
+                                 % (gated[0], gated[1], gated[2], gated[3])),
+                              flush = True)
                     buried.append(t)                 # only confirmed tracks are worth keeping
             live = keep
             morgue.extend(buried)
@@ -4421,10 +4575,17 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # about a droplet, not a decision to measure it, and pinning on
                     # every click would clear the candidate rings the operator is
                     # still hunting with.
+                    # The click decides, full stop.  The old rule refused to move a
+                    # pin off a column that had any fall in it -- meant to protect a
+                    # measurement in progress, it instead protected a single stray fall
+                    # from earlier in the session: the pin sat 100 px from the droplet
+                    # the operator was measuring, MEASURING could not own the banner
+                    # because the pick was outside the pinned column, and five falls
+                    # were reported as USABLE over and over.  Releases still happen on
+                    # spray, on loss and on idle, so nothing is lost by trusting it.
                     if (picked is not None and chosenX is not None
                             and not liftWatch.lifting
-                            and abs(float(picked.pos[0]) - chosenX) > SAME_DROPLET_X_PX
-                            and not dropletFalls(falls, chosenX)):
+                            and abs(float(picked.pos[0]) - chosenX) > SAME_DROPLET_X_PX):
                         chosenX, chosenAt, chosenSeen = float(picked.pos[0]), now, now
                     # An empty column with nothing measured in it is released at once,
                     # not after the idle timer: there is nothing to protect.
@@ -4658,7 +4819,9 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                                          now - voltsChangedAt))
                             q = balanceError(me, spacing, now, volts,
                                              freeFallSpeed(columnVolts, me.pos[0]),
-                                             window)
+                                             window,
+                                             now - voltsChangedAt if voltsChangedAt
+                                             else None)
                         if q is not None:
                             pct, drift, ub, assumed, coarse = q
                             mark = "~" if assumed or coarse else ""
@@ -5026,6 +5189,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         display[Y:Y + H, X:X + W] = plain
                         cv2.rectangle(display, (X, Y), (X + W, Y + H), (0, 160, 0), 1)
                         drawHud(display)
+                    publishFrame(display.copy())
                     cv2.imshow("Droplets", display)
                     if src.isLive:
                         delay = 1           # a camera sets its own pace; never wait on it
@@ -5191,11 +5355,23 @@ def dropletGroups(falls):
                     and not (getattr(f, "balanceVoltage", None)
                              and float(f.balanceVoltage) > LIFT_VOLTS)),
                    key = lambda f: f.tTop or 0.0)
+    # Distance to the NEAREST fall already in the group, not to the group's running
+    # median.  A droplet drifts sideways as it is measured -- five falls on 2026-09-16
+    # walked 523 -> 494 -> 459 -> 433 -> 436 px -- and by the fourth the median had
+    # only reached 494, so |433 - 494| = 61 px missed a 60 px window by one pixel and
+    # the droplet was filed as two.  The fifth then rejoined, and charges.csv reported
+    # "INCOMPLETE, 4 of 5" about a droplet that had done all five.
+    #
+    # Nearest-fall linkage follows the drift for nothing, because consecutive falls of
+    # one droplet are always close even when the first and last are not.  What stops it
+    # chaining across unrelated droplets is the duration test below, which is unchanged:
+    # a stray in the same column has to fall at the same speed to be absorbed.
     groups = []
     for f in legal:
         for g in groups:
             mean = sum(q.seconds for q in g["rows"]) / len(g["rows"])
-            if (abs(f.xPx - g["x"]) <= SAME_DROPLET_X_PX
+            gap = min(abs(f.xPx - q.xPx) for q in g["rows"])
+            if (gap <= SAME_DROPLET_X_PX
                     and abs(f.seconds - mean) <= DROPLET_TIME_TOL * mean):
                 g["rows"].append(f)
                 g["x"] = float(np.median([q.xPx for q in g["rows"]]))
@@ -5490,6 +5666,17 @@ def analyze(videoPath = VIDEO, binding = None, voltages = None,
             "droplets": droplets}
 
 
+def publishTo(argv):
+    """--publish PORT: stream frames back to the launcher instead of being captured."""
+    for i, a in enumerate(argv):
+        if a == "--publish" and i + 1 < len(argv):
+            startPublisher(argv[i + 1])
+            return
+        if a.startswith("--publish="):
+            startPublisher(a.split("=", 1)[1])
+            return
+
+
 def main(argv):
     if len(argv) > 1 and argv[1] == "live":
         # --blind shows the raw frame and nothing else: no reticle lines, no track
@@ -5502,6 +5689,7 @@ def main(argv):
         # the dongle, so the lab monitor is dark and this window is the operator's only
         # picture.  Blind means unannotated, not absent.
         blind = "--blind" in argv[1:]
+        publishTo(argv)
         rest = [a for a in argv[2:] if not a.startswith("-")]
         spec = "cam:" + (rest[0] if rest else "0")
         outDir = outDirFor(spec)
@@ -5520,7 +5708,8 @@ def main(argv):
         # stream, chat, start/stop -- can be exercised with no apparatus and no
         # dongle, which is the difference between testing it in a lab slot and
         # testing it at a desk.
-        path = argv[2] if len(argv) > 2 else VIDEO
+        publishTo(argv)
+        path = next((a for a in argv[2:] if not a.startswith("-")), VIDEO)
         outDir = outDirFor(path)
         print("Playback -> %s" % outDir)
         print("Stop with q in the window, or Ctrl+C")
