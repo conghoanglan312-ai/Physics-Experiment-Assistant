@@ -30,6 +30,7 @@ the actual screen grab), on top of what pipeline.py already needs:
 This only works on Windows, same as the rest of this lab's toolchain.
 """
 
+import json
 import re
 import socket
 import subprocess
@@ -169,7 +170,25 @@ def _capture_window(hwnd):
             win32gui.ReleaseDC(hwnd, hwnd_dc)
 
 
-def _mirror_window(hwnd, streamer, stop_event, fps = 12):
+# The pipeline delivers about 23 fps to its own window and this mirrored 12, which is
+# exactly how it looked: a stream sample measured 73 frames in 6 s.
+#
+# 23 is not reachable by this method.  Measured on the bench laptop, one mirrored frame
+# costs about 59 ms, and the split is not where you would guess: JPEG encoding the
+# 1272x689 frame is 4.3 ms, so the other ~55 ms is PrintWindow rendering the window
+# into an off-screen DC.  Lowering quality saves 0.1 ms and downscaling saves 1.2 ms --
+# neither touches the real cost.  The ceiling is about 17 fps.
+#
+# So 15: a clear improvement on 12, and it still SLEEPS between frames rather than
+# pinning a core on a machine that is also tracking droplets.  The tracker's frames are
+# the measurement; the browser's are a convenience.
+#
+# Going beyond this means not capturing a window at all -- the pipeline already has the
+# frame in memory and could publish it for 4 ms instead of 59.  See issue #13.
+MIRROR_FPS = 15.0
+
+
+def _mirror_window(hwnd, streamer, stop_event, fps = MIRROR_FPS):
     period = 1.0 / fps
     while not stop_event.is_set():
         t0 = time.time()
@@ -206,7 +225,9 @@ def start_live(stream_port = None, window_timeout = WINDOW_TIMEOUT_S, source = N
         command = [sys.executable, "-m", "cv.pipeline", "play", device]
     port = stream_port or _find_free_port()
     print("Command:", " ".join(command))
-    process = subprocess.Popen(command)
+    # stdin stays open for the life of the session: the browser's clicks go down it,
+    # one JSON object per line.  See send_click().
+    process = subprocess.Popen(command, stdin = subprocess.PIPE)
 
     hwnd = _find_window(WINDOW_TITLE, timeout = window_timeout)
     if hwnd is None:
@@ -252,6 +273,27 @@ def start_live(stream_port = None, window_timeout = WINDOW_TIMEOUT_S, source = N
         "device": device,
         "url": "http://127.0.0.1:%d/stream" % port,
     }
+
+
+def send_click(handle, x, y):
+    """Forward a click from the browser to the running pipeline.
+
+    `x` and `y` are fractions of the frame, because the browser is drawing the picture
+    at whatever size its layout gives it and only fractions survive that.  The
+    pipeline turns them back into pixels of its own frame and drops them into the same
+    queue its mouse callback feeds, so a click from the page and a click on the window
+    are the same event by the time anything acts on it.
+    """
+    if handle is None:
+        raise RuntimeError("no live session")
+    process = handle.get("process")
+    if process is None or process.poll() is not None or process.stdin is None:
+        raise RuntimeError("the pipeline is not running")
+    x = min(1.0, max(0.0, float(x)))
+    y = min(1.0, max(0.0, float(y)))
+    line = json.dumps({"x": x, "y": y}) + "\n"
+    process.stdin.write(line.encode("utf-8"))
+    process.stdin.flush()
 
 
 def stop_live(handle):

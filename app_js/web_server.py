@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from llm.main import getResponseFromGemini
-from app_js.wrapper import start_live, stop_live
+from app_js.wrapper import send_click, start_live, stop_live
 from cv.api import live_status
 
 ROOT = Path(__file__).resolve().parent
@@ -127,6 +127,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/live/start":
             self._start_live()
             return
+        if path == "/api/live/click":
+            self._click()
+            return
+
         if path == "/api/live/stop":
             self._stop_live()
             return
@@ -161,6 +165,28 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "Please plug in the dongle first."
                                  if source is None else
                                  "Could not play %s: %s" % (source, exc)}, status=500)
+
+    def _click(self):
+        """{"x": 0.42, "y": 0.63, "token": "..."} -- fractions of the frame."""
+        handle, token = get_live()
+        if not process_is_running(handle):
+            self._json({"error": "No live session."}, status=409)
+            return
+        try:
+            payload = self._read_json()
+            if str(payload.get("token", "")) != str(token):
+                self._json({"error": "Wrong token."}, status=403)
+                return
+            x, y = float(payload["x"]), float(payload["y"])
+        except Exception:
+            self._json({"error": "Send x and y as fractions of the frame."}, status=400)
+            return
+        try:
+            send_click(handle, x, y)
+        except Exception as exc:
+            self._json({"error": str(exc)}, status=500)
+            return
+        self._json({"ok": True})
 
     def _stop_live(self):
         try:

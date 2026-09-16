@@ -3540,10 +3540,42 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     lastClickAt = 0.0               # ...and when they last clicked anything
     pickedAuto = -1e9               # when the aid last picked one for them
     clicks = []                     # filled by the mouse callback, drained in the loop
+    remoteClicks = []               # ...and by a parent process, as frame fractions
 
     def onMouse(event, mx, my, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             clicks.append((mx, my))
+
+    def readRemoteClicks():
+        """Take clicks from whoever launched us, one JSON object per line.
+
+        The browser app mirrors this window as pixels, so the operator could watch a
+        session through it but not run one: picking a droplet is the whole
+        interaction and the click had nowhere to go.
+
+        stdin rather than a file or a socket, because a click is an EVENT.  A pipe
+        gives ordering and delivered-once for nothing, it closes when this process
+        dies so a stale click cannot arrive from a session that ended, and it adds no
+        port to the process that must not fall over mid-measurement.  (Status is
+        state, which is why that goes to a file.)
+
+        Fractions of the frame, not pixels: the sender is scaling the picture to
+        whatever size its window happens to be, and fractions survive that.
+        """
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                got = json.loads(line)
+                remoteClicks.append((float(got["x"]), float(got["y"])))
+            except Exception:
+                continue            # a malformed line is not worth a session
+
+    if show and not sys.stdin.isatty():
+        # Only when stdin is a pipe.  Run from a terminal it would eat the operator's
+        # keystrokes and block on a read that never returns.
+        threading.Thread(target = readRemoteClicks, daemon = True).start()
 
     if show:
         cv2.namedWindow("Droplets",
@@ -4101,6 +4133,13 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # clears the selection.  The window shows the whole frame with the
                     # ROI pasted in at (X, Y), so a window coordinate is an ROI
                     # coordinate minus that origin.
+                    # A remote click arrives as a fraction of the frame; the mouse
+                    # callback reports pixels of the same frame, because the window is
+                    # AUTOSIZE and shows it 1:1.  Convert and they are the same event.
+                    while remoteClicks:
+                        fx, fy = remoteClicks.pop()
+                        clicks.append((int(round(fx * frame.shape[1])),
+                                       int(round(fy * frame.shape[0]))))
                     while clicks:
                         mx, my = clicks.pop()
                         rx, ry = mx - X, my - Y
@@ -4936,6 +4975,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     fieldState = fieldLevel(steadyVolts),
                     message = banner or "",
                     picked = picked_,
+                    frameWidth = int(frame.shape[1]),
+                    frameHeight = int(frame.shape[0]),
                     dropletsCompleted = len(dropletGroups(falls)),
                     targetFallsPerDroplet = TARGET_FALLS_PER_DROPLET,
                 )
