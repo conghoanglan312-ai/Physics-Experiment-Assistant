@@ -1972,6 +1972,13 @@ BALANCE_ADVICE_MAX_PCT = 40.0
 # A Brownian floor larger than this is not a floor, it is a window too short to fit:
 # the aid called 28.8% "as good as it gets" because a 2 s window makes the floor huge.
 BALANCE_FLOOR_MAX_PCT = 4.0
+# How far out a droplet already called balanced must drift before it is called off
+# balance again, as a multiple of the target.
+BALANCE_HYSTERESIS = 1.8
+# ...and how much settled hold the Brownian-limit claim needs.  Over a 9 s window the
+# floor lands near its cap, so "that is the Brownian limit, tuning cannot do better"
+# was said about a droplet sitting 4.8% out.  Over 20 s the floor is a real floor.
+FLOOR_CLAIM_MIN_S = 20.0
 # 提升 sits far above the balance band, so a reading up here is a lift whatever the
 # latch thinks.  Balance means nothing while the operator is carrying the droplet up.
 LIFT_VOLTS = 300.0
@@ -2961,7 +2968,7 @@ def steadyDrift(t, now, drift, sinceChange = None):
     return float(np.median([d for _ts, d in hist]))
 
 
-def balanceError(t, spacing, now, volts, vFree, seconds):
+def balanceError(t, spacing, now, volts, vFree, seconds, sinceChange = None):
     """What the residual drift at this voltage will cost the charge, in percent.
 
     Returns (percent, drift grid/s, implied balance voltage, assumed) or None while
@@ -2979,6 +2986,16 @@ def balanceError(t, spacing, now, volts, vFree, seconds):
     # the one available while the operator is still turning the knob, which is exactly
     # when they need to be told which way.  Marked `coarse` so the text can say `~`.
     windows = ([seconds] if seconds >= BALANCE_MIN_FIT_S else []) + [BALANCE_MIN_FIT_S, 5.0]
+    # ...but never across a voltage change.  The fit runs over the track's own points,
+    # and those points remember the field that was applied when they were recorded: for
+    # up to 45 s after a toggle the window mixed two states.  That is how a droplet
+    # balancing at 171 V was reported "barely held, 67% of free fall", and why the
+    # percentage swung 27% -> 3% -> 18% inside seven seconds.  Below FIT_MIN_S of
+    # settled field there is nothing honest to say, so say nothing.
+    if sinceChange is not None:
+        windows = [w for w in windows if w <= float(sinceChange)]
+        if not windows:
+            return None
     fit, used = None, None
     for w in windows:
         fit = t.windowFit(spacing, now, w)
@@ -3038,7 +3055,7 @@ def updateHold(t, yTop, spacing, now, volts = None, columns = None,
             and float(now) - getattr(t, "lastBalanceCheck", 0.0) >= BALANCE_CHECK_S):
         t.lastBalanceCheck = float(now)
         got = balanceError(t, spacing, now, volts, freeFallSpeed(columns, t.pos[0]),
-                           window)
+                           window, sinceChange)
         if got is not None:
             pct, drift, impliedV, _assumed, coarse = got
             # A droplet nowhere near balance has no balance quality to record: the
@@ -3143,7 +3160,7 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
     steady = held is not None and float(now) - held >= SETTLED_S
     quality = balanceError(t, spacing, now, volts, vFree,
                            min(BALANCE_FIT_S, float(now) - held)
-                           if held is not None else 0.0)
+                           if held is not None else 0.0, sinceChange)
     if quality is None:
         return "picked id %d -- watching it" % t.id, (0, 220, 255), None
     pct, drift, ub, assumed, coarse = quality
@@ -3155,11 +3172,19 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
     window = min(BALANCE_FIT_S, float(now) - held) if held is not None else 0.0
     if sinceChange:
         window = max(window, min(BALANCE_FIT_S, float(sinceChange)))
+    # Once a droplet has been called balanced it takes a clear excursion to un-call it.
+    # At the 2% line Brownian motion crosses back and forth, and the banner alternated
+    # BALANCED / off balance / BALANCED / off balance on readings of 1.3, 1.7, 4.1,
+    # 1.5, 3.1 and 0.3 percent -- all of them the same droplet, sitting still.
+    wasBalanced = bool(getattr(t, "balancedVerdict", False))
+    limit = BALANCE_TARGET_PCT * (BALANCE_HYSTERESIS if wasBalanced else 1.0)
+    t.balancedVerdict = pct <= limit
     floor = brownianFloorPct(vFree, window)
     # `coarse` means the fit fell back to a short window, where the floor is not a
     # floor and the percentage is a guess.  No green cue is given on a guess.
-    atFloor = floor is not None and not coarse and pct <= floor * 1.3
-    if pct <= BALANCE_TARGET_PCT or atFloor:
+    atFloor = (floor is not None and not coarse and pct <= floor * 1.3
+               and window >= FLOOR_CLAIM_MIN_S)
+    if pct <= limit or atFloor:
         if not ADVISORY_MIN_V <= volts <= ADVISORY_MAX_V:
             return ("picked id %d balances at %d V, outside the manual's %g-%g V"
                     % (t.id, volts, ADVISORY_MIN_V, ADVISORY_MAX_V), (0, 140, 255), False)
@@ -4550,10 +4575,17 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # about a droplet, not a decision to measure it, and pinning on
                     # every click would clear the candidate rings the operator is
                     # still hunting with.
+                    # The click decides, full stop.  The old rule refused to move a
+                    # pin off a column that had any fall in it -- meant to protect a
+                    # measurement in progress, it instead protected a single stray fall
+                    # from earlier in the session: the pin sat 100 px from the droplet
+                    # the operator was measuring, MEASURING could not own the banner
+                    # because the pick was outside the pinned column, and five falls
+                    # were reported as USABLE over and over.  Releases still happen on
+                    # spray, on loss and on idle, so nothing is lost by trusting it.
                     if (picked is not None and chosenX is not None
                             and not liftWatch.lifting
-                            and abs(float(picked.pos[0]) - chosenX) > SAME_DROPLET_X_PX
-                            and not dropletFalls(falls, chosenX)):
+                            and abs(float(picked.pos[0]) - chosenX) > SAME_DROPLET_X_PX):
                         chosenX, chosenAt, chosenSeen = float(picked.pos[0]), now, now
                     # An empty column with nothing measured in it is released at once,
                     # not after the idle timer: there is nothing to protect.
@@ -4787,7 +4819,9 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                                          now - voltsChangedAt))
                             q = balanceError(me, spacing, now, volts,
                                              freeFallSpeed(columnVolts, me.pos[0]),
-                                             window)
+                                             window,
+                                             now - voltsChangedAt if voltsChangedAt
+                                             else None)
                         if q is not None:
                             pct, drift, ub, assumed, coarse = q
                             mark = "~" if assumed or coarse else ""
@@ -5321,11 +5355,23 @@ def dropletGroups(falls):
                     and not (getattr(f, "balanceVoltage", None)
                              and float(f.balanceVoltage) > LIFT_VOLTS)),
                    key = lambda f: f.tTop or 0.0)
+    # Distance to the NEAREST fall already in the group, not to the group's running
+    # median.  A droplet drifts sideways as it is measured -- five falls on 2026-09-16
+    # walked 523 -> 494 -> 459 -> 433 -> 436 px -- and by the fourth the median had
+    # only reached 494, so |433 - 494| = 61 px missed a 60 px window by one pixel and
+    # the droplet was filed as two.  The fifth then rejoined, and charges.csv reported
+    # "INCOMPLETE, 4 of 5" about a droplet that had done all five.
+    #
+    # Nearest-fall linkage follows the drift for nothing, because consecutive falls of
+    # one droplet are always close even when the first and last are not.  What stops it
+    # chaining across unrelated droplets is the duration test below, which is unchanged:
+    # a stray in the same column has to fall at the same speed to be absorbed.
     groups = []
     for f in legal:
         for g in groups:
             mean = sum(q.seconds for q in g["rows"]) / len(g["rows"])
-            if (abs(f.xPx - g["x"]) <= SAME_DROPLET_X_PX
+            gap = min(abs(f.xPx - q.xPx) for q in g["rows"])
+            if (gap <= SAME_DROPLET_X_PX
                     and abs(f.seconds - mean) <= DROPLET_TIME_TOL * mean):
                 g["rows"].append(f)
                 g["x"] = float(np.median([q.xPx for q in g["rows"]]))
