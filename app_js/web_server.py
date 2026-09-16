@@ -108,18 +108,18 @@ class Handler(BaseHTTPRequestHandler):
             running = process_is_running(handle)
             if handle is not None and not running:
                 clear_live()
-        try:
-            status = live_status()
-        except Exception:
-            status = None
-        if status and not running and status.get("phase") != "finished":
-            status["phase"] = "stopped"
-            self._json({
-                "running": running,
-                "device": handle.get("device") if running else None,
-                "source": handle.get("source") if running else None,
-                "status": status,
-            })
+            try:
+                status = live_status()
+            except Exception:
+                status = None
+            if status and not running and status.get("phase") != "finished":
+                status["phase"] = "stopped"
+                self._json({
+                    "running": running,
+                    "device": handle.get("device") if running else None,
+                    "source": handle.get("source") if running else None,
+                    "status": status,
+                })
             return
 
         if path == "/health":
@@ -167,8 +167,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
         except Exception:
-            payload = {}
-            source = str(payload.get("source", "")).strip() or None
+                payload = {}
+        source = str(payload.get("source", "")).strip() or None
 
         try:
             handle = start_live(source=source)
@@ -183,30 +183,30 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             clear_live()
             self._json({"error": "Please plug in the dongle first."
-                                if source is None else
-                                "Could not play %s: %s" % (source, exc)}, status=500)
+                           if source is None else
+                           "Could not play %s: %s" % (source, exc)}, status=500)
 
-def _click(self):
-    """{"x": 0.42, "y": 0.63, "token": "..."} -- fractions of the frame."""
-    handle, token = get_live()
-    if not process_is_running(handle):
-        self._json({"error": "No live session."}, status=409)
-        return
-    try:
-        payload = self._read_json()
-        if str(payload.get("token", "")) != str(token):
-            self._json({"error": "Wrong token."}, status=403)
+    def _click(self):
+        """{"x": 0.42, "y": 0.63, "token": "..."} -- fractions of the frame."""
+        handle, token = get_live()
+        if not process_is_running(handle):
+            self._json({"error": "No live session."}, status=409)
             return
-        x, y = float(payload["x"]), float(payload["y"])
-    except Exception:
-        self._json({"error": "Send x and y as fractions of the frame."}, status=400)
-        return
-    try:
-        send_click(handle, x, y)
-    except Exception as exc:
-        self._json({"error": str(exc)}, status=500)
-        return
-    self._json({"ok": True})
+        try:
+            payload = self._read_json()
+            if str(payload.get("token", "")) != str(token):
+                self._json({"error": "Wrong token."}, status=403)
+                return
+            x, y = float(payload["x"]), float(payload["y"])
+        except Exception:
+            self._json({"error": "Send x and y as fractions of the frame."}, status=400)
+            return
+        try:
+            send_click(handle, x, y)
+        except Exception as exc:
+            self._json({"error": str(exc)}, status=500)
+            return
+        self._json({"ok": True})
 
     def _stop_live(self):
         try:
