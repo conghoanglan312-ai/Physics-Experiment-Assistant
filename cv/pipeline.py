@@ -3442,6 +3442,21 @@ PICK_GONE_SHOW_S = 8.0        # how long the "it left, here is how to get it bac
 # 0.35 clears that case with margin while still demanding a third of the descent. The
 # residual test does the rest of the work: a track must lie on the line joining the two
 # crossings, which a droplet appearing near `1.6` does not.
+# A track that dies just ABOVE `0` on its way down was about to start a fall, and the
+# one place it is guaranteed to die is the line itself: grid rows are masked so nothing
+# is detected within gridClear of them, which is where the operator is told to park.
+# On 2026-09-17 a droplet was released from just above `0`, its track starved at the
+# line, it reappeared 20 px below as a new track with no `0` of its own, and a complete
+# fall went unrecorded.
+#
+# Rather than relax the mask -- tried twice, both times it lost a reference fall -- the
+# crossing the dying track was ABOUT to make is recorded from its own velocity.  It
+# becomes an unclaimed crossing like any other, and the track that reaches `1.6` adopts
+# it through adoptZeroCrossing, which still has to prove it fell along the line joining
+# the two and covered a third of the descent.  Nothing is claimed here; only offered.
+PREDICT_ZERO_BAND = 2.0        # how many gridClear widths above `0` still counts
+PREDICT_ZERO_MAX_S = 3.0       # ...and how far ahead its velocity may be believed
+
 ADOPT_MIN_SPAN = 0.35
 ADOPT_MAX_RESIDUAL_PX = 6.0   # furthest any of its points may sit off the line
 
@@ -3937,7 +3952,14 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 # samples taken while everything was still catching up.
                 bucketNow = (int(round(volts / 10.0)) * 10
                              if volts is not None else None)
-                if bucketNow != lastVoltBucket:
+                # A panel that could not be READ is not a voltage that CHANGED.  This
+                # compared the raw reading, so every dropped read flipped the bucket to
+                # None and back and stamped voltsChangedAt twice.  With reads failing
+                # now and then, the settle window never elapsed: an operator tuning at a
+                # steady 175 V was told "settling after the voltage change" for
+                # twenty-two seconds straight, got no balance line for three minutes,
+                # and every window measured from voltsChangedAt was clamped to nothing.
+                if bucketNow is not None and bucketNow != lastVoltBucket:
                     lastVoltBucket, voltsChangedAt = bucketNow, now
                 # NOT while the 提升 button is held.  The lift adds 210 V, so the
                 # last non-zero reading before a droplet is released can be the LIFT
@@ -4160,6 +4182,17 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 if waited <= allowed:
                     keep.append(t)
                 elif len(t.points) >= CONFIRM_POINTS:
+                    # About to cross `0` and dying on the line: leave the crossing it
+                    # was going to make, for whatever comes out below to adopt.
+                    if (t.tTop is None and float(t.vel[1]) > 0
+                            and t.pos[1] < yTop
+                            and yTop - float(t.pos[1])
+                            <= PREDICT_ZERO_BAND * s["gridClear"]):
+                        gap = (yTop - float(t.pos[1])) / float(t.vel[1])
+                        if 0 < gap <= PREDICT_ZERO_MAX_S:
+                            noteZeroCrossing(zeroCrossings, float(t.lastT) + gap,
+                                             float(t.xs[-1]) if getattr(t, "xs", None)
+                                             else float(t.pos[0]))
                     if measuring:
                         # A track dying mid-fall costs a measurement, and the fix
                         # depends on WHY it died: a droplet that was genuinely
@@ -4770,7 +4803,16 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # traverse, and a droplet dropped too fast still crosses both
                         # lines -- so counting traverses made the tally climb on every
                         # downward move rather than on every measurement.
-                        mine = dropletFalls(falls, chosenX)
+                        # The operator's droplet, not the pinned coordinate.  A pin
+                        # lands where a droplet settled; the operator then moves on,
+                        # and everything keyed to that coordinate goes on describing a
+                        # droplet nobody is looking at.  On 2026-09-17 the banner read
+                        # "1 of 5 falls" and "still the same droplet?" for ninety
+                        # seconds about a droplet abandoned at 1:50, while the one in
+                        # the square was boxed, balanced and about to be dropped.
+                        mine = dropletFalls(falls,
+                                            float(picked.pos[0]) if picked is not None
+                                            else chosenX)
                         # Follow the group, not the coordinate.  chosenX was pinned
                         # where the droplet happened to be when it settled, and the
                         # count is "the falls nearest that x" -- so when this droplet's
@@ -4787,8 +4829,15 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # A click is the operator saying "yes, this one".  The
                         # prompt asked exactly that and then ignored the answer.
                         since = max(lastFall or 0.0, lastClickAt or 0.0)
+                        # ...and never ask about falls that are not the picked
+                        # droplet's.  Asking "still the same droplet?" while the
+                        # operator is mid-balance on a different one is noise they
+                        # cannot answer.
                         stale = (lastFall is not None
-                                 and now - since > MEASURE_IDLE_S)
+                                 and now - since > MEASURE_IDLE_S
+                                 and (picked is None
+                                      or abs(float(picked.pos[0]) - chosenX)
+                                      <= SAME_DROPLET_X_PX))
                         # q/e USED TO BE SHOWN HERE and is deliberately not any more.
                         # It is the student's own result, and putting it on the screen
                         # mid-measurement invites tuning the voltage until q/e lands on
@@ -4822,9 +4871,18 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # -- which way to turn the knob -- was hidden by a progress
                         # count.  So while nothing is actually falling, the balance
                         # instruction outranks the count.
-                        chosen = [t for t in live
-                                  if not t.miss and len(t.points) >= CONFIRM_POINTS
-                                  and abs(float(t.pos[0]) - chosenX) <= SAME_DROPLET_X_PX]
+                        # ...and the balance line describes the droplet in the
+                        # square, not the nearest track to the pin.  Those disagreed by
+                        # a factor of eight in the same second: the pick verdict said
+                        # "BALANCED to 1.9% at 180 V" while MEASURING said "balance
+                        # 14.9%, RAISE to about 214 V", then "95.0%".
+                        if picked is not None and not picked.miss:
+                            chosen = [picked]
+                        else:
+                            chosen = [t for t in live
+                                      if not t.miss and len(t.points) >= CONFIRM_POINTS
+                                      and abs(float(t.pos[0]) - chosenX)
+                                      <= SAME_DROPLET_X_PX]
                         timing = any(t.tTop is not None and t.tBottom is None
                                      for t in live)
                         q = None
