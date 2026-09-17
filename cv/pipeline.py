@@ -121,6 +121,16 @@ SAME_DROPLET_X_PX = 60.0
 # Trimming to the falls within 5% of the cluster's median duration separates them
 # cleanly and leaves exactly three droplets of five falls each.
 SAME_DROPLET_DURATION_TOL = 0.05
+# Two falls taken at different plate voltages are not one measurement: the operator
+# turned the knob between them, which is the definition of a different droplet or a
+# different attempt.  On 2026-09-16 two falls at 218 V and one at 150 V, ten minutes
+# apart, were filed as one droplet and charges.csv reported its charge at "U_n 175 V".
+# A volt of tolerance covers the panel's own jitter, nothing more.
+SAME_DROPLET_VOLT_TOL = 1.5
+# ...and five falls of one droplet arrive minutes apart, not ten.  The same session put
+# a spray, a re-tune and 580 s between two falls it then bound together.  Ⅳ.4 re-drops
+# the SAME droplet five times; nobody leaves it sitting for ten minutes in between.
+SAME_DROPLET_GAP_S = 180.0
 
 # --- knowing when the hunt is over ------------------------------------------------
 #
@@ -1952,6 +1962,8 @@ BALANCE_MIN_FIT_S = 8.0         # ...and a shorter hold than this cannot say any
 BALANCE_CHECK_S = 0.5           # how often it is recomputed, per droplet
 BALANCE_SHOW_S = 2.0            # ...and how often the screen is allowed to change
 SETTLE_AFTER_V_S = 2.0          # no verdict this soon after the voltage moved
+PANEL_LAG_S = 3.0               # how long after a reading changes the switch may have
+                                # moved first -- OCR of a display that redraws slowly
 HOLD_SLACK_DIV = 0.35           # a held droplet may wander this far and still be held
 # Past this, "off balance by N%" is not a useful number -- 571% was shown on a droplet
 # in free fall.  Beyond it the droplet is not near balance at all, so give the
@@ -3071,7 +3083,7 @@ def heldLongEnough(t, now):
 
 
 def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
-                  sinceChange = None, lifting = False):
+                  sinceChange = None, lifting = False, measured = False):
     """What to tell the operator about the droplet THEY chose.  (text, colour, ok)
 
     Reports on it whether or not it passes the candidate gates, because the operator
@@ -3117,6 +3129,12 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
     # droplet alone for a minute was told "no response seen yet, toggle again".
     if (volts and vFree and speed is not None
             and answersField(t, now, speed, vFree)):
+        charged = True
+    if charged is False and measured:
+        # It has completed legal falls under this operator's hand.  Whatever the speed
+        # buckets say, a droplet that was balanced and dropped has answered the field,
+        # and "no response seen yet, toggle again" is nonsense addressed to somebody one
+        # fall into a measurement.
         charged = True
     if charged is False:
         # Telling the operator to throw away a droplet they have spent minutes on is
@@ -3850,7 +3868,12 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     background = rolled
                 elif rolled is not None and len(roller.buf) >= roller.samples:
                     background, rollerReady = rolled, True
-            if src.isLive and n % panelEvery == 0:
+            # `or show` covers playback.  The panel reader was live-only, so a
+            # recorded clip never read the plate voltage at all and the app's status
+            # reported it as null for the whole session -- which a teammate reasonably
+            # read as "the API returns nothing at 0 V".  Headless analysis is untouched:
+            # it takes the voltage per fall by seeking back to the frames.
+            if (src.isLive or show) and n % panelEvery == 0:
                 # The same crop the field-off check uses, read once a frame instead of
                 # once a fall.  A droplet's response to the field is the FIRST half of
                 # Ⅳ.2's selection and nothing automated it before.
@@ -4454,10 +4477,19 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                 # 0.17 and 0.33 grid/s, the square took the slower one,
                                 # and the aid said nothing.  Inside ONE state a speed
                                 # that jumps is still a different droplet.
+                                # The panel READING lags the switch -- it is OCR of a
+                                # display that redraws in its own time -- so at the
+                                # moment of a toggle both sides of the gap can read the
+                                # same state while the field has already changed.  An
+                                # operator saw "may be a DIFFERENT droplet" on a droplet
+                                # that had simply stopped falling because they had just
+                                # pressed 提升.  A change anywhere near the gap counts.
                                 nowLevel = fieldLevel(steadyVolts)
                                 fieldMoved = (pickedLevel is not None
                                               and nowLevel is not None
                                               and nowLevel != pickedLevel)
+                                if voltsChangedAt and now - voltsChangedAt <= PANEL_LAG_S:
+                                    fieldMoved = True
                                 pickedDoubt = (now, wasSpeed, nowSpeed,
                                                wasSpeed is not None
                                                and nowSpeed is not None
@@ -4719,7 +4751,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             picked, spacing, now, steadyVolts, pv,
                             freeFallSpeed(columnVolts, picked.pos[0]), own,
                             now - voltsChangedAt if voltsChangedAt else None,
-                            liftWatch.lifting)
+                            liftWatch.lifting,
+                            bool(dropletFalls(falls, float(picked.pos[0]))))
                         banner, bannerColour = holdText("picked", now, banner,
                                                         bannerColour)
                         if reacquired:
@@ -5371,7 +5404,17 @@ def dropletGroups(falls):
         for g in groups:
             mean = sum(q.seconds for q in g["rows"]) / len(g["rows"])
             gap = min(abs(f.xPx - q.xPx) for q in g["rows"])
-            if (gap <= SAME_DROPLET_X_PX
+            # Same voltage, and soon after the last fall of the group.  Both are
+            # physical: the knob did not move, and the operator did not wander off.
+            volts = [float(q.balanceVoltage) for q in g["rows"]
+                     if getattr(q, "balanceVoltage", None)]
+            mine = getattr(f, "balanceVoltage", None)
+            sameVolts = (not volts or mine is None
+                         or abs(float(mine) - float(np.median(volts)))
+                         <= SAME_DROPLET_VOLT_TOL)
+            since = (f.tTop or 0.0) - max((q.tTop or 0.0) for q in g["rows"])
+            if (gap <= SAME_DROPLET_X_PX and sameVolts
+                    and since <= SAME_DROPLET_GAP_S
                     and abs(f.seconds - mean) <= DROPLET_TIME_TOL * mean):
                 g["rows"].append(f)
                 g["x"] = float(np.median([q.xPx for q in g["rows"]]))
