@@ -2887,6 +2887,17 @@ def brownianFloorPct(vFree, seconds):
     return floor if floor <= BALANCE_FLOOR_MAX_PCT else None
 
 
+def forgetHeld(key):
+    """Drop a held line at once, because what it described is gone.
+
+    The hold keeps a number still long enough to read.  It also kept "picked id 22438
+    -- USABLE" on screen for two seconds after the pick had been dropped, while the
+    drawing had already switched from the operator's square to the aid's own ring: the
+    picture said one thing and the words another.
+    """
+    _shown.pop(key, None)
+
+
 def holdText(key, now, text, colour, seconds = BALANCE_SHOW_S):
     """Keep a changing number on the screen for `seconds` before letting it change.
 
@@ -3809,6 +3820,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     pickedGone = None               # (when, which edge) after it left, to prompt recovery
     pickedDoubt = None              # (when, before, after) when a hand-over looked wrong
     pickedLevel = None              # the field state when the pick was last SEEN
+    lastPickedId = None             # ...and which track it was, to drop stale banners
     noisySince = None               # when the detection count started running high
     lastVoltBucket = None           # the plate voltage last seen, bucketed to 10 V...
     voltsChangedAt = -1e9           # ...and when it changed, for CHARGE_SETTLE_S
@@ -4404,12 +4416,27 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             # during a lift, which is when tracks break most.
                             aim = picked.predict(now)
                             reach = PICK_LIFT_PX if liftWatch.lifting else PICK_FOLLOW_PX
+                            # Moving like the droplet, not merely sitting near it.
+                            # During a lift the reach is 90 px and grows with the gap,
+                            # and a speck above `0` was close enough to qualify: the
+                            # square jumped to it mid-lift and stayed until the
+                            # operator clicked their droplet again.  A droplet being
+                            # carried up is going UP, and its speed does not jump.
+                            was = picked.recentSpeed(spacing)
+                            def sameMotion(q):
+                                v = q.recentSpeed(spacing)
+                                if was is None or v is None:
+                                    return True       # nothing to contradict
+                                if liftWatch.lifting and v >= 0:
+                                    return False      # not rising during a lift
+                                return abs(v - was) <= STEAL_SPEED_GAP * 2.0
                             near = [q for q in live
                                     if q is not picked and not q.miss
                                     and len(q.points) >= CONFIRM_POINTS
                                     and abs(q.pos[0] - aim[0]) <= s["reidX"]
                                     and np.hypot(q.pos[0] - aim[0],
-                                                 q.pos[1] - aim[1]) <= reach]
+                                                 q.pos[1] - aim[1]) <= reach
+                                    and sameMotion(q)]
                             if near:
                                 picked = min(near, key = lambda q: np.hypot(
                                     q.pos[0] - aim[0], q.pos[1] - aim[1]))
@@ -4730,6 +4757,10 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     urgent = None
                     measuringBanner = None
                     reacquired = False
+                    nowPicked = None if picked is None else int(picked.id)
+                    if nowPicked != lastPickedId:
+                        forgetHeld("picked")          # it is about somebody else now
+                        lastPickedId = nowPicked
                     if (picked is not None and pickedSeen
                             and now - pickedSeen >= PICK_SEARCH_S):
                         urgent = (("lost your droplet %.0fs ago -- it may be moving too "
