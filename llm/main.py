@@ -21,14 +21,15 @@ def _session_id(session_id):
     return session_id if session_id is not None else str(uuid4())
 
 def getSafeDropletData(sessionID):
-    from cv.api import sample, llm_context, live_status
-
+    from cv.api import live_status
+    from .util.voltageSafeguard import voltage_selection_filter
     memory.updateDropletSessionData(sessionID, live_status())
 
     data = memory.getDropletSessionData(sessionID)
-    safe_data = llm_context(data)
-
-    return safe_data
+    data = voltage_selection_filter(data)
+    
+    print("Safe Droplet Data: ", data)
+    return data
 
 def getResponseFromGemini(userQuery, sessionID = None):
     valid, error = validated_query_or_error(userQuery)
