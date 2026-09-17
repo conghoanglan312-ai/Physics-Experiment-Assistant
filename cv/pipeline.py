@@ -3868,7 +3868,12 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     background = rolled
                 elif rolled is not None and len(roller.buf) >= roller.samples:
                     background, rollerReady = rolled, True
-            if src.isLive and n % panelEvery == 0:
+            # `or show` covers playback.  The panel reader was live-only, so a
+            # recorded clip never read the plate voltage at all and the app's status
+            # reported it as null for the whole session -- which a teammate reasonably
+            # read as "the API returns nothing at 0 V".  Headless analysis is untouched:
+            # it takes the voltage per fall by seeking back to the frames.
+            if (src.isLive or show) and n % panelEvery == 0:
                 # The same crop the field-off check uses, read once a frame instead of
                 # once a fall.  A droplet's response to the field is the FIRST half of
                 # Ⅳ.2's selection and nothing automated it before.
