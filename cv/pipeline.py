@@ -1999,6 +1999,9 @@ LIFT_VOLTS = 300.0
 # banner alternated USABLE / DISCARD every two seconds on one droplet.
 SPEED_MEDIAN_S = 5.0
 SPEED_GATE_SLACK = 0.15
+SPEED_UNSTABLE_GRID_S = 0.20    # a speed swinging wider than this is not a reading
+                                # -- the pair that produced DISCARD then USABLE two
+                                # seconds apart spanned 0.24
 # How long a droplet must go on being unbalanceable before it is crossed out.
 #
 # "Uncharged" needs the droplet seen at TWO voltages, and a droplet falling at full
@@ -2676,7 +2679,17 @@ def _spreadOf(rates):
     return float(np.percentile(rates, 75) - np.percentile(rates, 25))
 
 
-def dropletFalls(falls, nearX):
+# A spray fills the chamber with debris, and some of it falls 8 divisions in a legal
+# time with the field off.  Counting any legal fall near the picked column made the
+# banner announce "MEASURING -- 1 of 5 falls" about a speck that had fallen forty
+# seconds earlier, in a session where no droplet was ever balanced.  A measurement
+# begins when the operator commits -- clicks, or holds a droplet on `0` -- so a fall
+# from before that belongs to nobody.  The grace is one fall long: a droplet dropped
+# and THEN clicked is still theirs.
+COMMIT_GRACE_S = MAX_FALL_S
+
+
+def dropletFalls(falls, nearX, since = None):
     """The legal falls that belong to one droplet, grouped as `binding` groups them.
 
     The banner used to count falls within SAME_DROPLET_X_PX of a PINNED column, while
@@ -2703,6 +2716,14 @@ def dropletFalls(falls, nearX):
     # column stay two groups.  It is what charges.csv already binds on, so the number
     # on the screen and the number in the file now come from one rule instead of two
     # that agree by coincidence.
+    if since is not None:
+        # The fall must have been IN PROGRESS when the operator committed, or later.
+        # Measuring from its start with a fall-length grace was too generous: a speck
+        # that fell forty seconds before the click still qualified, which is the very
+        # case this exists to exclude.  A droplet dropped and then clicked ends after
+        # the click; a stray that already landed does not.
+        falls = [f for f in falls
+                 if (f.tTop or 0.0) + float(f.seconds) >= float(since) - 2.0]
     groups = dropletGroups(falls)
     if not groups:
         return []
@@ -2848,6 +2869,13 @@ def usableSpeed(t, now, speed, sinceChange = None):
     """
     v = steadySpeed(t, now, speed, sinceChange)
     hist = t.speedHistory
+    # A verdict needs a speed that means something.  "too slow for 0.2-0.5, DISCARD"
+    # and "0.20 gr/s -- USABLE" arrived two seconds apart on one id whose speed was
+    # swinging from -0.04 to 0.20: nothing that unstable should be judged at all.
+    if len(hist) >= 4:
+        spread = max(x for _ts, x in hist) - min(x for _ts, x in hist)
+        if spread > SPEED_UNSTABLE_GRID_S:
+            return v, None
     span = hist[-1][0] - hist[0][0] if len(hist) > 1 else 0.0
     was = getattr(t, "speedVerdict", None)
     lo, hi = MIN_SPEED, MAX_SPEED
@@ -2930,6 +2958,7 @@ TARGET_HISTORY = {}         # column key -> [(t, implied balance voltage)]
 TARGET_STABLE_FRAC = 0.12
 TARGET_MIN_SAMPLES = 6
 TARGET_HALF_STEP = 0.5
+TARGET_GIVE_UP_S = 25.0         # ...after this long unsettled, stop promising a number
 
 
 def steadyTarget(t, now, ub, volts):
@@ -3126,6 +3155,9 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
         # droplet falling too slowly be told the same instead of that it was too slow.
         # Both were the wrong question answered first.
         shown, ok = usableSpeed(t, now, speed, sinceChange)
+        if ok is None:
+            return ("picked id %d -- moving too unevenly to judge; let it settle"
+                    % t.id, (0, 220, 255), None)
         if ok:
             return ("picked id %d falls %.2f gr/s -- USABLE, balance it on `0`"
                     % (t.id, shown), (0, 255, 0), True)
@@ -3269,6 +3301,14 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
                 % (t.id, drift), (0, 0, 255), False)
     target, steady, step = steadyTarget(t, now, ub, volts)
     if not steady:
+        # ...and if it never settles, say that instead of asking forever.  An operator
+        # tuned one droplet from 2:19 to the end of the session and never got a usable
+        # number out of the aid, because the estimates never agreed for long enough.
+        hist = TARGET_HISTORY.get(int(round(float(t.pos[0]) / CHARGE_COLUMN_PX)), [])
+        if hist and now - hist[0][0] >= TARGET_GIVE_UP_S:
+            return ("picked id %d will not hold still enough to measure -- %s to about "
+                    "%d V, or spray again" % (t.id, way, round(target)),
+                    (0, 140, 255), None)
         return ("picked id %d off balance by %s%.1f%% -- still calculating; %s by "
                 "about %d V to slow it down" % (t.id, about, pct, way, abs(step)),
                 (0, 140, 255), None)
@@ -3821,6 +3861,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     pickedDoubt = None              # (when, before, after) when a hand-over looked wrong
     pickedLevel = None              # the field state when the pick was last SEEN
     lastPickedId = None             # ...and which track it was, to drop stale banners
+    committedAt = None              # when the operator took charge of this droplet
     noisySince = None               # when the detection count started running high
     lastVoltBucket = None           # the plate voltage last seen, bucketed to 10 V...
     voltsChangedAt = -1e9           # ...and when it changed, for CHARGE_SETTLE_S
@@ -4429,6 +4470,13 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                     return True       # nothing to contradict
                                 if liftWatch.lifting and v >= 0:
                                     return False      # not rising during a lift
+                                if abs(was) > BALANCED_MAX and abs(v) > BALANCED_MAX \
+                                        and (v > 0) != (was > 0):
+                                    # One is going up and the other down.  At 249 V an
+                                    # operator's rising droplet was handed to a falling
+                                    # one, which no speed tolerance should ever allow:
+                                    # direction is not a matter of degree.
+                                    return False
                                 return abs(v - was) <= STEAL_SPEED_GAP * 2.0
                             near = [q for q in live
                                     if q is not picked and not q.miss
@@ -4761,6 +4809,10 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     if nowPicked != lastPickedId:
                         forgetHeld("picked")          # it is about somebody else now
                         lastPickedId = nowPicked
+                    if picked is not None and committedAt is None:
+                        committedAt = now             # the measurement starts here
+                    elif picked is None and chosenX is None:
+                        committedAt = None
                     if (picked is not None and pickedSeen
                             and now - pickedSeen >= PICK_SEARCH_S):
                         urgent = (("lost your droplet %.0fs ago -- it may be moving too "
@@ -4843,7 +4895,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # the square was boxed, balanced and about to be dropped.
                         mine = dropletFalls(falls,
                                             float(picked.pos[0]) if picked is not None
-                                            else chosenX)
+                                            else chosenX,
+                                            committedAt)
                         # Follow the group, not the coordinate.  chosenX was pinned
                         # where the droplet happened to be when it settled, and the
                         # count is "the falls nearest that x" -- so when this droplet's
