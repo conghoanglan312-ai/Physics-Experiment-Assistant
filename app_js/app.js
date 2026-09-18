@@ -19,6 +19,13 @@ const videoPlaceholder = document.getElementById("videoPlaceholder");
 const videoContainer = document.getElementById("videoContainer");
 const feedHint = document.getElementById("feedHint");
 const feedStatus = document.getElementById("feedStatus");
+const feedTitle = document.getElementById("feedTitle");
+const emptyStateStartButton = document.getElementById("emptyStateStartButton");
+const sessionTimer = document.getElementById("sessionTimer");
+const sessionTimerText = document.getElementById("sessionTimerText");
+
+const notificationList = document.getElementById("notificationList");
+const notificationPlaceholder = document.getElementById("notificationPlaceholder");
 
 const dropletLabel = document.getElementById("dropletLabel");
 const dropletRing = document.getElementById("dropletRing");
@@ -27,7 +34,6 @@ const dropletVoltage = document.getElementById("dropletVoltage");
 const dropletFallTime = document.getElementById("dropletFallTime");
 const dropletVelocity = document.getElementById("dropletVelocity");
 const dropletField = document.getElementById("dropletField");
-const dropletNote = document.getElementById("dropletNote");
 
 const state = {
   messages: [],
@@ -42,6 +48,16 @@ const state = {
   // the droplet was actually falling). Held steady the same way once the
   // field goes back to "work" or "lift", since the droplet isn't falling then.
   lastFallSeconds: null,
+  // Whether the current/last-started live session is the bundled demo clip
+  // rather than a real camera -- drives the LIVE vs DEMO labeling.
+  isDemo: false,
+  // Wall-clock bookkeeping for the "elapsed session time" badge.
+  sessionStartTs: null,
+  sessionTimerInterval: null,
+  // Used to notice droplet-pick and suitability *transitions* so the Message
+  // panel gets one note per real event rather than one per poll.
+  lastDropletLabel: null,
+  lastSuitable: null,
 };
 
 function pythonLen(text) {
@@ -278,6 +294,88 @@ function addMessage(role, content, animate = true) {
   typesetChat(chatHistory);
 }
 
+// ---------------------------------------------------------------------------
+//  Notifications panel (right column).
+//
+//  Contextual experiment feedback (errors, a droplet becoming suitable, a
+//  session ending, etc.) is surfaced here, not inside the AI chat -- the
+//  chat panel is for talking with the tutor, not for status updates. The
+//  newest notification is inserted at the top; existing cards animate
+//  downward (a small FLIP) to make room. Once the panel is full, the oldest
+//  (bottom-most) card fades out and is dropped.
+// ---------------------------------------------------------------------------
+const NOTIFICATION_ICONS = { info: "ℹ️", success: "✅", warning: "⚠️", error: "🛑" };
+const MAX_NOTIFICATIONS = 6;
+
+function createNotificationItem(kind, text) {
+  const item = document.createElement("div");
+  item.className = `notification-item ${kind} notification-entering`;
+  item.addEventListener("animationend", () => item.classList.remove("notification-entering"), { once: true });
+
+  const icon = document.createElement("span");
+  icon.className = "icon";
+  icon.textContent = NOTIFICATION_ICONS[kind] || NOTIFICATION_ICONS.info;
+
+  const body = document.createElement("span");
+  body.className = "notif-text";
+  body.textContent = text;
+
+  const time = document.createElement("span");
+  time.className = "notif-time";
+  time.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  item.append(icon, body, time);
+  return item;
+}
+
+function removeNotification(el) {
+  if (!el || el.classList.contains("notification-leaving")) return;
+  el.style.transition = "";
+  el.style.transform = "";
+  el.classList.add("notification-leaving");
+  el.addEventListener("animationend", () => {
+    el.remove();
+    if (!notificationList.querySelector(".notification-item")) {
+      notificationPlaceholder.classList.remove("hidden");
+    }
+  }, { once: true });
+}
+
+function pushSystemMessage(kind, text) {
+  notificationPlaceholder.classList.add("hidden");
+
+  const existing = Array.from(notificationList.querySelectorAll(".notification-item"));
+  // Once the panel is full, the card about to be pushed off the bottom is
+  // handled separately below -- it should fade out in place, not join the
+  // "settle downward" animation of the cards that are staying.
+  const overflow = existing.length >= MAX_NOTIFICATIONS ? existing[existing.length - 1] : null;
+  const settling = overflow ? existing.slice(0, -1) : existing;
+
+  const oldTops = new Map();
+  settling.forEach(el => oldTops.set(el, el.getBoundingClientRect().top));
+
+  const item = createNotificationItem(kind, text);
+  notificationList.prepend(item);
+
+  // FLIP: measure where each staying card now sits after the new one pushed
+  // it down, snap it back to where it was with a transform, then release
+  // that transform so it transitions smoothly into its new spot.
+  settling.forEach(el => {
+    const oldTop = oldTops.get(el);
+    const newTop = el.getBoundingClientRect().top;
+    const delta = oldTop - newTop;
+    if (!delta) return;
+    el.style.transition = "none";
+    el.style.transform = `translateY(${delta}px)`;
+    requestAnimationFrame(() => {
+      el.style.transition = "transform .3s ease";
+      el.style.transform = "";
+    });
+  });
+
+  if (overflow) removeNotification(overflow);
+}
+
 const THINKING_MESSAGES = [
   "Thinking…",
   "Reviewing droplet fall data…",
@@ -358,6 +456,7 @@ function openAi() {
   aiPanel.classList.add("open");
   aiPanel.setAttribute("aria-hidden", "false");
   aiFab.setAttribute("aria-expanded", "true");
+  aiFab.classList.remove("has-unread");
   aiPromptBubble.style.display = "none";
   scrollChat();
   aiInput.focus();
@@ -483,8 +582,54 @@ async function sendQuery() {
 
 // A bundled fixture that ships with the pipeline's own test suite -- lets
 // the feed be tried with no camera or dongle attached. Adjust this if your
-// checkout keeps its fixtures somewhere else.
+// checkout keeps its fixtures somewhere else. This is an internal detail --
+// it is never shown to the user; see DEMO_LABEL below for what they see.
 const DEMO_CLIP_SOURCE = "app_js/fixtures/demo_clip.mp4";
+const DEMO_LABEL = "the bundled demo clip";
+
+const FEED_LABELS = {
+  offline: { text: "[ MICROSCOPIC VIEW ] · OFFLINE", cls: "offline" },
+  live:    { text: "[ LIVE MICROSCOPIC VIEW ] · LIVE", cls: "live" },
+  demo:    { text: "[ DEMO MICROSCOPIC VIEW ] · DEMO", cls: "demo" },
+};
+
+function setFeedState(mode) {
+  const info = FEED_LABELS[mode] || FEED_LABELS.offline;
+  feedTitle.textContent = info.text;
+  feedTitle.className = `feed-title ${info.cls}`;
+}
+
+// ---------------------------------------------------------------------------
+//  Elapsed-time badge for the current live/demo session (top-left of the
+//  video). This is a plain wall-clock readout of how long the session has
+//  been running -- it does not come from the CV pipeline and has no effect
+//  on it.
+// ---------------------------------------------------------------------------
+function formatElapsed(totalSeconds) {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const hh = Math.floor(s / 3600);
+  const mm = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  const pad = n => String(n).padStart(2, "0");
+  return hh > 0 ? `${pad(hh)}:${pad(mm)}:${pad(ss)}` : `${pad(mm)}:${pad(ss)}`;
+}
+
+function startSessionTimer() {
+  state.sessionStartTs = Date.now();
+  sessionTimerText.textContent = formatElapsed(0);
+  sessionTimer.classList.remove("hidden");
+  if (state.sessionTimerInterval) clearInterval(state.sessionTimerInterval);
+  state.sessionTimerInterval = setInterval(() => {
+    sessionTimerText.textContent = formatElapsed((Date.now() - state.sessionStartTs) / 1000);
+  }, 1000);
+}
+
+function stopSessionTimer() {
+  if (state.sessionTimerInterval) clearInterval(state.sessionTimerInterval);
+  state.sessionTimerInterval = null;
+  state.sessionStartTs = null;
+  sessionTimer.classList.add("hidden");
+}
 
 async function startLive(explicitSource) {
   const source = (explicitSource ?? liveSourceInput.value).trim();
@@ -493,10 +638,12 @@ async function startLive(explicitSource) {
   liveSourceInput.disabled = true;
   demoClipButton.disabled = true;
   feedStatus.className = "feed-status";
-  feedStatus.textContent = source
-    ? `Starting playback for "${source}"...`
-    : "Running bench check and starting capture...";
-  feedStatus.classList.remove("hidden", "error", "live");
+  feedStatus.textContent = state.isDemo
+    ? `Starting ${DEMO_LABEL}...`
+    : source
+      ? `Starting playback for "${source}"...`
+      : "Running bench check and starting capture...";
+  feedStatus.classList.remove("hidden", "error", "live", "demo");
 
   try {
     const response = await fetch("/api/live/start", {
@@ -509,15 +656,18 @@ async function startLive(explicitSource) {
 
     state.live = payload;
     showLiveFeed(payload.url, payload.device, payload.source);
-    liveButton.textContent = "■ Stop live feed";
+    startSessionTimer();
+    liveButton.textContent = "■ Stop Live Feed";
     liveButton.disabled = false;
     scheduleLivePoll(0);
   } catch (error) {
     state.live = null;
     showFallback();
-    feedStatus.textContent = error?.message || "Please plug in the dongle first.";
-    feedStatus.className = "feed-status error";
-    liveButton.textContent = "▶ Start live feed";
+    feedStatus.classList.add("hidden");
+    pushSystemMessage("error", `Couldn't start the ${state.isDemo ? "demo video" : "live feed"} — ${
+      error?.message || "please plug in the dongle first."
+    }`);
+    liveButton.textContent = "▶ Start Live Feed";
     liveButton.disabled = false;
     liveSourceInput.disabled = false;
     demoClipButton.disabled = false;
@@ -530,10 +680,16 @@ function showLiveFeed(url, device, source) {
   videoPlaceholder.classList.add("hidden");
   liveFeed.src = `${url}?t=${Date.now()}`;
   liveFeed.classList.remove("hidden");
-  feedStatus.textContent = (typeof source === "string" && source && !/^-?\d+$/.test(source))
-    ? `● LIVE — playing ${source}`
-    : `● LIVE — device ${device}`;
-  feedStatus.className = "feed-status live";
+  if (state.isDemo) {
+    feedStatus.textContent = `● DEMO — playing ${DEMO_LABEL}`;
+    feedStatus.className = "feed-status demo";
+  } else {
+    feedStatus.textContent = (typeof source === "string" && source && !/^-?\d+$/.test(source))
+      ? `● LIVE — playing "${source}"`
+      : `● LIVE — device ${device}`;
+    feedStatus.className = "feed-status live";
+  }
+  setFeedState(state.isDemo ? "demo" : "live");
   feedHint.classList.remove("hidden");
   liveSourceInput.disabled = true;
   demoClipButton.disabled = true;
@@ -553,13 +709,19 @@ function showFallback() {
   feedHint.classList.add("hidden");
   liveSourceInput.disabled = false;
   demoClipButton.disabled = false;
+  setFeedState("offline");
 }
 
 demoClipButton.addEventListener("click", () => {
   if (state.live) return;
-  liveSourceInput.value = DEMO_CLIP_SOURCE;
+  state.isDemo = true;
+  // The input stays untouched (no internal fixture path shown in it) --
+  // the demo status text and the DEMO feed-title label are what tell the
+  // user a demo is running.
   startLive(DEMO_CLIP_SOURCE);
 });
+
+emptyStateStartButton.addEventListener("click", () => liveButton.click());
 
 function showClickRipple(containerX, containerY) {
   const ripple = document.createElement("div");
@@ -627,14 +789,14 @@ async function stopLive() {
       body: JSON.stringify({ token: state.live.token }),
     });
   } catch (error) {
-    feedStatus.textContent = `Failed to stop live feed: ${error.message}`;
-    feedStatus.className = "feed-status error";
+    pushSystemMessage("error", `Couldn't confirm the feed stopped — ${error.message}`);
   } finally {
     state.live = null;
     state.lastFieldOnVoltage = null;
     state.lastFallSeconds = null;
+    stopSessionTimer();
     showFallback();
-    liveButton.textContent = "▶ Start live feed";
+    liveButton.textContent = "▶ Start Live Feed";
     liveButton.disabled = false;
     scheduleLivePoll(0);   // clears the panel back to placeholders
   }
@@ -688,6 +850,28 @@ function renderSelectedDroplet(selected) {
   const data = selected || {};
   const verdict = SUITABILITY[data.suitable] || SUITABILITY.unknown;
 
+  // A genuinely new pick (not just the same droplet polled again) gets a
+  // one-time guidance note; a suitability change (confirmed suitable, or
+  // dropping back out after being suitable) gets its own note. Both reuse
+  // the server's own note text -- nothing here is invented client-side.
+  if (data.label && data.label !== state.lastDropletLabel) {
+    if (data.note) pushSystemMessage("info", `${data.label} selected — ${data.note}`);
+    state.lastDropletLabel = data.label;
+    state.lastSuitable = null;
+  }
+  if (data.suitable && data.suitable !== state.lastSuitable) {
+    if (data.suitable === "yes") {
+      pushSystemMessage("success", `Valid measurement — ${data.label || "the droplet"} is suitable.${data.note ? ` ${data.note}` : ""}`);
+    } else if (data.suitable === "no" && state.lastSuitable === "yes") {
+      pushSystemMessage("warning", `${data.label || "The droplet"} is no longer suitable.${data.note ? ` ${data.note}` : ""}`);
+    }
+    state.lastSuitable = data.suitable;
+  }
+  if (!data.label) {
+    state.lastDropletLabel = null;
+    state.lastSuitable = null;
+  }
+
   dropletLabel.textContent = data.label || MISSING;
   dropletStatus.textContent = verdict.text;
   dropletRing.className = `droplet-ring ${verdict.ring}`;
@@ -697,8 +881,6 @@ function renderSelectedDroplet(selected) {
   showMeasurement(dropletFallTime, fallSecondsToDisplay(data), "s", 1);
   showMeasurement(dropletVelocity, data.speedGridPerSec, "grid/s", 2);
   dropletField.textContent = data.fieldState || MISSING;
-
-  dropletNote.textContent = data.note || "";
 }
 
 // The pipeline rewrites its status about once a second, so polling faster than
@@ -727,10 +909,10 @@ async function pollLiveState() {
     state.live = null;
     state.lastFieldOnVoltage = null;
     state.lastFallSeconds = null;
+    stopSessionTimer();
     showFallback();
-    feedStatus.textContent = "The live session ended.";
-    feedStatus.className = "feed-status error";
-    liveButton.textContent = "▶ Start live feed";
+    pushSystemMessage("warning", `The ${state.isDemo ? "demo playback" : "live session"} ended.`);
+    liveButton.textContent = "▶ Start Live Feed";
     liveButton.disabled = false;
   }
 
@@ -794,7 +976,14 @@ aiInput.addEventListener("keydown", event => {
 });
 sendButton.addEventListener("click", sendQuery);
 
-liveButton.addEventListener("click", () => state.live ? stopLive() : startLive());
+liveButton.addEventListener("click", () => {
+  if (state.live) {
+    stopLive();
+  } else {
+    state.isDemo = false;
+    startLive();
+  }
+});
 
 fallbackVideo.addEventListener("error", () => {
   fallbackVideo.classList.add("hidden");

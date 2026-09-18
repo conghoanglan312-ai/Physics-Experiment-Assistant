@@ -33,32 +33,43 @@
     <section class="main-grid">
       <div class="video-column">
         <div class="video-container" id="videoContainer">
+          <div id="sessionTimer" class="session-timer hidden" aria-hidden="true">
+            <span class="session-dot"></span><span id="sessionTimerText">00:00</span>
+          </div>
           <img id="liveFeed" class="live-feed-img hidden" alt="Live microscopic feed" draggable="false" />
           <video id="fallbackVideo" class="fallback-video hidden" autoplay muted loop playsinline>
             <source src="/app_test/test_footage.mp4" type="video/mp4" />
           </video>
-          <div id="videoPlaceholder" class="video-placeholder">MICROSCOPIC CAMERA FEED</div>
+          <div id="videoPlaceholder" class="video-placeholder">
+            <div class="empty-state-icon" aria-hidden="true">🔬</div>
+            <div class="empty-state-title">No camera feed detected</div>
+            <div class="empty-state-body">Connect the microscope camera or start the live feed to begin.</div>
+            <button id="emptyStateStartButton" class="live-button empty-state-cta" type="button">▶ Start Live Feed</button>
+          </div>
         </div>
 
-        <div class="feed-title">[ LIVE MICROSCOPIC VIEW ]</div>
+        <div class="feed-title" id="feedTitle">[ MICROSCOPIC VIEW ]</div>
         <div id="feedStatus" class="feed-status hidden"></div>
 
         <div class="feed-controls">
-          <button id="liveButton" class="live-button">▶ Start live feed</button>
-          <input
-            id="liveSourceInput"
-            class="live-source-input"
-            type="text"
-            placeholder="Camera index or clip path (optional)"
-            aria-label="Camera index or clip path"
-            autocomplete="off"
-          />
+          <div class="feed-mode-group">
+            <button id="liveButton" class="live-button">▶ Start Live Feed</button>
+            <input
+              id="liveSourceInput"
+              class="live-source-input"
+              type="text"
+              placeholder="Camera index (optional)"
+              aria-label="Camera index"
+              autocomplete="off"
+            />
+          </div>
+          <div class="feed-mode-divider" aria-hidden="true">or</div>
           <button
             id="demoClipButton"
             class="demo-button"
             type="button"
             title="Runs a bundled test clip through the pipeline -- no apparatus or dongle needed"
-          >🎬 Try demo clip</button>
+          >🎬 Try Demo Video</button>
         </div>
         <div id="feedHint" class="feed-hint hidden">🖱️ Click a droplet in the feed to select it</div>
       </div>
@@ -81,9 +92,17 @@
             <div class="info-item"><span class="info-label">VELOCITY</span><span id="dropletVelocity">—</span></div>
             <div class="info-item"><span class="info-label">FIELD</span><span id="dropletField" class="field-value">—</span></div>
           </div>
-          <div class="droplet-note" id="dropletNote"></div>
         </div>
         <div class="feed-title">[ DROPLET ANALYSIS ]</div>
+
+        <div class="notification-panel">
+          <div class="notification-list" id="notificationList">
+            <div class="notification-placeholder" id="notificationPlaceholder">
+              Start a session and click a droplet to see notifications here.
+            </div>
+          </div>
+        </div>
+        <div class="feed-title">[ NOTIFICATIONS ]</div>
       </aside>
     </section>
 
