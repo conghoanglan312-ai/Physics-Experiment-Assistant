@@ -65,38 +65,23 @@
 
       <aside class="info-column">
         <div class="info-panel">
-          <div class="droplet-preview-box">
-            <div class="droplet-info">
-              <div class="droplet-title">SELECTED DROPLET</div>
+          <div class="droplet-id-row">
+            <div class="droplet-ring unknown" id="dropletRing"></div>
+            <div class="droplet-id-text">
               <div class="droplet-id" id="dropletLabel">—</div>
-            </div>
-            <div class="droplet-indicator">
-              <div class="droplet-ring unknown" id="dropletRing"></div>
+              <div class="droplet-status-word" id="dropletStatus">—</div>
             </div>
           </div>
 
           <!-- Every value here comes from cv/api.py through /api/live/status.
                A field the CV API did not provide stays a dash. -->
           <div class="info-stats">
-            <div class="info-item"><span class="info-label">STATUS</span>: <span id="dropletStatus">—</span></div>
-            <div class="info-item"><span class="info-label">VOLTAGE</span>: <span id="dropletVoltage">—</span></div>
-            <div class="info-item"><span class="info-label">FALL TIME</span>: <span id="dropletFallTime">—</span></div>
-            <div class="info-item"><span class="info-label">VELOCITY</span>: <span id="dropletVelocity">—</span></div>
-            <div class="droplet-note" id="dropletNote"></div>
+            <div class="info-item"><span class="info-label">VOLTAGE</span><span id="dropletVoltage">—</span></div>
+            <div class="info-item"><span class="info-label">FALL TIME</span><span id="dropletFallTime">—</span></div>
+            <div class="info-item"><span class="info-label">VELOCITY</span><span id="dropletVelocity">—</span></div>
+            <div class="info-item"><span class="info-label">FIELD</span><span id="dropletField" class="field-value">—</span></div>
           </div>
-
-          <div class="reference-block">
-            <div class="divider"></div>
-            <div class="reference-title">REFERENCE DATA</div>
-
-            <div class="reference-item"><span>Oil Density</span><span>981 kg·m⁻³</span></div>
-            <div class="reference-item"><span>Gravity</span><span>9.78 m·s⁻²</span></div>
-            <div class="reference-item"><span>Air Viscosity</span><span>1.83×10⁻⁵ kg·m⁻¹·s⁻¹</span></div>
-            <div class="reference-item"><span>Descent Distance</span><span>1.60×10⁻³ m</span></div>
-            <div class="reference-item"><span>Correction Constant</span><span>8.22×10⁻³ m·Pa</span></div>
-            <div class="reference-item"><span>Atmospheric Pressure</span><span>1.0098×10⁵ Pa</span></div>
-            <div class="reference-item"><span>Plate Distance</span><span>5.00×10⁻³ m</span></div>
-          </div>
+          <div class="droplet-note" id="dropletNote"></div>
         </div>
         <div class="feed-title">[ DROPLET ANALYSIS ]</div>
       </aside>

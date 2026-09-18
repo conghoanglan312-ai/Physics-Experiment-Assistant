@@ -22,7 +22,6 @@
   --panel-border: rgba(128, 128, 128, 0.25);
   --panel-border-soft: rgba(128, 128, 128, 0.20);
   --panel-border-faint: rgba(128, 128, 128, 0.12);
-  --divider: rgba(128, 128, 128, 0.30);
 
   --inset-bg: rgba(0, 0, 0, 0.25);
   --inset-bg-soft: rgba(0, 0, 0, 0.14);
@@ -110,7 +109,7 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
   100% { transform: translate(-5%, 3%) scale(1); }
 }
 
-.app { position: relative; z-index: 1; width: min(1450px, calc(100% - 48px)); margin: 0 auto; padding: 20px 0 80px; }
+.app { position: relative; z-index: 1; width: min(1650px, calc(100% - 48px)); margin: 0 auto; padding: 20px 0 80px; }
 
 .title-box {
   position: relative;
@@ -157,11 +156,13 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 
 .subtitle { text-align: center; opacity: 0.7; font-size: 22px; margin-top: 0; }
 
-.main-grid { display: grid; grid-template-columns: 7fr 3fr; gap: 24px; align-items: start; }
+.main-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 330px); gap: 18px; align-items: stretch; }
+.info-column { display: flex; flex-direction: column; gap: 10px; }
+.info-column .info-panel { flex: 1; }
 
 .video-container {
   position: relative;
-  width: 100%; height: 500px;
+  width: 100%; height: min(68vh, 720px); min-height: 520px;
   background: var(--panel-bg);
   backdrop-filter: blur(15px);
   -webkit-backdrop-filter: blur(15px);
@@ -181,7 +182,16 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
   font-size: 22px; letter-spacing: 3px;
 }
 
-.live-feed-img, .fallback-video { width: 100%; height: 100%; object-fit: contain; border-radius: 15px; user-select: none; background: #000; }
+.live-feed-img, .fallback-video {
+  width: 100%; height: 100%; object-fit: contain; border-radius: 15px; user-select: none; background: #000;
+  /* The pipeline burns a status/timestamp line into the very top of each
+     frame and, sometimes, a red diagnostic line into the very bottom. Both
+     are internal debug overlays, not meant for the student-facing view, so
+     they're clipped out of the displayed frame here. This only affects
+     painting/hit-testing at the clipped edges -- the click-to-select math in
+     app.js still maps against the full, unclipped frame. */
+  clip-path: inset(6% 0 7% 0);
+}
 .fallback-video { pointer-events: none; }
 .live-feed-img { pointer-events: auto; cursor: crosshair; }
 
@@ -242,40 +252,35 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 .live-button:disabled { background: var(--disabled-bg); color: var(--disabled-text); cursor: not-allowed; }
 
 .info-panel {
-  min-height: 500px;
+  min-height: unset;
   background: var(--panel-bg);
   backdrop-filter: blur(15px);
   -webkit-backdrop-filter: blur(15px);
-  border-radius: 20px;
+  border-radius: 18px;
   border: 1px solid var(--panel-border);
-  padding: 25px;
+  padding: 18px 16px;
   box-shadow: var(--card-shadow);
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  gap: 14px;
+  gap: 16px;
 }
 
-.droplet-preview-box { width:100%; height:90px; flex:none; background:var(--inset-bg); border-radius:15px; display:flex; justify-content:space-between; align-items:center; padding:0 20px; color:rgba(var(--text-rgb),.6); font-size:14px; letter-spacing:2px; }
-.info-stats { display:flex; flex-direction:column; justify-content:center; }
-.reference-block { display:flex; flex-direction:column; }
-.droplet-info { display:flex; flex-direction:column; gap:8px; }
-.droplet-title { font-size:19px; font-weight:700; letter-spacing:2px; color:rgba(var(--text-rgb),.9); }
-.droplet-id { font-size:16px; color:rgba(var(--text-rgb),.75); margin-top:-10px; }
-.droplet-indicator { width:55px; height:55px; display:flex; justify-content:center; align-items:center; }
-.droplet-ring { width:55px; height:55px; border-radius:50%; border:7px solid grey; position:relative; }
+.droplet-id-row { display:flex; align-items:center; gap:12px; }
+.droplet-ring { width:46px; height:46px; flex:none; border-radius:50%; border:5px solid grey; position:relative; }
 .droplet-ring.suitable { border-color:var(--success); box-shadow:0 0 15px var(--success-glow); }
 .droplet-ring.unsuitable { border-color:var(--danger); box-shadow:0 0 15px rgba(239,68,68,.6); }
 /* Suitability has three answers, not two: the third is "not enough data yet",
    which must not be shown as either a pass or a fail. */
 .droplet-ring.unknown { border-color:var(--warning); box-shadow:0 0 15px var(--warning-glow); }
-.droplet-note { font-size:13px; line-height:1.35; opacity:.7; margin-top:8px; }
-.info-item { font-size:18px; margin:5px 0; }
-.info-label { font-weight:700; display:inline-block; width:90px; }
-.divider { height:1px; background:var(--divider); margin:10px 0; }
-.reference-title { font-size:18px; font-weight:700; letter-spacing:1.5px; margin-top:-5px; margin-bottom:-2px; }
-.reference-item { display:flex; justify-content:space-between; gap:12px; font-size:14px; margin:2px 0; opacity:.75; }
-.reference-item span:last-child { text-align:right; }
+.droplet-id-text { min-width:0; }
+.droplet-id { font-size:15px; font-weight:700; color:rgba(var(--text-rgb),.92); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.droplet-status-word { font-size:12.5px; margin-top:2px; opacity:.85; }
+.info-stats { display:flex; flex-direction:column; gap:10px; padding-top:4px; border-top:1px solid var(--panel-border-soft); }
+.info-item { display:flex; justify-content:space-between; align-items:baseline; gap:10px; }
+.info-item span:last-child { font-size:16px; font-weight:600; font-variant-numeric:tabular-nums; }
+.info-label { font-size:11px; font-weight:700; letter-spacing:1px; opacity:.5; }
+.field-value { text-transform: capitalize; }
+.droplet-note { font-size:12px; line-height:1.4; opacity:.6; border-top:1px solid var(--panel-border-soft); padding-top:12px; margin-top:auto; }
 
 .guide-section { margin-top: 50px; }
 .guide-title { font-size:28px; font-weight:700; margin:0 0 18px; }
@@ -398,7 +403,7 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 @media (max-width: 900px) {
   .app { width:calc(100% - 30px); }
   .main-grid { grid-template-columns:1fr; }
-  .info-panel { height:auto; min-height:500px; }
+  .info-panel { flex-direction:column; height:auto; min-height:unset; }
 }
 
 @media (max-width: 600px) {

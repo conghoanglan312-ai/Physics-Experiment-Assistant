@@ -12,6 +12,7 @@ import mimetypes
 import os
 import secrets
 import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -170,10 +171,11 @@ def process_is_running(handle) -> bool:
 # ---------------------------------------------------------------------------
 FALL_SPEED_MIN, FALL_SPEED_MAX = 0.2, 0.5        # grid/s, with the field off
 BALANCE_VOLTS_MIN, BALANCE_VOLTS_MAX = 150.0, 250.0
-# How near balance the droplet has to be held before the plate voltage counts as
-# THIS droplet's balance voltage rather than just wherever the knob happens to
-# be -- cv/pipeline.py's own BALANCE_TARGET_PCT.
-BALANCED_WITHIN_PCT = 2.0
+# A reading has to hold on the same side of the two bands above for this long,
+# continuously, before the verdict actually changes. A single noisy sample --
+# a hand still settling the knob, a momentary tracker glitch -- must not flip
+# the light; only a real, sustained change in the droplet's numbers should.
+SETTLE_SECONDS = 3.0
 
 _selection_lock = threading.Lock()
 _selection = {
@@ -181,9 +183,11 @@ _selection = {
     "label": None,     # "Droplet 3": cv/api.py's convention is a label, never an id
     "picks": 0,        # how many distinct droplets have been picked this session
     "speed": None,     # the speed last seen while the plates were at 0 V...
-    "speedOk": None,
     "volts": None,     # ...and the voltage it was last held balanced at
-    "voltsOk": None,
+    "rangeState": None,   # tri-state: True (both readings in range), False
+                          # (something out), None (not enough data to judge yet)
+    "rangeSince": None,   # monotonic timestamp when rangeState last changed
+    "suitable": "unknown",  # the debounced verdict actually shown to the student
 }
 
 
@@ -191,7 +195,8 @@ def reset_selection():
     """Forget the current droplet. Called when a session starts or stops."""
     with _selection_lock:
         _selection.update(id=None, label=None, picks=0,
-                          speed=None, speedOk=None, volts=None, voltsOk=None)
+                           speed=None, volts=None,
+                           rangeState=None, rangeSince=None, suitable="unknown")
 
 
 def _number(value):
@@ -224,12 +229,11 @@ def selection_view(status, running):
     Every field is either a value cv/api.py provided or None -- a missing value
     stays missing all the way to the browser, which prints a dash for it.
 
-    `suitable` is "yes" / "no" / "unknown". The manual asks two questions about a
-    candidate droplet and they are answered at different moments: Ⅳ.2 times the
-    fall with the field OFF, Ⅳ.3 balances it with the field ON. So each answer is
-    kept for as long as the same droplet stays picked, and the verdict is
-    "unknown" until both have actually been observed. It is never inferred from
-    the one that has.
+    `suitable` is "yes" / "no" / "unknown", and it only changes once the two
+    readings below have sat on the same side of their bands for SETTLE_SECONDS
+    straight -- see the constant above. Until there has been at least one
+    balance-voltage reading AND one free-fall-speed reading for this droplet,
+    the verdict is "unknown"; it is never inferred from just one of the two.
     """
     if not running or not isinstance(status, dict):
         reset_selection()
@@ -238,69 +242,110 @@ def selection_view(status, running):
     voltage = _number(status.get("voltageV"))
     field = status.get("fieldState")
     picked = status.get("picked")
+    now = time.monotonic()
 
-    if not isinstance(picked, dict):
-        reset_selection()
-        view = _blank_selection()
-        # The plate voltage is the apparatus's own panel reading, not a property
-        # of any droplet, so it is worth showing even with nothing picked.
-        view["voltageV"] = voltage
-        view["fieldState"] = field
-        view["note"] = "Click a droplet in the feed to select it."
-        return view
-
-    droplet_id = picked.get("id")
-    speed = _number(picked.get("speedGridPerSec"))
-    fall = _number(picked.get("fallSeconds"))
-    balance = _number(picked.get("balancePercent"))
+    if isinstance(picked, dict):
+        droplet_id = picked.get("id")
+        speed = _number(picked.get("speedGridPerSec"))
+        fall = _number(picked.get("fallSeconds"))
+        balance = _number(picked.get("balancePercent"))
+    else:
+        # picked can go missing for a poll or several without the operator
+        # having picked anything new -- cv/api.py's own docstring notes the
+        # tracker routinely loses a motionless droplet during a hold, which
+        # is exactly when the balance voltage is being read. Treating that
+        # as "nothing picked" would throw away the readings right when they
+        # matter most, so it must NOT be confused with a fresh pick below.
+        droplet_id, speed, fall, balance = None, None, None, None
 
     with _selection_lock:
-        if _selection["id"] != droplet_id:
+        if droplet_id is not None and droplet_id != _selection["id"]:
             _selection.update(
                 id=droplet_id,
                 picks=_selection["picks"] + 1,
-                speed=None, speedOk=None, volts=None, voltsOk=None,
+                speed=None, volts=None,
+                rangeState=None, rangeSince=None, suitable="unknown",
             )
             _selection["label"] = "Droplet %d" % _selection["picks"]
+
+        if _selection["id"] is None:
+            # Nothing has actually been picked yet (as opposed to picked-but-
+            # momentarily-untracked) -- there is nothing to evaluate.
+            view = _blank_selection()
+            # The plate voltage is the apparatus's own panel reading, not a
+            # property of any droplet, so it is worth showing regardless.
+            view["voltageV"] = voltage
+            view["fieldState"] = field
+            view["note"] = "Click a droplet in the feed to select it."
+            return view
 
         if field == "off" and speed is not None:
             # Field off, so this speed IS the free-fall speed Ⅳ.2 judges.
             _selection["speed"] = speed
-            _selection["speedOk"] = FALL_SPEED_MIN <= speed <= FALL_SPEED_MAX
-        if (field == "work" and voltage is not None and balance is not None
-                and abs(balance) <= BALANCED_WITHIN_PCT):
-            # Held still against a live field: this voltage is its balance voltage.
+        if (field == "work" and voltage is not None):
+            # Held against a live field: this voltage IS its balance voltage.
             _selection["volts"] = voltage
-            _selection["voltsOk"] = BALANCE_VOLTS_MIN <= voltage <= BALANCE_VOLTS_MAX
 
         label = _selection["label"]
         free_fall = _selection["speed"]
-        speed_ok = _selection["speedOk"]
         balance_volts = _selection["volts"]
-        volts_ok = _selection["voltsOk"]
 
-    if speed_ok is False or volts_ok is False:
-        suitable = "no"
-    elif speed_ok and volts_ok:
-        suitable = "yes"
-    else:
-        suitable = "unknown"
+        speed_ok = None if free_fall is None else FALL_SPEED_MIN <= free_fall <= FALL_SPEED_MAX
+        volts_ok = None if balance_volts is None else BALANCE_VOLTS_MIN <= balance_volts <= BALANCE_VOLTS_MAX
 
-    if speed_ok is False:
-        note = "Falls at %.2f grid/s, outside %g-%g grid/s." % (
-            free_fall, FALL_SPEED_MIN, FALL_SPEED_MAX)
-    elif volts_ok is False:
-        note = "Balances at %d V, outside %g-%g V." % (
-            round(balance_volts), BALANCE_VOLTS_MIN, BALANCE_VOLTS_MAX)
-    elif suitable == "yes":
-        note = "Falls at %.2f grid/s and balances at %d V." % (
-            free_fall, round(balance_volts))
-    elif speed_ok is None and volts_ok is None:
+        # The joint condition the manual actually cares about: both readings
+        # in their band at once. None means there isn't a reading for both
+        # yet, so there is nothing to debounce -- it is simply unknown.
+        if speed_ok is None or volts_ok is None:
+            in_range = None
+        else:
+            in_range = speed_ok and volts_ok
+
+        if in_range != _selection["rangeState"]:
+            _selection["rangeState"] = in_range
+            _selection["rangeSince"] = now
+        # rangeSince is still None the very first time in_range comes back
+        # None too (nothing observed yet at all) -- there is nothing to time.
+        elapsed = 0.0 if _selection["rangeSince"] is None else now - _selection["rangeSince"]
+
+        if in_range is None:
+            _selection["suitable"] = "unknown"
+        elif elapsed >= SETTLE_SECONDS:
+            _selection["suitable"] = "yes" if in_range else "no"
+        # else: still settling -- keep whatever verdict was already showing,
+        # so a brief blip can't flip the light early in either direction.
+
+        suitable = _selection["suitable"]
+
+    if speed_ok is None and volts_ok is None:
         note = "Balance it, then cut to 0 V to time its fall."
     elif speed_ok is None:
         note = "Balanced at %d V. Cut to 0 V to measure its falling speed." % round(balance_volts)
-    else:
+    elif volts_ok is None:
         note = "Falls at %.2f grid/s. Balance it to read its balance voltage." % free_fall
+    elif in_range:
+        if suitable == "yes":
+            note = "Falls at %.2f grid/s and balances at %d V." % (
+                free_fall, round(balance_volts))
+        else:
+            remaining = max(0.0, SETTLE_SECONDS - elapsed)
+            note = "Falls at %.2f grid/s and balances at %d V -- confirming suitable in %.0fs." % (
+                free_fall, round(balance_volts), remaining)
+    else:
+        problems = []
+        if not speed_ok:
+            problems.append("falls at %.2f grid/s (needs %g-%g)" % (
+                free_fall, FALL_SPEED_MIN, FALL_SPEED_MAX))
+        if not volts_ok:
+            problems.append("balances at %d V (needs %g-%g)" % (
+                round(balance_volts), BALANCE_VOLTS_MIN, BALANCE_VOLTS_MAX))
+        reason = " and ".join(problems)
+        if suitable == "yes":
+            remaining = max(0.0, SETTLE_SECONDS - elapsed)
+            note = "Drifted out of range (%s) -- reverts to unsuitable in %.0fs if it stays there." % (
+                reason, remaining)
+        else:
+            note = "Currently %s." % reason
 
     return {
         "picked": True,
@@ -405,15 +450,15 @@ class Handler(BaseHTTPRequestHandler):
         if handle is not None and not running:
             clear_live()
 
-        try:
-            status = live_status()
-        except Exception:
-            status = None
-
-        if status and not running and status.get("phase") != "finished":
-            # The status file outlives the process that wrote it, so a session
-            # that died mid-run would otherwise keep reporting itself as running.
-            status = dict(status, phase="stopped")
+        status = None
+        if running:
+            # No process is writing the status file when nothing is running,
+            # so there is nothing to read -- skip the stat/open/json.load on
+            # every idle poll and just answer with running: False.
+            try:
+                status = live_status()
+            except Exception:
+                status = None
 
         self._json({
             "running": running,

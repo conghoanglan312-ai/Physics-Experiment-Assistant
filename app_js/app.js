@@ -26,6 +26,7 @@ const dropletStatus = document.getElementById("dropletStatus");
 const dropletVoltage = document.getElementById("dropletVoltage");
 const dropletFallTime = document.getElementById("dropletFallTime");
 const dropletVelocity = document.getElementById("dropletVelocity");
+const dropletField = document.getElementById("dropletField");
 const dropletNote = document.getElementById("dropletNote");
 
 const state = {
@@ -33,6 +34,14 @@ const state = {
   generating: false,
   live: null,
   livePoll: null,
+  // The last voltage reading seen while fieldState was "work". Kept so the
+  // panel can hold that number steady while the field is off or lifting,
+  // instead of re-printing whatever the (irrelevant) reading happens to be.
+  lastFieldOnVoltage: null,
+  // The last fall-time reading seen while fieldState was "off" (i.e. while
+  // the droplet was actually falling). Held steady the same way once the
+  // field goes back to "work" or "lift", since the droplet isn't falling then.
+  lastFallSeconds: null,
 };
 
 function pythonLen(text) {
@@ -622,6 +631,8 @@ async function stopLive() {
     feedStatus.className = "feed-status error";
   } finally {
     state.live = null;
+    state.lastFieldOnVoltage = null;
+    state.lastFallSeconds = null;
     showFallback();
     liveButton.textContent = "▶ Start live feed";
     liveButton.disabled = false;
@@ -651,6 +662,28 @@ function showMeasurement(element, value, unit, digits) {
   element.textContent = missing ? MISSING : `${Number(value).toFixed(digits)} ${unit}`;
 }
 
+function voltageToDisplay(data) {
+  // Only a genuine "work" reading is allowed to move the number. Anything
+  // else -- off, lift, or an unrecognized/missing fieldState -- just keeps
+  // showing whatever was last held. This is deliberately not an if/else over
+  // every possible fieldState value: the set of values this pipeline can
+  // send isn't something app.js should have to keep in exact sync with, so
+  // "not a fresh work reading" is treated as "hold", full stop.
+  if (data.fieldState === "work" && data.voltageV !== null && data.voltageV !== undefined) {
+    state.lastFieldOnVoltage = data.voltageV;
+  }
+  return state.lastFieldOnVoltage;
+}
+
+function fallSecondsToDisplay(data) {
+  // Same rule as voltageToDisplay, mirrored: only a genuine "off" reading
+  // (the droplet is actually falling) is allowed to move the number.
+  if (data.fieldState === "off" && data.fallSeconds !== null && data.fallSeconds !== undefined) {
+    state.lastFallSeconds = data.fallSeconds;
+  }
+  return state.lastFallSeconds;
+}
+
 function renderSelectedDroplet(selected) {
   const data = selected || {};
   const verdict = SUITABILITY[data.suitable] || SUITABILITY.unknown;
@@ -660,9 +693,10 @@ function renderSelectedDroplet(selected) {
   dropletRing.className = `droplet-ring ${verdict.ring}`;
   dropletRing.title = data.note || verdict.text;
 
-  showMeasurement(dropletVoltage, data.voltageV, "V", 0);
-  showMeasurement(dropletFallTime, data.fallSeconds, "s", 1);
+  showMeasurement(dropletVoltage, voltageToDisplay(data), "V", 0);
+  showMeasurement(dropletFallTime, fallSecondsToDisplay(data), "s", 1);
   showMeasurement(dropletVelocity, data.speedGridPerSec, "grid/s", 2);
+  dropletField.textContent = data.fieldState || MISSING;
 
   dropletNote.textContent = data.note || "";
 }
@@ -691,6 +725,8 @@ async function pollLiveState() {
 
   if (state.live && !payload.running) {
     state.live = null;
+    state.lastFieldOnVoltage = null;
+    state.lastFallSeconds = null;
     showFallback();
     feedStatus.textContent = "The live session ended.";
     feedStatus.className = "feed-status error";
@@ -705,6 +741,17 @@ async function pollLiveState() {
 const THEME_KEY = "millikanTheme";
 const themeToggle = document.getElementById("themeToggle");
 
+function forceRepaint() {
+  // Some browsers don't recomposite backdrop-filter panels (the glass guide
+  // cards especially) when only a CSS custom property changes -- here,
+  // --panel-bg/--guide-content-bg/etc. flipping with the theme. They stay
+  // visually stale until something else (a hover, a resize) forces a
+  // repaint. A one-frame opacity nudge forces one immediately instead.
+  const el = document.body;
+  el.style.opacity = "0.999";
+  requestAnimationFrame(() => { el.style.opacity = ""; });
+}
+
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   if (themeToggle) {
@@ -712,6 +759,7 @@ function applyTheme(theme) {
     themeToggle.textContent = isLight ? "☀️" : "🌙";
     themeToggle.setAttribute("aria-label", isLight ? "Switch to dark mode" : "Switch to light mode");
   }
+  forceRepaint();
 }
 
 function currentTheme() {
