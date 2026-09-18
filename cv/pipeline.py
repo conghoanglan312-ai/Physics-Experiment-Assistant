@@ -1999,6 +1999,9 @@ LIFT_VOLTS = 300.0
 # banner alternated USABLE / DISCARD every two seconds on one droplet.
 SPEED_MEDIAN_S = 5.0
 SPEED_GATE_SLACK = 0.15
+SPEED_UNSTABLE_GRID_S = 0.20    # a speed swinging wider than this is not a reading
+                                # -- the pair that produced DISCARD then USABLE two
+                                # seconds apart spanned 0.24
 # How long a droplet must go on being unbalanceable before it is crossed out.
 #
 # "Uncharged" needs the droplet seen at TWO voltages, and a droplet falling at full
@@ -2676,7 +2679,17 @@ def _spreadOf(rates):
     return float(np.percentile(rates, 75) - np.percentile(rates, 25))
 
 
-def dropletFalls(falls, nearX):
+# A spray fills the chamber with debris, and some of it falls 8 divisions in a legal
+# time with the field off.  Counting any legal fall near the picked column made the
+# banner announce "MEASURING -- 1 of 5 falls" about a speck that had fallen forty
+# seconds earlier, in a session where no droplet was ever balanced.  A measurement
+# begins when the operator commits -- clicks, or holds a droplet on `0` -- so a fall
+# from before that belongs to nobody.  The grace is one fall long: a droplet dropped
+# and THEN clicked is still theirs.
+COMMIT_GRACE_S = MAX_FALL_S
+
+
+def dropletFalls(falls, nearX, since = None):
     """The legal falls that belong to one droplet, grouped as `binding` groups them.
 
     The banner used to count falls within SAME_DROPLET_X_PX of a PINNED column, while
@@ -2703,6 +2716,14 @@ def dropletFalls(falls, nearX):
     # column stay two groups.  It is what charges.csv already binds on, so the number
     # on the screen and the number in the file now come from one rule instead of two
     # that agree by coincidence.
+    if since is not None:
+        # The fall must have been IN PROGRESS when the operator committed, or later.
+        # Measuring from its start with a fall-length grace was too generous: a speck
+        # that fell forty seconds before the click still qualified, which is the very
+        # case this exists to exclude.  A droplet dropped and then clicked ends after
+        # the click; a stray that already landed does not.
+        falls = [f for f in falls
+                 if (f.tTop or 0.0) + float(f.seconds) >= float(since) - 2.0]
     groups = dropletGroups(falls)
     if not groups:
         return []
@@ -2848,6 +2869,13 @@ def usableSpeed(t, now, speed, sinceChange = None):
     """
     v = steadySpeed(t, now, speed, sinceChange)
     hist = t.speedHistory
+    # A verdict needs a speed that means something.  "too slow for 0.2-0.5, DISCARD"
+    # and "0.20 gr/s -- USABLE" arrived two seconds apart on one id whose speed was
+    # swinging from -0.04 to 0.20: nothing that unstable should be judged at all.
+    if len(hist) >= 4:
+        spread = max(x for _ts, x in hist) - min(x for _ts, x in hist)
+        if spread > SPEED_UNSTABLE_GRID_S:
+            return v, None
     span = hist[-1][0] - hist[0][0] if len(hist) > 1 else 0.0
     was = getattr(t, "speedVerdict", None)
     lo, hi = MIN_SPEED, MAX_SPEED
@@ -2887,6 +2915,17 @@ def brownianFloorPct(vFree, seconds):
     return floor if floor <= BALANCE_FLOOR_MAX_PCT else None
 
 
+def forgetHeld(key):
+    """Drop a held line at once, because what it described is gone.
+
+    The hold keeps a number still long enough to read.  It also kept "picked id 22438
+    -- USABLE" on screen for two seconds after the pick had been dropped, while the
+    drawing had already switched from the operator's square to the aid's own ring: the
+    picture said one thing and the words another.
+    """
+    _shown.pop(key, None)
+
+
 def holdText(key, now, text, colour, seconds = BALANCE_SHOW_S):
     """Keep a changing number on the screen for `seconds` before letting it change.
 
@@ -2919,6 +2958,7 @@ TARGET_HISTORY = {}         # column key -> [(t, implied balance voltage)]
 TARGET_STABLE_FRAC = 0.12
 TARGET_MIN_SAMPLES = 6
 TARGET_HALF_STEP = 0.5
+TARGET_GIVE_UP_S = 25.0         # ...after this long unsettled, stop promising a number
 
 
 def steadyTarget(t, now, ub, volts):
@@ -3115,6 +3155,9 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
         # droplet falling too slowly be told the same instead of that it was too slow.
         # Both were the wrong question answered first.
         shown, ok = usableSpeed(t, now, speed, sinceChange)
+        if ok is None:
+            return ("picked id %d -- moving too unevenly to judge; let it settle"
+                    % t.id, (0, 220, 255), None)
         if ok:
             return ("picked id %d falls %.2f gr/s -- USABLE, balance it on `0`"
                     % (t.id, shown), (0, 255, 0), True)
@@ -3258,6 +3301,14 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
                 % (t.id, drift), (0, 0, 255), False)
     target, steady, step = steadyTarget(t, now, ub, volts)
     if not steady:
+        # ...and if it never settles, say that instead of asking forever.  An operator
+        # tuned one droplet from 2:19 to the end of the session and never got a usable
+        # number out of the aid, because the estimates never agreed for long enough.
+        hist = TARGET_HISTORY.get(int(round(float(t.pos[0]) / CHARGE_COLUMN_PX)), [])
+        if hist and now - hist[0][0] >= TARGET_GIVE_UP_S:
+            return ("picked id %d will not hold still enough to measure -- %s to about "
+                    "%d V, or spray again" % (t.id, way, round(target)),
+                    (0, 140, 255), None)
         return ("picked id %d off balance by %s%.1f%% -- still calculating; %s by "
                 "about %d V to slow it down" % (t.id, about, pct, way, abs(step)),
                 (0, 140, 255), None)
@@ -3442,6 +3493,21 @@ PICK_GONE_SHOW_S = 8.0        # how long the "it left, here is how to get it bac
 # 0.35 clears that case with margin while still demanding a third of the descent. The
 # residual test does the rest of the work: a track must lie on the line joining the two
 # crossings, which a droplet appearing near `1.6` does not.
+# A track that dies just ABOVE `0` on its way down was about to start a fall, and the
+# one place it is guaranteed to die is the line itself: grid rows are masked so nothing
+# is detected within gridClear of them, which is where the operator is told to park.
+# On 2026-09-17 a droplet was released from just above `0`, its track starved at the
+# line, it reappeared 20 px below as a new track with no `0` of its own, and a complete
+# fall went unrecorded.
+#
+# Rather than relax the mask -- tried twice, both times it lost a reference fall -- the
+# crossing the dying track was ABOUT to make is recorded from its own velocity.  It
+# becomes an unclaimed crossing like any other, and the track that reaches `1.6` adopts
+# it through adoptZeroCrossing, which still has to prove it fell along the line joining
+# the two and covered a third of the descent.  Nothing is claimed here; only offered.
+PREDICT_ZERO_BAND = 2.0        # how many gridClear widths above `0` still counts
+PREDICT_ZERO_MAX_S = 3.0       # ...and how far ahead its velocity may be believed
+
 ADOPT_MIN_SPAN = 0.35
 ADOPT_MAX_RESIDUAL_PX = 6.0   # furthest any of its points may sit off the line
 
@@ -3794,6 +3860,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     pickedGone = None               # (when, which edge) after it left, to prompt recovery
     pickedDoubt = None              # (when, before, after) when a hand-over looked wrong
     pickedLevel = None              # the field state when the pick was last SEEN
+    lastPickedId = None             # ...and which track it was, to drop stale banners
+    committedAt = None              # when the operator took charge of this droplet
     noisySince = None               # when the detection count started running high
     lastVoltBucket = None           # the plate voltage last seen, bucketed to 10 V...
     voltsChangedAt = -1e9           # ...and when it changed, for CHARGE_SETTLE_S
@@ -3937,7 +4005,14 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 # samples taken while everything was still catching up.
                 bucketNow = (int(round(volts / 10.0)) * 10
                              if volts is not None else None)
-                if bucketNow != lastVoltBucket:
+                # A panel that could not be READ is not a voltage that CHANGED.  This
+                # compared the raw reading, so every dropped read flipped the bucket to
+                # None and back and stamped voltsChangedAt twice.  With reads failing
+                # now and then, the settle window never elapsed: an operator tuning at a
+                # steady 175 V was told "settling after the voltage change" for
+                # twenty-two seconds straight, got no balance line for three minutes,
+                # and every window measured from voltsChangedAt was clamped to nothing.
+                if bucketNow is not None and bucketNow != lastVoltBucket:
                     lastVoltBucket, voltsChangedAt = bucketNow, now
                 # NOT while the 提升 button is held.  The lift adds 210 V, so the
                 # last non-zero reading before a droplet is released can be the LIFT
@@ -4160,6 +4235,17 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 if waited <= allowed:
                     keep.append(t)
                 elif len(t.points) >= CONFIRM_POINTS:
+                    # About to cross `0` and dying on the line: leave the crossing it
+                    # was going to make, for whatever comes out below to adopt.
+                    if (t.tTop is None and float(t.vel[1]) > 0
+                            and t.pos[1] < yTop
+                            and yTop - float(t.pos[1])
+                            <= PREDICT_ZERO_BAND * s["gridClear"]):
+                        gap = (yTop - float(t.pos[1])) / float(t.vel[1])
+                        if 0 < gap <= PREDICT_ZERO_MAX_S:
+                            noteZeroCrossing(zeroCrossings, float(t.lastT) + gap,
+                                             float(t.xs[-1]) if getattr(t, "xs", None)
+                                             else float(t.pos[0]))
                     if measuring:
                         # A track dying mid-fall costs a measurement, and the fix
                         # depends on WHY it died: a droplet that was genuinely
@@ -4371,12 +4457,34 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             # during a lift, which is when tracks break most.
                             aim = picked.predict(now)
                             reach = PICK_LIFT_PX if liftWatch.lifting else PICK_FOLLOW_PX
+                            # Moving like the droplet, not merely sitting near it.
+                            # During a lift the reach is 90 px and grows with the gap,
+                            # and a speck above `0` was close enough to qualify: the
+                            # square jumped to it mid-lift and stayed until the
+                            # operator clicked their droplet again.  A droplet being
+                            # carried up is going UP, and its speed does not jump.
+                            was = picked.recentSpeed(spacing)
+                            def sameMotion(q):
+                                v = q.recentSpeed(spacing)
+                                if was is None or v is None:
+                                    return True       # nothing to contradict
+                                if liftWatch.lifting and v >= 0:
+                                    return False      # not rising during a lift
+                                if abs(was) > BALANCED_MAX and abs(v) > BALANCED_MAX \
+                                        and (v > 0) != (was > 0):
+                                    # One is going up and the other down.  At 249 V an
+                                    # operator's rising droplet was handed to a falling
+                                    # one, which no speed tolerance should ever allow:
+                                    # direction is not a matter of degree.
+                                    return False
+                                return abs(v - was) <= STEAL_SPEED_GAP * 2.0
                             near = [q for q in live
                                     if q is not picked and not q.miss
                                     and len(q.points) >= CONFIRM_POINTS
                                     and abs(q.pos[0] - aim[0]) <= s["reidX"]
                                     and np.hypot(q.pos[0] - aim[0],
-                                                 q.pos[1] - aim[1]) <= reach]
+                                                 q.pos[1] - aim[1]) <= reach
+                                    and sameMotion(q)]
                             if near:
                                 picked = min(near, key = lambda q: np.hypot(
                                     q.pos[0] - aim[0], q.pos[1] - aim[1]))
@@ -4697,6 +4805,14 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     urgent = None
                     measuringBanner = None
                     reacquired = False
+                    nowPicked = None if picked is None else int(picked.id)
+                    if nowPicked != lastPickedId:
+                        forgetHeld("picked")          # it is about somebody else now
+                        lastPickedId = nowPicked
+                    if picked is not None and committedAt is None:
+                        committedAt = now             # the measurement starts here
+                    elif picked is None and chosenX is None:
+                        committedAt = None
                     if (picked is not None and pickedSeen
                             and now - pickedSeen >= PICK_SEARCH_S):
                         urgent = (("lost your droplet %.0fs ago -- it may be moving too "
@@ -4770,7 +4886,17 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # traverse, and a droplet dropped too fast still crosses both
                         # lines -- so counting traverses made the tally climb on every
                         # downward move rather than on every measurement.
-                        mine = dropletFalls(falls, chosenX)
+                        # The operator's droplet, not the pinned coordinate.  A pin
+                        # lands where a droplet settled; the operator then moves on,
+                        # and everything keyed to that coordinate goes on describing a
+                        # droplet nobody is looking at.  On 2026-09-17 the banner read
+                        # "1 of 5 falls" and "still the same droplet?" for ninety
+                        # seconds about a droplet abandoned at 1:50, while the one in
+                        # the square was boxed, balanced and about to be dropped.
+                        mine = dropletFalls(falls,
+                                            float(picked.pos[0]) if picked is not None
+                                            else chosenX,
+                                            committedAt)
                         # Follow the group, not the coordinate.  chosenX was pinned
                         # where the droplet happened to be when it settled, and the
                         # count is "the falls nearest that x" -- so when this droplet's
@@ -4787,8 +4913,15 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # A click is the operator saying "yes, this one".  The
                         # prompt asked exactly that and then ignored the answer.
                         since = max(lastFall or 0.0, lastClickAt or 0.0)
+                        # ...and never ask about falls that are not the picked
+                        # droplet's.  Asking "still the same droplet?" while the
+                        # operator is mid-balance on a different one is noise they
+                        # cannot answer.
                         stale = (lastFall is not None
-                                 and now - since > MEASURE_IDLE_S)
+                                 and now - since > MEASURE_IDLE_S
+                                 and (picked is None
+                                      or abs(float(picked.pos[0]) - chosenX)
+                                      <= SAME_DROPLET_X_PX))
                         # q/e USED TO BE SHOWN HERE and is deliberately not any more.
                         # It is the student's own result, and putting it on the screen
                         # mid-measurement invites tuning the voltage until q/e lands on
@@ -4822,9 +4955,18 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # -- which way to turn the knob -- was hidden by a progress
                         # count.  So while nothing is actually falling, the balance
                         # instruction outranks the count.
-                        chosen = [t for t in live
-                                  if not t.miss and len(t.points) >= CONFIRM_POINTS
-                                  and abs(float(t.pos[0]) - chosenX) <= SAME_DROPLET_X_PX]
+                        # ...and the balance line describes the droplet in the
+                        # square, not the nearest track to the pin.  Those disagreed by
+                        # a factor of eight in the same second: the pick verdict said
+                        # "BALANCED to 1.9% at 180 V" while MEASURING said "balance
+                        # 14.9%, RAISE to about 214 V", then "95.0%".
+                        if picked is not None and not picked.miss:
+                            chosen = [picked]
+                        else:
+                            chosen = [t for t in live
+                                      if not t.miss and len(t.points) >= CONFIRM_POINTS
+                                      and abs(float(t.pos[0]) - chosenX)
+                                      <= SAME_DROPLET_X_PX]
                         timing = any(t.tTop is not None and t.tBottom is None
                                      for t in live)
                         q = None
