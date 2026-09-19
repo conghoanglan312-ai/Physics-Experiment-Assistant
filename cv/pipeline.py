@@ -3806,6 +3806,22 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
         threading.Thread(target = readRemoteClicks, daemon = True).start()
 
     if show:
+        # Declare the process DPI-aware BEFORE the window exists.  Python is not, by
+        # default, so on a laptop at 175% display scaling Windows took the 1280x720
+        # frame as logical pixels and bitmap-stretched it to 2240x1260 -- a window
+        # "significantly larger than its original size", and blurry with it (issue
+        # #14).  Aware, the window is the frame at one screen pixel per image pixel,
+        # sharp, and the mouse callback still receives image coordinates because the
+        # window and the image are now the same size.  Windows only; a no-op elsewhere.
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                try:
+                    ctypes.windll.shcore.SetProcessDpiAwareness(2)   # per monitor
+                except Exception:
+                    ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass                    # an old Windows; scaling stays as it was
         cv2.namedWindow("Droplets",
                         cv2.WINDOW_NORMAL if blind else cv2.WINDOW_AUTOSIZE)
         # The operator picks their droplet by clicking it.  No automatic rule can know
