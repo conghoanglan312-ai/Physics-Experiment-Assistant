@@ -5309,12 +5309,30 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 picked_ = None
                 if picked is not None:
                     v_ = picked.recentSpeed(spacing)
+                    # FALL TIME is the number drawn beside the droplet: running while
+                    # it falls, frozen once it crosses `1.6`.  It was read off the pick
+                    # alone and only while running, so on 2026-09-19 the app's panel
+                    # showed a dash beside a droplet that plainly had a clock on it --
+                    # blank the moment a fall finished, and blank whenever the clock
+                    # sat on a track that had re-found the droplet while the pick was
+                    # still coasting.  Read it from whichever track carries the ring.
+                    aim_ = picked.predict(now) if picked.miss else picked.pos
+                    clocked = [picked] if picked.tTop is not None else sorted(
+                        (q for q in live
+                         if q.tTop is not None and not q.miss
+                         and len(q.points) >= CONFIRM_POINTS
+                         and np.hypot(q.pos[0] - aim_[0], q.pos[1] - aim_[1])
+                         <= PICK_FOLLOW_PX),
+                        key = lambda q: np.hypot(q.pos[0] - aim_[0], q.pos[1] - aim_[1]))
+                    clock_ = clocked[0] if clocked else None
+                    running_ = clock_ is not None and clock_.tBottom is None
                     picked_ = {
                         "id": int(picked.id),
                         "speedGridPerSec": None if v_ is None else round(float(v_), 3),
-                        "fallSeconds": (round(now - picked.tTop, 2)
-                                        if picked.tTop is not None
-                                        and picked.tBottom is None else None),
+                        "fallSeconds": (None if clock_ is None
+                                        else round(now - clock_.tTop, 2) if running_
+                                        else round(float(clock_.seconds), 2)),
+                        "fallRunning": running_,
                         "balancePercent": (round(float(picked.balanceDriftPct), 1)
                                            if getattr(picked, "balanceDriftPct", None)
                                            is not None else None),
@@ -5914,7 +5932,11 @@ def main(argv):
         outDir = outDirFor(path)
         print("Playback -> %s" % outDir)
         print("Stop with q in the window, or Ctrl+C")
-        report(trackAll(path, show = True, saveVideo = False, outDir = outDir),
+        # MILLIKAN_RECORD=1 keeps the annotated video, so a playback session can be
+        # reviewed afterwards the way a live one is.  Off by default: it costs about
+        # 15 MB a minute, which a demo run has no use for.
+        record = bool(os.environ.get("MILLIKAN_RECORD"))
+        report(trackAll(path, show = True, saveVideo = record, outDir = outDir),
                outDir, path)
         return
     if len(argv) > 1 and argv[1] == "preview":
