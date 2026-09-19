@@ -71,7 +71,7 @@
             title="Runs a bundled test clip through the pipeline -- no apparatus or dongle needed"
           >🎬 Try Demo Video</button>
         </div>
-        <div id="feedHint" class="feed-hint hidden">🖱️ Click a droplet in the feed to select it</div>
+        <div id="feedHint" class="feed-hint hidden"></div>
       </div>
 
       <aside class="info-column">
@@ -93,7 +93,7 @@
             <div class="info-item"><span class="info-label">FIELD</span><span id="dropletField" class="field-value">—</span></div>
           </div>
         </div>
-        <div class="feed-title">[ DROPLET ANALYSIS ]</div>
+        <div class="droplet-analysis">[ DROPLET ANALYSIS ]</div>
 
         <div class="notification-panel">
           <div class="notification-list" id="notificationList">
@@ -189,6 +189,7 @@
         rows="3"
         placeholder="Ask something about the experiment..."
         aria-label="Ask something about the experiment"
+        style="background-color: var(--input-box-bg); opacity: 1"
       ></textarea>
       <div class="input-row">
         <div id="charCounter" class="ai-char-counter">0 / 2000</div>

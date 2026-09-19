@@ -60,25 +60,34 @@
   color-scheme: dark;
   --text-rgb: 255, 255, 255;
   --bg: #11131b;
+  --panel-bg-soft: rgba(50, 52, 80, 0.9);
+  --panel-bg-opacity: 1;
   --disabled-text: rgba(255, 255, 255, 0.6);
   --card-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
   --panel-shadow: 0 15px 50px rgba(0, 0, 0, 0.18);
   --fab-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
   --hover-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
-
+  --input-box-bg: rgba(0, 0, 0, 0.14);
   color: rgba(var(--text-rgb), 0.92);
   background: var(--bg);
+  --droplet-text-color: 255,255,255;
+  --warning-text: #f59e0b;
 }
 
 :root[data-theme="light"] {
   color-scheme: light;
   --text-rgb: 49, 51, 63;
   --bg: #ffffff;
+  --panel-bg-soft: rgba(163, 164, 185, 0.5);
+  --panel-bg-opacity: 0.5;
   --disabled-text: rgba(49, 51, 63, 0.45);
   --card-shadow: 0 8px 24px rgba(49, 51, 63, 0.10);
   --panel-shadow: 0 15px 40px rgba(49, 51, 63, 0.16);
   --fab-shadow: 0 8px 24px rgba(49, 51, 63, 0.18);
   --hover-shadow: 0 16px 34px rgba(49, 51, 63, 0.20);
+  --input-box-bg: #f8f8f8;
+  --droplet-text-color: black;
+  --warning-text: #e89505;
 
   color: rgba(var(--text-rgb), 0.92);
   background: var(--bg);
@@ -150,19 +159,27 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
   color: var(--accent);
   font-size: clamp(34px, 4vw, 55px);
   font-weight: 800;
-  margin: -6px 0 14px;
+  margin: -6px 0 8px;
   text-shadow: 0 0 20px var(--accent-glow);
 }
 
 .subtitle { text-align: center; opacity: 0.7; font-size: 22px; margin-top: 0; }
 
-.main-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 330px); gap: 18px; align-items: stretch; }
+.main-grid {
+  --microscopic-height: max(520px, min(68vh, 720px));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 330px);
+  gap: 18px;
+  align-items: stretch;
+}
 .info-column { display: flex; flex-direction: column; gap: 10px; }
 .info-column .info-panel { flex: none; }
 
 .video-container {
   position: relative;
-  width: 100%; height: min(68vh, 720px); min-height: 520px;
+  width: 100%;
+  height: var(--microscopic-height);
+  min-height: var(--microscopic-height);
   background: var(--panel-bg);
   backdrop-filter: blur(15px);
   -webkit-backdrop-filter: blur(15px);
@@ -246,11 +263,12 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 }
 .hidden { display: none !important; }
 
+.droplet-analysis{ text-align: center; margin-top: 0px; font-size: 18px; font-weight: 600; letter-spacing: 4px; opacity: 0.7; transition: color .15s ease; }
 .feed-title { text-align: center; margin-top: 10px; font-size: 18px; font-weight: 600; letter-spacing: 4px; opacity: 0.7; transition: color .15s ease; }
 .feed-title.live { color: var(--success); opacity: .95; }
-.feed-title.demo { color: var(--warning); opacity: .95; }
+.feed-title.demo { color: var(--warning-text); opacity: 1; }
 .feed-title.offline { opacity: .55; }
-.feed-status { text-align:center; margin-top:6px; font-size:13px; letter-spacing:1px; opacity:.6; }
+.feed-status { font-style: italic; text-align:center; margin-top:6px; font-size:13px; letter-spacing:1px; opacity:.6; }
 .feed-status.live { color:var(--success); opacity:.9; }
 .feed-status.demo { color:var(--warning); opacity:.9; }
 .feed-status.error { color:var(--danger); opacity:.9; white-space: pre-wrap; }
@@ -305,7 +323,7 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
   gap: 16px;
 }
 
-.droplet-id-row { display:flex; align-items:center; gap:12px; }
+.droplet-id-row { display:flex; align-items:center; gap:12px; background: var(--panel-bg-soft);; border-radius: 12px; padding: 10px 14px;}
 .droplet-ring { width:46px; height:46px; flex:none; border-radius:50%; border:5px solid grey; position:relative; }
 .droplet-ring.suitable { border-color:var(--success); box-shadow:0 0 15px var(--success-glow); }
 .droplet-ring.unsuitable { border-color:var(--danger); box-shadow:0 0 15px rgba(239,68,68,.6); }
@@ -313,12 +331,12 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
    which must not be shown as either a pass or a fail. */
 .droplet-ring.unknown { border-color:var(--warning); box-shadow:0 0 15px var(--warning-glow); }
 .droplet-id-text { min-width:0; }
-.droplet-id { font-size:15px; font-weight:700; color:rgba(var(--text-rgb),.92); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.droplet-status-word { font-size:12.5px; margin-top:2px; opacity:.85; }
+.droplet-id { font-size:24px; font-weight:700; color: var(--droplet-text-color); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; opacity: 1;}
+.droplet-status-word { font-size:14px; margin-top:2px; opacity:.85; color: var(--droplet-text-color);}
 .info-stats { display:flex; flex-direction:column; gap:10px; padding-top:4px; border-top:1px solid var(--panel-border-soft); }
 .info-item { display:flex; justify-content:space-between; align-items:baseline; gap:10px; }
 .info-item span:last-child { font-size:16px; font-weight:600; font-variant-numeric:tabular-nums; }
-.info-label { font-size:11px; font-weight:700; letter-spacing:1px; opacity:.5; }
+.info-label { font-size:15px; font-weight:700; letter-spacing:1px; opacity:.7; }
 .field-value { text-transform: capitalize; }
 
 .guide-section { margin-top: 50px; }
@@ -434,6 +452,22 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 .notification-item.warning { border-color: var(--warning); color: var(--warning); }
 .notification-item.error { border-color: var(--danger-border); background: var(--danger-bg); color: var(--danger-text); }
 
+/* ------------------------------------------------------------
+   Light theme: notification cards.
+   The panel keeps its original background (same as the other panels).
+   Cards are a bright, mostly opaque white so they read as lighter patches
+   on it, with a faint shadow to keep the edge visible now that the panel
+   is light. Error cards use a pale red fill instead of white so they still
+   read as errors. Text/border colours are deeper shades of green, amber
+   and red so they stay legible. Dark theme is untouched.
+   ------------------------------------------------------------ */
+:root[data-theme="light"] .notification-item:not(.error)       { background: rgba(255, 255, 255, 0.92); box-shadow: 0 1px 3px rgba(49, 51, 63, 0.10); }
+:root[data-theme="light"] .notification-item:not(.error):hover { background: rgba(255, 255, 255, 1); box-shadow: var(--hover-shadow); }
+:root[data-theme="light"] .notification-item.info    { border-color: var(--accent-strong); border-width: 1.5px; }
+:root[data-theme="light"] .notification-item.success { border-color: #15803d; color: #166534; border-width: 1.5px; }
+:root[data-theme="light"] .notification-item.warning { border-color: #b45309; color: #92400e; border-width: 1.5px; }
+:root[data-theme="light"] .notification-item.error   { border-color: #b91c1c; color: #b91c1c; border-width: 1.5px; background: rgba(254, 242, 242, 0.95); box-shadow: 0 1px 3px rgba(49, 51, 63, 0.10); }
+
 @keyframes notifIn { from { opacity:0; transform:translateY(-14px) scale(.96); } to { opacity:1; transform:translateY(0) scale(1); } }
 .notification-item.notification-entering { animation: notifIn .32s ease-out; }
 
@@ -503,6 +537,36 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 .send-button:disabled{background:var(--disabled-bg);border-color:var(--disabled-bg);color:var(--disabled-text);cursor:not-allowed}
 .send-button.locked { background:var(--disabled-bg); border-color:var(--disabled-bg); color:var(--disabled-text); cursor:not-allowed; }
 
+/* Keep [ NOTIFICATIONS ] permanently aligned with the TRY DEMO VIDEO button.
+   The button's position moves whenever the status line appears/disappears or
+   the control row wraps, so a fixed offset can't stay aligned. app.js
+   (alignNotificationTitle) measures the button and publishes:
+     --notif-title-top   top of the title, vertically centred on the button
+     --notif-col-height  column height that leaves room for that title
+   The calc() fallbacks are the old fixed values, used only until JS runs. */
+@media (min-width: 901px) {
+  .info-column {
+    position: relative;
+    align-self: start;
+    height: var(--notif-col-height, calc(var(--microscopic-height) + 80px));
+    min-height: 0;
+  }
+
+  .info-column > .feed-title:last-child {
+    position: absolute;
+    top: var(--notif-title-top, calc(var(--microscopic-height) + 50px));
+    left: 0;
+    right: 0;
+    height: 25px;
+    margin: 0;
+    line-height: 25px;
+  }
+
+  .notification-panel {
+    margin-bottom: 40px;
+  }
+}
+
 .error-bubble { background:var(--danger-bg); border:1px solid var(--danger-border); color:var(--danger-text); border-radius:14px; padding:9px 12px; }
 
 @media (max-width: 900px) {
@@ -513,6 +577,10 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 }
 
 @media (max-width: 600px) {
+  .main-grid {
+    --microscopic-height: max(320px, 55vh);
+  }
+
   .title-box { padding:24px 22px; }
   .subtitle { font-size:16px; margin-top:0; }
   .video-container { height:55vh; min-height:320px; }

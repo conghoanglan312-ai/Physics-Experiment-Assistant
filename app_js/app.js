@@ -681,12 +681,10 @@ function showLiveFeed(url, device, source) {
   liveFeed.src = `${url}?t=${Date.now()}`;
   liveFeed.classList.remove("hidden");
   if (state.isDemo) {
-    feedStatus.textContent = `● DEMO — playing ${DEMO_LABEL}`;
+    feedStatus.textContent = `🖱️ Click a droplet in the feed to select it`;
     feedStatus.className = "feed-status demo";
   } else {
-    feedStatus.textContent = (typeof source === "string" && source && !/^-?\d+$/.test(source))
-      ? `● LIVE — playing "${source}"`
-      : `● LIVE — device ${device}`;
+    feedStatus.textContent = `🖱️ Click a droplet in the feed to select it`;
     feedStatus.className = "feed-status live";
   }
   setFeedState(state.isDemo ? "demo" : "live");
@@ -792,8 +790,7 @@ async function stopLive() {
     pushSystemMessage("error", `Couldn't confirm the feed stopped — ${error.message}`);
   } finally {
     state.live = null;
-    state.lastFieldOnVoltage = null;
-    state.lastFallSeconds = null;
+    resetHeldMeasurements();
     stopSessionTimer();
     showFallback();
     liveButton.textContent = "▶ Start Live Feed";
@@ -822,6 +819,17 @@ const SUITABILITY = {
 function showMeasurement(element, value, unit, digits) {
   const missing = value === null || value === undefined || Number.isNaN(Number(value));
   element.textContent = missing ? MISSING : `${Number(value).toFixed(digits)} ${unit}`;
+}
+
+// The voltage and fall time are "held" readings (see the two functions below):
+// they keep their last genuine value until the right fieldState comes round
+// again. That is only correct for the droplet they were measured on, so they
+// must be dropped whenever the selection changes -- otherwise a newly picked
+// droplet would show the previous one's numbers until fieldState happened to
+// flip to "work"/"off".
+function resetHeldMeasurements() {
+  state.lastFieldOnVoltage = null;
+  state.lastFallSeconds = null;
 }
 
 function voltageToDisplay(data) {
@@ -856,6 +864,9 @@ function renderSelectedDroplet(selected) {
   // the server's own note text -- nothing here is invented client-side.
   if (data.label && data.label !== state.lastDropletLabel) {
     if (data.note) pushSystemMessage("info", `${data.label} selected — ${data.note}`);
+    // A different droplet: drop the previous one's held voltage / fall time now,
+    // instead of waiting for fieldState to overwrite them.
+    resetHeldMeasurements();
     state.lastDropletLabel = data.label;
     state.lastSuitable = null;
   }
@@ -868,6 +879,7 @@ function renderSelectedDroplet(selected) {
     state.lastSuitable = data.suitable;
   }
   if (!data.label) {
+    resetHeldMeasurements();
     state.lastDropletLabel = null;
     state.lastSuitable = null;
   }
@@ -907,8 +919,7 @@ async function pollLiveState() {
 
   if (state.live && !payload.running) {
     state.live = null;
-    state.lastFieldOnVoltage = null;
-    state.lastFallSeconds = null;
+    resetHeldMeasurements();
     stopSessionTimer();
     showFallback();
     pushSystemMessage("warning", `The ${state.isDemo ? "demo playback" : "live session"} ended.`);
@@ -989,6 +1000,37 @@ fallbackVideo.addEventListener("error", () => {
   fallbackVideo.classList.add("hidden");
   videoPlaceholder.classList.remove("hidden");
 });
+
+// ---- Keep [ NOTIFICATIONS ] level with the "Try Demo Video" button ----
+// The button sits below the video, feed title, and (sometimes) a status line,
+// and the control row can wrap on narrow desktops -- so its position isn't
+// fixed. Measure it and hand the numbers to the stylesheet.
+const NOTIF_TITLE_HEIGHT = 25;
+const infoColumnEl = document.querySelector(".info-column");
+const videoColumnEl = document.querySelector(".video-column");
+
+function alignNotificationTitle() {
+  if (!infoColumnEl || !demoClipButton) return;
+  const colRect = infoColumnEl.getBoundingClientRect();
+  const btnRect = demoClipButton.getBoundingClientRect();
+  if (!btnRect.height) return; // hidden / not laid out yet
+  const center = btnRect.top + btnRect.height / 2 - colRect.top;
+  const top = Math.max(0, Math.round(center - NOTIF_TITLE_HEIGHT / 2));
+  infoColumnEl.style.setProperty("--notif-title-top", `${top}px`);
+  infoColumnEl.style.setProperty("--notif-col-height", `${top + NOTIF_TITLE_HEIGHT + 5}px`);
+}
+
+if (infoColumnEl && videoColumnEl) {
+  if (typeof ResizeObserver === "function") {
+    // Fires when the status line shows/hides, controls wrap, or the viewport changes.
+    const ro = new ResizeObserver(alignNotificationTitle);
+    ro.observe(videoColumnEl);
+    ro.observe(demoClipButton);
+  }
+  window.addEventListener("resize", alignNotificationTitle);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(alignNotificationTitle);
+  alignNotificationTitle();
+}
 
 updateInputState();
 showFallback();

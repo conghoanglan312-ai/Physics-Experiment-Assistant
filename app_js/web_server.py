@@ -266,7 +266,7 @@ def selection_view(status, running):
                 speed=None, volts=None,
                 rangeState=None, rangeSince=None, suitable="unknown",
             )
-            _selection["label"] = "Droplet %d" % _selection["picks"]
+            _selection["label"] = "DROPLET %d" % _selection["picks"]
 
         if _selection["id"] is None:
             # Nothing has actually been picked yet (as opposed to picked-but-
