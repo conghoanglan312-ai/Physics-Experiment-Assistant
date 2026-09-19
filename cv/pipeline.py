@@ -1586,10 +1586,18 @@ class Track:
         resid = float(np.sqrt(np.mean((ys - (m * ts + c)) ** 2)))
         return float(m) / spacing, resid, float(ys[-1] - ys[0]) / spacing
 
-    def recentSpeed(self, spacing, window = 30):
+    def recentSpeed(self, spacing, window = 30, since = None):
         # provisional speed in grid divisions per second, from the last ~1 s of points.
-        # Fitting against capture time means no fps appears here either.
+        # Fitting against capture time means no fps appears here either.  `since`
+        # drops points from before a moment -- the last voltage change -- because 30
+        # points is only a second when the droplet is seen every frame.  On a grid
+        # line it is not, and a fit that reaches back past the cut averages in the
+        # seconds the droplet sat balanced.  On 2026-09-20 a droplet cut to 0 V on
+        # `0` was called "0.11 gr/s -- too slow, DISCARD" 1.9 s after the cut, while
+        # the speed drawn beside it read 0.17-0.26.
         pts = self.points[-window:]
+        if since is not None:
+            pts = [p for p in pts if p[0] >= since]
         if len(pts) < 8:
             return None
         ts = np.array([p[0] for p in pts], dtype = float)
@@ -3130,15 +3138,17 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
     asked about this one -- and "this will not work, discard it" is the most useful
     thing the aid can say once they have committed time to a droplet.
     """
-    speed = t.recentSpeed(spacing)
-    if speed is None:
-        return "picked id %d -- watching it" % t.id, (0, 220, 255), None
     # Before anything else.  This test used to sit below the field-off branch, so a
     # droplet cut to 0V was judged TOO SLOW on a speed still averaging the second it
     # spent balanced.
     if sinceChange is not None and sinceChange < SETTLE_AFTER_V_S:
         return ("picked id %d -- settling after the voltage change" % t.id,
                 (0, 220, 255), None)
+    # Motion under the field it is in now, not the one before.  See recentSpeed.
+    speed = t.recentSpeed(spacing, since = None if sinceChange is None
+                          else now - float(sinceChange))
+    if speed is None:
+        return "picked id %d -- watching it" % t.id, (0, 220, 255), None
     if volts is None:
         # Not the same as zero.  `if not volts` treated an unreadable panel as a field
         # that is off and judged the droplet's speed against the falling band, which
@@ -3300,6 +3310,15 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
         return ("picked id %d drifts %+.3f gr/s -- no reachable balance, DISCARD"
                 % (t.id, drift), (0, 0, 255), False)
     target, steady, step = steadyTarget(t, now, ub, volts)
+    if (target - float(volts)) * (1.0 if drift > 0 else -1.0) < 0:
+        # The target is a median of the last few seconds, the direction is this
+        # moment's drift, and when the droplet turns round they disagree.  On
+        # 2026-09-20 a droplet that had been rising (LOWER to about 140 V) began to
+        # fall, and the aid said "RAISE to about 144 V" with the panel at 152 -- the
+        # droplet balanced at 153 V.  Estimates made on the other side of balance
+        # describe a drift that is gone: drop them and start again from this one.
+        TARGET_HISTORY.pop(int(round(float(t.pos[0]) / CHARGE_COLUMN_PX)), None)
+        target, steady, step = steadyTarget(t, now, ub, volts)
     if not steady:
         # ...and if it never settles, say that instead of asking forever.  An operator
         # tuned one droplet from 2:19 to the end of the session and never got a usable
