@@ -455,18 +455,38 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 /* ------------------------------------------------------------
    Light theme: notification cards.
    The panel keeps its original background (same as the other panels).
-   Cards are a bright, mostly opaque white so they read as lighter patches
-   on it, with a faint shadow to keep the edge visible now that the panel
-   is light. Error cards use a pale red fill instead of white so they still
-   read as errors. Text/border colours are deeper shades of green, amber
+   Cards are a translucent white (0.5) so they read as lighter patches on
+   it, with a faint outer shadow to keep the edge visible now that the
+   panel is light. Error cards use a pale red fill instead of white so
+   they still read as errors. Text/border colours are deeper shades of green, amber
    and red so they stay legible. Dark theme is untouched.
    ------------------------------------------------------------ */
-:root[data-theme="light"] .notification-item:not(.error)       { background: rgba(255, 255, 255, 0.92); box-shadow: 0 1px 3px rgba(49, 51, 63, 0.10); }
-:root[data-theme="light"] .notification-item:not(.error):hover { background: rgba(255, 255, 255, 1); box-shadow: var(--hover-shadow); }
+:root[data-theme="light"] .notification-item:not(.error)       { background: rgba(255, 255, 255, 0.5); box-shadow: 0 1px 3px rgba(49, 51, 63, 0.10); }
+:root[data-theme="light"] .notification-item:not(.error):hover { background: rgba(255, 255, 255, 0.65); box-shadow: var(--hover-shadow); }
 :root[data-theme="light"] .notification-item.info    { border-color: var(--accent-strong); border-width: 1.5px; }
 :root[data-theme="light"] .notification-item.success { border-color: #15803d; color: #166534; border-width: 1.5px; }
 :root[data-theme="light"] .notification-item.warning { border-color: #b45309; color: #92400e; border-width: 1.5px; }
-:root[data-theme="light"] .notification-item.error   { border-color: #b91c1c; color: #b91c1c; border-width: 1.5px; background: rgba(254, 242, 242, 0.95); box-shadow: 0 1px 3px rgba(49, 51, 63, 0.10); }
+:root[data-theme="light"] .notification-item.error   { border-color: #b91c1c; color: #b91c1c; border-width: 1.5px; background: rgba(254, 242, 242, 0.5); box-shadow: 0 1px 3px rgba(49, 51, 63, 0.10); }
+
+/* ------------------------------------------------------------
+   Light theme: main containers (title box, microscopic live view,
+   droplet analysis, notifications).
+   Background is 0.2 more opaque than the shared --panel-bg (0.15 -> 0.35),
+   and the shadow is larger and softer so the boxes look like they float
+   above the page. box-shadow = x  y  blur  spread  colour.
+   Tweak the two variables below. Dark theme is untouched.
+   ------------------------------------------------------------ */
+:root[data-theme="light"] {
+  --float-panel-bg: rgba(230, 230, 230, 0.35);
+  --float-shadow: 0 16px 51px 6px rgba(49, 51, 63, 0.21);
+}
+:root[data-theme="light"] .title-box,
+:root[data-theme="light"] .video-container,
+:root[data-theme="light"] .info-panel,
+:root[data-theme="light"] .notification-panel {
+  background: var(--float-panel-bg);
+  box-shadow: var(--float-shadow);
+}
 
 @keyframes notifIn { from { opacity:0; transform:translateY(-14px) scale(.96); } to { opacity:1; transform:translateY(0) scale(1); } }
 .notification-item.notification-entering { animation: notifIn .32s ease-out; }
