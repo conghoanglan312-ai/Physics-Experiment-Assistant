@@ -7,6 +7,7 @@ llm.main.getResponseFromGemini() as browser-accessible HTTP endpoints.
 
 from __future__ import annotations
 
+import csv
 import json
 import mimetypes
 import os
@@ -20,8 +21,8 @@ from urllib.parse import parse_qs, urlparse
 
 from llm.main import getResponseFromGemini
 from app_js.wrapper import start_live, stop_live, send_click
-from app_js.tutor import Tutor
-from cv.api import live_status
+from app_js.tutor import Tutor, whyPrompt, debriefFacts, debriefPrompt
+from cv.api import live_status, outDirFor
 
 ROOT = Path(__file__).resolve().parent
 HOST = "127.0.0.1"
@@ -44,6 +45,8 @@ _live_token = None
 # ---------------------------------------------------------------------------
 TUTOR_SESSION = "millikan_test_session"
 _tutor = None
+_last_run_dir = None            # where the session this server started wrote its
+                                # artefacts, so a debrief reviews THAT run
 
 
 def _ask_model(prompt):
@@ -481,6 +484,12 @@ class Handler(BaseHTTPRequestHandler):
             self._click()
             return
 
+        if path == "/api/ai/why":
+            self._why()
+            return
+        if path == "/api/ai/debrief":
+            self._debrief()
+            return
         if path == "/api/live/stop":
             self._stop_live()
             return
@@ -557,6 +566,12 @@ class Handler(BaseHTTPRequestHandler):
             handle = start_live(source=source)
             reset_selection()          # a new session picks its own droplets
             start_tutor()
+            global _last_run_dir
+            try:
+                _last_run_dir = outDirFor(handle.get("source")
+                                          if source else "cam:%s" % handle.get("device"))
+            except Exception:
+                _last_run_dir = None
             token = secrets.token_urlsafe(24)
             set_live(handle, token)
             self._json({
@@ -570,6 +585,65 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "Please plug in the dongle first."
                            if source is None else
                            "Could not play %s: %s" % (source, exc)}, status=500)
+
+    def _why(self):
+        """Explain the line the student is looking at, on request.
+
+        Nothing is volunteered here and nothing polls: it answers a button. What
+        the aid is SAYING crosses as a kind rather than its words, because the
+        banner names the plate voltage -- see bannerKind() in tutor.py.
+        """
+        status = None
+        if process_is_running(get_live()[0]):
+            try:
+                status = live_status()
+            except Exception:
+                status = None
+        if not status:
+            self._json({"error": "Nothing is running to explain."}, status=409)
+            return
+        text = _ask_model(whyPrompt(status))
+        if not text:
+            self._json({"error": "The assistant is busy; try again in a moment."},
+                       status=503)
+            return
+        self._json({"text": text.strip()})
+
+    def _debrief(self):
+        """A short review of the session that just finished, from its falls.csv."""
+        # This server's own session first. Falling back to "the newest falls.csv
+        # anywhere" reviewed a gate fixture's output once, which is a confident
+        # debrief about a run the student never did.
+        runs = []
+        if _last_run_dir:
+            own = Path(_last_run_dir) / "falls.csv"
+            if own.exists():
+                runs = [own]
+        if not runs:
+            runs = sorted(ROOT.parent.glob("test/output/live_*/falls.csv"),
+                          key=lambda q: q.stat().st_mtime, reverse=True)
+        if not runs:
+            self._json({"error": "No finished session to review yet."}, status=409)
+            return
+        try:
+            with open(runs[0], encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+        except OSError as exc:
+            self._json({"error": "Could not read %s: %s" % (runs[0].name, exc)},
+                       status=500)
+            return
+        facts = debriefFacts(rows)
+        if not facts.get("traverses"):
+            self._json({"error": "That session recorded nothing to review."},
+                       status=409)
+            return
+        text = _ask_model(debriefPrompt(facts))
+        if not text:
+            self._json({"error": "The assistant is busy; try again in a moment."},
+                       status=503)
+            return
+        self._json({"text": text.strip(), "facts": facts,
+                    "session": runs[0].parent.name})
 
     def _click(self):
         """{"x": 0.42, "y": 0.63, "token": "..."} -- fractions of the frame.

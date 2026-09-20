@@ -37,6 +37,8 @@ const dropletFallTime = document.getElementById("dropletFallTime");
 const dropletVelocity = document.getElementById("dropletVelocity");
 const dropletField = document.getElementById("dropletField");
 const guidanceLine = document.getElementById("guidanceLine");
+const whyButton = document.getElementById("whyButton");
+const debriefButton = document.getElementById("debriefButton");
 
 const state = {
   messages: [],
@@ -789,6 +791,35 @@ function unfitFeedBox() {
   fitFeedBox(FEED_ASPECT_W, FEED_ASPECT_H);
 }
 
+// "Why?" explains the line above it; the debrief reviews the session that has
+// just finished. Both put their answer in the chat, so it stays part of one
+// conversation and can be argued with, and both disable themselves while the
+// model is working -- one question at a time is all the LLM layer allows.
+async function askAi(button, url, waitingText) {
+  if (button.disabled) return;
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "…";
+  addMessage("user", waitingText);
+  try {
+    const response = await fetch(url, { method: "POST" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "The assistant could not answer.");
+    addMessage("assistant", payload.text);
+    if (!aiPanel.classList.contains("open")) aiFab.classList.add("has-unread");
+  } catch (error) {
+    addMessage("assistant", `_${error.message}_`);
+  } finally {
+    button.textContent = label;
+    button.disabled = false;
+  }
+}
+
+whyButton.addEventListener("click", () =>
+  askAi(whyButton, "/api/ai/why", "Why is the aid telling me this?"));
+debriefButton.addEventListener("click", () =>
+  askAi(debriefButton, "/api/ai/debrief", "How did that session go?"));
+
 liveFeed.addEventListener("load", () => fitFeedBox(liveFeed.naturalWidth, liveFeed.naturalHeight));
 
 liveFeed.addEventListener("click", (event) => {
@@ -926,12 +957,14 @@ function showBanner(status, selected) {
   const text = label ? raw.replace(/picked id \d+/g, label) : raw;
   if (text === state.lastBannerText) return;      // same words, no repaint
   state.lastBannerText = text;
+  whyButton.disabled = false;
   guidanceLine.textContent = text;
   guidanceLine.className = `guidance-line ${bannerClass(text)}`;
 }
 
 function clearBanner() {
   state.lastBannerText = null;
+  whyButton.disabled = true;
   guidanceLine.textContent = "Start a session to see the aid's guidance here.";
   guidanceLine.className = "guidance-line idle";
 }

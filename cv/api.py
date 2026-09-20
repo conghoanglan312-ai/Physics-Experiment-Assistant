@@ -57,6 +57,10 @@ ONLY `legal` decides whether a fall counts, and it is exactly
 from cv.pipeline import survey, analyze                      # noqa: F401
 from cv.pipeline import TARGET_DROPLETS, TARGET_FALLS_PER_DROPLET
 from cv.pipeline import liveStatusPath                       # noqa: F401
+# Where a session's artefacts land. The app needs it to review the run it
+# started -- falls.csv and the rest -- rather than guessing at the newest
+# folder, which is a gate fixture's output as often as not.
+from cv.pipeline import outDirFor                            # noqa: F401
 
 CONTRACT_VERSION = 2
 

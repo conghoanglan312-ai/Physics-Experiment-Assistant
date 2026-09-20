@@ -235,3 +235,125 @@ class Tutor:
         with self._lock:
             out, self._pending = self._pending, []
         return out
+
+
+# ---------------------------------------------------------------------------
+#  Two things the student ASKS for, rather than the tutor volunteering.
+#
+#  Neither can flood anything: one runs when a session has ended, the other
+#  when a button is pressed. Both are built from the same sealed material as
+#  everything else here -- times, speeds, counts, states, never a voltage.
+# ---------------------------------------------------------------------------
+
+# What the banner is saying, as a KIND rather than its words. The banner names
+# the plate voltage in plain text ("BALANCED to 0.0% at 153 V"), so it cannot be
+# forwarded; the situation it describes can.
+BANNER_KINDS = (
+    ("too slow for", "the droplet falls too slowly to measure"),
+    ("too fast for", "the droplet falls too fast to measure"),
+    ("is RISING", "the droplet is rising while the panel reads 0 V"),
+    ("is not moving", "the droplet is not moving with the field off"),
+    ("USABLE", "the droplet falls at a usable speed"),
+    ("BALANCED", "the droplet is balanced and ready to be timed"),
+    ("balanced to", "the droplet is nearly balanced"),
+    ("as good as it gets", "the droplet is at the Brownian limit"),
+    ("barely held", "the field can hardly hold the droplet"),
+    ("does NOT answer the field", "the droplet does not respond to the field"),
+    ("no response seen yet", "the aid cannot tell yet whether the droplet is charged"),
+    ("left the view", "the droplet has left the picture"),
+    ("lost your droplet", "the aid has lost track of the droplet"),
+    ("DIFFERENT droplet", "the aid may have switched to another droplet"),
+    ("will not hold still", "the droplet will not hold still enough to measure"),
+    ("still calculating", "the aid is still working out where balance is"),
+    ("settling after", "the field has just changed and nothing is settled yet"),
+    ("MEASURING", "a measurement is in progress"),
+    ("free-fall pace", "the field is not holding the droplet at all"),
+    ("quiet now", "there is nothing to measure yet"),
+)
+
+
+def bannerKind(message):
+    """The situation the banner is describing, in words that name no voltage."""
+    for needle, meaning in BANNER_KINDS:
+        if needle.lower() in (message or "").lower():
+            return meaning
+    return None
+
+
+def whyPrompt(status):
+    """Explain the instruction the student is looking at right now."""
+    kind = bannerKind((status or {}).get("message")) or "the session is under way"
+    safe = llm_context(status or {})
+    return (
+        "A student is doing the Millikan oil-drop experiment. Their measurement "
+        "aid is telling them: %s.\n\nSession state (times in seconds, speeds in "
+        "grid divisions per second; plate voltages are deliberately withheld):\n"
+        "%s\n\nThey asked WHY. Reply in ENGLISH, at most three sentences: explain "
+        "the physics behind what the aid is telling them, and what it means for "
+        "their measurement. Do not compute or state any charge, electron count or "
+        "voltage."
+        % (kind, json.dumps(safe, ensure_ascii = False))
+    )
+
+
+def debriefFacts(rows):
+    """What a finished session amounts to, from its falls.
+
+    `rows` are falls.csv as dicts. Everything here is timing, counts and the
+    scatter between repeats -- the things that decide the uncertainty the student
+    will report, and none of which is a step towards the charge.
+    """
+    def num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    legal = [r for r in rows if str(r.get("legal")).lower() == "true"]
+    times = [num(r.get("seconds")) for r in legal]
+    times = [t for t in times if t is not None]
+    kin = [r for r in rows if str(r.get("kinematicLegal")).lower() == "true"]
+    fieldOn = [r for r in kin if str(r.get("fieldOff")).lower() == "false"]
+    reacq = sum(1 for r in legal if num(r.get("reacquired")))
+    facts = {
+        "traverses": len(rows),
+        "legalFalls": len(legal),
+        "rejectedForPace": len(rows) - len(kin),
+        "rejectedForFieldOn": len(fieldOn),
+        "fallsNeedingReacquisition": reacq,
+    }
+    if times:
+        mean = sum(times) / len(times)
+        spread = max(times) - min(times)
+        sd = (sum((t - mean) ** 2 for t in times) / max(1, len(times) - 1)) ** 0.5
+        facts.update({
+            "meanFallSeconds": round(mean, 2),
+            "spreadSeconds": round(spread, 2),
+            "sdSeconds": round(sd, 3),
+            "sdPercent": round(100.0 * sd / mean, 2),
+            "sdOfTheMeanPercent": round(100.0 * sd / (len(times) ** 0.5) / mean, 2),
+        })
+    if rows:
+        starts = [num(r.get("startTime")) for r in rows]
+        starts = [t for t in starts if t is not None]
+        firstLegal = min((num(r.get("startTime")) for r in legal), default = None)
+        if starts:
+            facts["sessionMinutes"] = round((max(starts) - min(starts)) / 60.0, 1)
+        if firstLegal is not None and starts:
+            facts["minutesToFirstLegalFall"] = round((firstLegal - min(starts)) / 60.0, 1)
+    return facts
+
+
+def debriefPrompt(facts):
+    return (
+        "A student has just finished a Millikan oil-drop session. Here is what "
+        "their measurement aid recorded (times in seconds; a LEGAL fall is one "
+        "timed over the full 1.6 mm with the field off, at a pace the manual "
+        "accepts; plate voltages are deliberately withheld):\n%s\n\n"
+        "Write a short debrief in ENGLISH for the student, at most 120 words, in "
+        "plain prose: what went well, what cost them time, and the single change "
+        "most likely to improve the next session. If the repeats are already "
+        "consistent, say so plainly rather than inventing a problem. Do not "
+        "compute or state any charge, electron count or voltage."
+        % json.dumps(facts, ensure_ascii = False, indent = 1)
+    )
