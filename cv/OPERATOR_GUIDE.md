@@ -93,3 +93,32 @@ the room temperature and humidity.
 | banner says a droplet does not answer the field | it is uncharged; it can never be balanced, so spray again |
 | a droplet's ring disappears while it sits still | it is parked on a grid line, where nothing is detected. Nudge it off the line |
 | `mid-fall track ... died` in the terminal | a fall was lost. The line says whether the droplet was invisible or whether the track refused a blob beside it |
+
+## The tutor in the browser app
+
+The banner in the `Droplets` window is the instruction: it is measured, it is
+immediate, and it is what to follow. The tutor is not a second opinion on it. It
+watches for the one thing the banner cannot see -- a stretch of time going nowhere --
+and then explains what is probably happening.
+
+It speaks when, and only when:
+
+| it says something after | because |
+|---|---|
+| 90 s tuning one droplet, never balanced | the droplet may not be worth the time |
+| the pick is lost 3 times in a minute | the aid is not holding on to it |
+| USABLE/DISCARD flips 3 times in a minute | the reading is not settling |
+| 3 minutes on one droplet, no legal fall | something in the procedure is not landing |
+
+At most one message every two minutes, twice per complaint, six per session, and
+never while a fall clock is running. Messages arrive in the chat panel (the 🛸
+button shows a red dot), and you can reply to them there -- it is one conversation.
+
+It never sees the plate voltage: not the reading, not the banner text that names
+it. If a reply states a voltage or a charge anyway, it is withheld and logged
+rather than shown.
+
+**To switch it off for a session:** start the app with `MILLIKAN_TUTOR=0`.
+
+**Afterwards:** every trigger, the prompt it was given and what it said are in
+`test/output/tutor_log.jsonl`, including anything withheld.

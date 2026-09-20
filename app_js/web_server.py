@@ -224,7 +224,18 @@ _selection = {
 
 
 def start_tutor():
+    """Attach a tutor to the session that is starting, unless it is switched off.
+
+    MILLIKAN_TUTOR=0 in the environment silences it for the whole run, without
+    touching the pipeline or the panel. If it says something wrong at the bench,
+    the operator should be able to shut it up in one restart rather than lose the
+    session arguing with it.
+    """
     global _tutor
+    if os.environ.get("MILLIKAN_TUTOR", "1").strip().lower() in ("0", "off", "false", "no"):
+        print("live tutor: off (MILLIKAN_TUTOR)", flush = True)
+        _tutor = None
+        return
     _tutor = Tutor(_ask_model)
 
 
@@ -504,8 +515,14 @@ class Handler(BaseHTTPRequestHandler):
 
         tutor, said = _tutor, []
         if running and tutor is not None:
-            tutor.poll(status)
-            said = tutor.take()
+            # The panel is the point of this endpoint; the tutor is a passenger.
+            # A bug in its rules must not take the droplet readings down with it.
+            try:
+                tutor.poll(status)
+                said = tutor.take()
+            except Exception:
+                traceback.print_exc()
+                said = []
 
         self._json({
             "running": running,

@@ -19,10 +19,12 @@ boolean. It cannot assemble q from those.
 """
 
 import json
+import os
+import re
 import threading
 import time
 
-from cv.api import llm_context
+from cv.api import llm_context, liveStatusPath
 
 # Being stuck is a stretch of time with no progress, so every threshold here is in
 # seconds and every one of them is deliberately long. A tutor that interrupts a
@@ -35,8 +37,31 @@ FLIP_REPEATS = 3                # USABLE/DISCARD reversals...
 FLIP_WINDOW_S = 60.0            # ...inside this window
 
 COOLDOWN_S = 120.0              # never two messages closer than this
+KIND_COOLDOWN_S = 420.0         # ...and far longer before the SAME complaint again.
+                                # Replaying a real 40-minute session, all six
+                                # messages the tutor was allowed were "the aid keeps
+                                # losing your droplet", spent inside the first
+                                # quarter of an hour. A student who has heard that
+                                # once does not need it five more times; the budget
+                                # is better kept for something they have not been
+                                # told yet.
 MAX_PER_SESSION = 6             # ...and never more than this many in one run
+MAX_PER_KIND = 2                # ...of which any one complaint may be at most this.
+                                # Replayed against two real sessions, the whole
+                                # budget went on "the aid keeps losing your droplet"
+                                # -- true, and said once it is advice; said six times
+                                # it is nagging, and it crowds out everything else.
 MIN_SESSION_S = 45.0            # nothing at all in the opening moments
+
+# Defence in depth for THE SEAL. The prompt carries no voltage, but a model can
+# still invent one ("try 250 V"), and a number like that on screen is a voltage
+# the student did not read off the apparatus. A reply that states one is dropped
+# rather than shown: silence is always safe, a fabricated instruction is not.
+FORBIDDEN = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:V\b|volts?\b)"          # "250 V", "190 volts"
+    r"|\d\s*(?:e|x\s*10|\u00d7\s*10)\s*-?\s*19",   # "1.6e-19", "1.6 x 10-19"
+    re.IGNORECASE)
+TUTOR_LOG = "tutor_log.jsonl"   # every trigger, prompt and reply, for review after
 
 
 class Tutor:
@@ -65,6 +90,8 @@ class Tutor:
         self._flipAt = []
         self._lastVerdict = None
         self._legalFalls = 0
+        self._kindAt = {}           # stall kind -> when it was last said
+        self._kindSaid = {}         # ...and how often, this session
 
     # ---- the rules ----------------------------------------------------------
     def poll(self, status):
@@ -107,32 +134,41 @@ class Tutor:
         self._flipAt = [t for t in self._flipAt if now - t <= FLIP_WINDOW_S]
 
         stall = self._stall(now, status, picked)
-        if stall and self._maySpeak(now, picked):
+        kind = stall[0] if stall else None
+        if stall and self._maySpeak(now, picked, kind):
+            self._kindAt[kind] = now
+            self._kindSaid[kind] = self._kindSaid.get(kind, 0) + 1
             self._lastSaid, self._said = now, self._said + 1
             self._tuningSince = None                # the clock restarts either way
             self._pickedSince = now
             self._lostAt, self._flipAt = [], []
-            threading.Thread(target = self._speak, args = (stall, status),
+            threading.Thread(target = self._speak, args = (stall[1], status),
                              daemon = True).start()
 
     def _stall(self, now, status, picked):
         if self._tuningSince and now - self._tuningSince >= STALL_TUNING_S:
-            return ("the student has been tuning the same droplet for %.0f seconds "
-                    "without reaching balance" % (now - self._tuningSince))
+            return ("tuning", "the student has been tuning the same droplet for "
+                    "%.0f seconds without reaching balance"
+                    % (now - self._tuningSince))
         if len(self._lostAt) >= LOST_REPEATS:
-            return ("the aid has lost the student's droplet %d times in the last "
-                    "minute" % len(self._lostAt))
+            return ("lost", "the aid has lost the student's droplet %d times in "
+                    "the last minute" % len(self._lostAt))
         if len(self._flipAt) >= FLIP_REPEATS:
-            return ("the droplet's verdict has flipped between USABLE and DISCARD "
-                    "%d times in the last minute" % len(self._flipAt))
+            return ("flapping", "the droplet's verdict has flipped between USABLE "
+                    "and DISCARD %d times in the last minute" % len(self._flipAt))
         if (picked.get("id") is not None and self._pickedSince
                 and now - self._pickedSince >= STALL_NO_FALL_S):
-            return ("the student has held the same droplet for %.0f seconds without "
-                    "completing a legal fall" % (now - self._pickedSince))
+            return ("nofall", "the student has held the same droplet for %.0f "
+                    "seconds without completing a legal fall"
+                    % (now - self._pickedSince))
         return None
 
-    def _maySpeak(self, now, picked):
+    def _maySpeak(self, now, picked, kind = None):
         if self._busy or self._said >= MAX_PER_SESSION:
+            return False
+        if kind and now - self._kindAt.get(kind, -1e9) < KIND_COOLDOWN_S:
+            return False
+        if kind and self._kindSaid.get(kind, 0) >= MAX_PER_KIND:
             return False
         if now - (self._started or now) < MIN_SESSION_S:
             return False
@@ -145,16 +181,41 @@ class Tutor:
     # ---- saying it ----------------------------------------------------------
     def _speak(self, stall, status):
         self._busy = True
+        prompt = self.prompt(stall, status)
+        text, dropped = None, None
         try:
-            text = self._ask(self.prompt(stall, status))
+            text = self._ask(prompt)
         except Exception as exc:                    # a tutor that fails is silent
-            text = None
             print("live tutor: %s" % exc, flush = True)
         finally:
             self._busy = False
+        if text and FORBIDDEN.search(text):
+            # See FORBIDDEN. The student reads a voltage off the apparatus, never
+            # off a model that guessed one.
+            dropped, text = text, None
+            print("live tutor: reply withheld, it stated a voltage or a charge",
+                  flush = True)
+        self._log(stall, prompt, text, dropped)
         if text:
             with self._lock:
                 self._pending.append({"text": text.strip(), "at": time.time()})
+
+    def _log(self, stall, prompt, text, dropped):
+        """Every trigger, prompt and reply, beside the session's other artefacts.
+
+        A tutor that says something odd at the bench is worth reviewing afterwards,
+        and "what was it looking at when it said that" is unanswerable without the
+        prompt it was given. Never raises: a logging failure must not cost the run.
+        """
+        try:
+            path = os.path.join(os.path.dirname(liveStatusPath()), TUTOR_LOG)
+            with open(path, "a", encoding = "utf-8") as f:
+                f.write(json.dumps({"at": time.time(), "stall": stall,
+                                    "prompt": prompt, "said": text,
+                                    "withheld": dropped}, ensure_ascii = False)
+                        + chr(10))
+        except Exception:
+            pass
 
     def prompt(self, stall, status):
         safe = llm_context(status)                  # THE SEAL -- see the module docstring
