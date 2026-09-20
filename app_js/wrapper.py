@@ -342,7 +342,11 @@ def start_live(source = None, stream_port = None, window_timeout = WINDOW_TIMEOU
         0,
         width,
         height,
-        win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW,
+        # Z-order only.  This process is not DPI-aware, so the size it reads is
+        # scaled down and the size it writes back is scaled up again, rounded: at
+        # 175% the pipeline's 1280x720 window came back 1273x696 and lost its
+        # bottom 24 px, which is the banner.  AUTOSIZE never grows it back.
+        win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW | win32con.SWP_NOSIZE,
     )
 
     streamer = FrameStreamer(port).start()
