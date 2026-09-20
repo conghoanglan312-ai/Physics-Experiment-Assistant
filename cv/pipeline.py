@@ -3224,16 +3224,23 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
         if ok:
             return ("picked id %d falls %.2f gr/s -- USABLE, balance it on `0`"
                     % (t.id, shown), (0, 255, 0), True)
-        if shown <= -MIN_SPEED / 2.0:
+        if shown <= -MIN_SPEED / 2.0 and not lifting:
             # With the plates at 0 V nothing rises.  At the end of the 2026-09-20
             # session the square sat on empty field by the panel while the operator
             # watched their droplet mid-frame, and the aid reported that stray as
             # "falls -0.25 gr/s -- too slow for 0.2-0.5, DISCARD" over and over: a
             # verdict, on the wrong object, in words that hid what had happened.
-            # Rising at 0 V is not a slow droplet, it is the wrong droplet.
-            return ("picked id %d is RISING %.2f gr/s with the field off -- the square "
-                    "is probably not on your droplet; click it again"
-                    % (t.id, abs(shown)), (0, 140, 255), None)
+            # Rising at 0 V is not a slow droplet.  But which of the two reasons it
+            # is cannot be decided from here, and the first version picked one and
+            # was wrong twice in one session: it told the operator the square was on
+            # the wrong droplet while their own was genuinely being carried up, the
+            # plates at +210 V and the panel still reading 0.  `volts` is OCR of a
+            # display that redraws in its own time, and LiftWatch is fed those same
+            # readings, so neither of them knows any better.  Say both, and let the
+            # operator -- who knows which switch they just pressed -- decide.
+            return ("picked id %d is RISING %.2f gr/s while the panel reads 0 V -- "
+                    "either the field is still on, or the square is not on your "
+                    "droplet" % (t.id, abs(shown)), (0, 140, 255), None)
         why = "too fast" if shown > MAX_SPEED else "too slow"
         return ("picked id %d falls %.2f gr/s -- %s for %g-%g, DISCARD"
                 % (t.id, shown, why, MIN_SPEED, MAX_SPEED), (0, 0, 255), False)
@@ -4523,16 +4530,19 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # Clicking a DIFFERENT droplet starts a different measurement.
                         # committedAt was set on the session's first pick and cleared
                         # only when nothing was picked AND no column was pinned, so it
-                        # survived every re-pick: on 2026-09-20 the banner read
-                        # "MEASURING -- 1 of 5 falls" about a droplet being balanced at
-                        # 214 V, counting a 250 V fall that had ended four minutes
-                        # earlier in the same column.  Re-clicking the SAME droplet --
-                        # which is how a lost track is taken back -- keeps the count.
+                        # survived every re-pick: the banner read "MEASURING -- 1 of 5
+                        # falls" about a droplet being balanced at 214 V, counting a
+                        # 250 V fall that had ended four minutes earlier.
+                        #
+                        # "Different" is measured against the COLUMN BEING MEASURED,
+                        # not against the previous pick.  Against the pick it reset on
+                        # almost every re-click, because the pick is what wandered off
+                        # to a stray in the first place -- which is how five legal
+                        # falls of one droplet were shown as "1 of 5".
                         if picked is not None and (
-                                was is None
-                                or (was is not picked
-                                    and abs(float(was.pos[0]) - float(picked.pos[0]))
-                                    > SAME_DROPLET_X_PX)):
+                                chosenX is None
+                                or abs(float(picked.pos[0]) - chosenX)
+                                > SAME_DROPLET_X_PX):
                             committedAt = now
                         pickedSeen = now
                         pickedLevel = fieldLevel(steadyVolts)
@@ -4645,11 +4655,24 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             near = [t for t in live if not t.miss
                                     and np.hypot(t.pos[0] - aim[0], t.pos[1] - aim[1])
                                     <= reach]
+                            # A droplet falls and rises; it does not travel sideways.
+                            # The radius grows to 150 px while a track is missing, and
+                            # in x that is a quarter of the picture: on 2026-09-20 the
+                            # square kept jumping to droplets halfway across the frame
+                            # while the operator's own was merely invisible for a
+                            # second.  Keep the generous vertical reach, bound x to
+                            # the same window everything else calls one droplet.
+                            near = [t for t in near
+                                    if abs(t.pos[0] - aim[0]) <= SAME_DROPLET_X_PX]
                             if not near:
                                 # One confirmed droplet in an otherwise empty picture
-                                # can only be the one that was picked.
+                                # can only be the one that was picked -- as long as it
+                                # is where that droplet could be.  Without the test
+                                # this rule had no distance limit at all, and handed
+                                # the pick to whatever single track happened to exist.
                                 alone = [t for t in live if not t.miss
-                                         and len(t.points) >= CONFIRM_POINTS]
+                                         and len(t.points) >= CONFIRM_POINTS
+                                         and abs(t.pos[0] - aim[0]) <= SAME_DROPLET_X_PX]
                                 if len(alone) == 1:
                                     near = alone
                             wasSpeed = picked.recentSpeed(spacing)
