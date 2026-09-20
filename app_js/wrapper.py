@@ -66,6 +66,41 @@ PUBLISH_WAIT_S = 20.0       # how long to wait for the pipeline's outbound conne
 _COMMAND_RE = re.compile(r"^python -m cv\.pipeline live (\d+)\s*$")
 
 
+# --- Make sure the LLM tutor's vector store exists -------------------------
+#
+# The chat assistant retrieves from a Chroma collection built from the lab
+# manual PDF (llm/src/ingest.py, via llm/src/ingestWrapper.py). It only needs
+# building once, and ingestWrapper's own docstring says calling it once at
+# startup is fine -- runIngestion() chdirs while it runs, which is
+# process-wide, so it should not be called on every live session, just once
+# here, whenever this module (and so the app) is loaded.
+#
+# This module's actual job is the camera/live pipeline, so a problem with the
+# unrelated LLM stack -- missing dependency, missing PDF, a failed embed --
+# must never stop that from working. Any failure here is reported and
+# swallowed, never raised.
+try:
+    from llm.src.ingestWrapper import IngestionError, runIngestion
+
+    def _ensure_manual_ingested():
+        try:
+            result = runIngestion()  # force=False: no-ops if already ingested
+        except IngestionError as exc:
+            print("Manual ingestion check failed (chat tutor may lack context): %s" % exc)
+            return
+        if result["status"] == "ingested":
+            print(
+                "Ingested the lab manual (%d documents, %.1fs)."
+                % (result["documents"], result["seconds"])
+            )
+        # "skipped" means it was already ingested -- nothing worth printing.
+
+    _ensure_manual_ingested()
+except ImportError as exc:
+    print("Skipping manual ingestion check (llm.src.ingestWrapper unavailable): %s" % exc)
+# ---------------------------------------------------------------------------
+
+
 def _bench_check():
     """Run the bench check and return the device index it recommends.
 
