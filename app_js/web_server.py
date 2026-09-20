@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 
 from llm.main import getResponseFromGemini
 from app_js.wrapper import start_live, stop_live, send_click
+from app_js.tutor import Tutor
 from cv.api import live_status
 
 ROOT = Path(__file__).resolve().parent
@@ -29,6 +30,37 @@ PORT = 8502
 _live_lock = threading.Lock()
 _live_handle = None
 _live_token = None
+
+# ---------------------------------------------------------------------------
+#  The live tutor.
+#
+#  One per live session, fed from the same status the panel polls. It decides
+#  for itself when the student is stuck -- see app_js/tutor.py -- and only then
+#  asks the model anything. Its messages ride back on the status reply, which
+#  the page is already polling, so nothing new has to be kept open.
+#
+#  It speaks into the SAME chat session as the student, so the two are one
+#  conversation and "why?" can be typed straight back at it.
+# ---------------------------------------------------------------------------
+TUTOR_SESSION = "millikan_test_session"
+_tutor = None
+
+
+def _ask_model(prompt):
+    """One turn from the LLM, or None if it will not answer right now."""
+    out = []
+    for event in getResponseFromGemini(userQuery = prompt, sessionID = TUTOR_SESSION):
+        kind, data = getattr(event, "type", None), getattr(event, "data", None)
+        if kind == "text":
+            out.append(data or "")
+        elif kind == "error":
+            # Busy with the student's own question, or misconfigured. Either way
+            # the tutor stays quiet rather than queueing a stale interruption.
+            print("live tutor: model declined -- %s" % str(data)[:120], flush = True)
+            return None
+        elif kind == "done":
+            break
+    return "".join(out) or None
 
 # ---------------------------------------------------------------------------
 #  Chat session accounting.
@@ -189,6 +221,16 @@ _selection = {
     "rangeSince": None,   # monotonic timestamp when rangeState last changed
     "suitable": "unknown",  # the debounced verdict actually shown to the student
 }
+
+
+def start_tutor():
+    global _tutor
+    _tutor = Tutor(_ask_model)
+
+
+def stop_tutor():
+    global _tutor
+    _tutor = None
 
 
 def reset_selection():
@@ -460,12 +502,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 status = None
 
+        tutor, said = _tutor, []
+        if running and tutor is not None:
+            tutor.poll(status)
+            said = tutor.take()
+
         self._json({
             "running": running,
             "device": handle.get("device") if running else None,
             "source": handle.get("source") if running else None,
             "status": status,
             "selected": selection_view(status, running),
+            "tutor": said,
         })
 
     def _start_live(self):
@@ -491,6 +539,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             handle = start_live(source=source)
             reset_selection()          # a new session picks its own droplets
+            start_tutor()
             token = secrets.token_urlsafe(24)
             set_live(handle, token)
             self._json({
@@ -556,6 +605,7 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             clear_live()
             reset_selection()
+            stop_tutor()
         self._json({"ok": True})
 
     def _chat(self):

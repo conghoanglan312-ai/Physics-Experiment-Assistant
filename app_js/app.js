@@ -936,6 +936,27 @@ function clearBanner() {
   guidanceLine.className = "guidance-line idle";
 }
 
+// The tutor speaks rarely and only when our own rules say the student is stuck
+// (app_js/tutor.py), so each message is worth a place in the conversation rather
+// than a toast that scrolls away. It lands in the same chat the student types in,
+// so "why?" can be asked straight back.
+function showTutor(messages) {
+  if (!Array.isArray(messages) || !messages.length) return;
+  for (const m of messages) {
+    if (!m || !m.text) continue;
+    addMessage("assistant", m.text);
+  }
+  if (!aiPanel.classList.contains("open")) {
+    aiFab.classList.add("has-unread");
+    aiPromptBubble.textContent = "";
+    const spark = document.createElement("span");
+    spark.className = "ai-sparkle";
+    spark.textContent = "✨";
+    aiPromptBubble.append(spark, document.createTextNode("The tutor has a suggestion"));
+    aiPromptBubble.style.display = "";
+  }
+}
+
 function renderSelectedDroplet(selected) {
   const data = selected || {};
   const verdict = SUITABILITY[data.suitable] || SUITABILITY.unknown;
@@ -1009,6 +1030,7 @@ async function pollLiveState() {
     liveButton.disabled = false;
   }
 
+  showTutor(payload.tutor);
   renderSelectedDroplet(payload.selected);
   if (payload.running && payload.status) {
     fitFeedBox(payload.status.frameWidth, payload.status.frameHeight);
