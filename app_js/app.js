@@ -685,9 +685,12 @@ async function startLive(explicitSource) {
 
 function showLoading(text) {
   if (text) feedLoadingBody.textContent = text;
+  // Only play the expand-out when coming from the empty-state box.
+  const fromPlaceholder = !videoPlaceholder.classList.contains("hidden");
   videoPlaceholder.classList.add("hidden");
   fallbackVideo.classList.add("hidden");
   liveFeed.classList.add("hidden");
+  feedLoading.classList.toggle("expanding", fromPlaceholder);
   feedLoading.classList.remove("hidden");
 }
 

@@ -217,6 +217,21 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 .feed-loading-title { font-size: 19px; font-weight: 700; letter-spacing: .5px; }
 .feed-loading-body { font-size: 14px; opacity: .7; max-width: 340px; line-height: 1.5; }
 
+/* On start, the darker inner box of the empty state grows out to the edges of the
+   feed box first (same size/position as .video-placeholder at frame 0), then the
+   spinner and text fade in. */
+.feed-loading.expanding { animation: feedExpand .35s cubic-bezier(.22, .8, .3, 1) both; }
+.feed-loading.expanding > * { opacity: 0; animation: feedContentIn .25s ease .3s forwards; }
+.feed-loading.expanding > .feed-spinner { animation: feedSpin .9s linear infinite, feedContentIn .25s ease .3s forwards; }
+@keyframes feedExpand {
+  from { top: 5%; bottom: 5%; left: 2.5%; right: 2.5%; }
+  to   { top: 0;  bottom: 0;  left: 0;    right: 0; }
+}
+@keyframes feedContentIn { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .feed-loading.expanding, .feed-loading.expanding > * { animation-duration: .01s; animation-delay: 0s; }
+}
+
 .video-placeholder {
   width: 95%; height: 90%;
   background: var(--inset-bg);
@@ -293,17 +308,22 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
    its own window. ONE line that is replaced in place: what it says now is the
    instruction, and a line that has been superseded is not worth reading. */
 .guidance-line {
-  margin: 8px 0 4px; padding: 12px 14px; min-height: 48px;
+  margin: 8px 0 4px; padding: 14px 12px; min-height: 48px;
   display: flex; align-items: center; justify-content: center; text-align: center;
-  border-radius: 12px; background: var(--inset-bg);
+  border-radius: 12px;
   border: 1px solid var(--panel-border);
-  font-size: 14px; line-height: 1.4; font-weight: 600;
-  color: rgba(var(--text-rgb), .75);
+  font-size: 13px; line-height: 1.5; font-weight: 600; color: rgba(var(--text-rgb), 0.92);
+  /* Same glass as the title box / feed / info panel / notifications. */
+  background: var(--panel-bg);
+  backdrop-filter: blur(15px);
+  -webkit-backdrop-filter: blur(15px);
+  box-shadow: var(--card-shadow);
 }
 .guidance-line.good { color: var(--success); }
 .guidance-line.warn { color: var(--warning-text, var(--warning)); }
 .guidance-line.bad { color: var(--danger); }
-.guidance-line.idle { font-weight: 500; opacity: .6; font-style: italic; }
+/* Placeholder / waiting text: still semibold, but softer than real guidance. */
+.guidance-line.idle { font-weight: 600; font-style: italic; color: rgba(var(--text-rgb), 0.55); }
 .feed-title { text-align: center; margin-top: 10px; font-size: 18px; font-weight: 600; letter-spacing: 4px; opacity: 0.7; transition: color .15s ease; }
 .feed-title.live { color: var(--success); opacity: .95; }
 .feed-title.demo { color: var(--warning-text); opacity: 1; }
@@ -523,6 +543,7 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 :root[data-theme="light"] .title-box,
 :root[data-theme="light"] .video-container,
 :root[data-theme="light"] .info-panel,
+:root[data-theme="light"] .guidance-line,
 :root[data-theme="light"] .notification-panel {
   background: var(--float-panel-bg);
   box-shadow: var(--float-shadow);
