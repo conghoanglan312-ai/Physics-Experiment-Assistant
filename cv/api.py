@@ -122,7 +122,8 @@ LIVE_KEYS = (
     "tracked", "falls", "legalFalls", "dropletsCompleted", "targetFallsPerDroplet",
     "voltageV", "fieldState",           # the panel reading -- app only, see THE SEAL
     "frameWidth", "frameHeight",        # so a click can be sent as a fraction
-    "picked", "id", "speedGridPerSec", "fallSeconds", "fallRunning", "balancePercent",
+    "picked", "id", "trackId", "speedGridPerSec", "fallSeconds", "fallRunning",
+    "balancePercent",
 )
 
 

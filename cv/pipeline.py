@@ -2051,6 +2051,13 @@ LIFT_VOLTS = 300.0
 SPEED_MEDIAN_S = 5.0
 SPEED_GATE_SLACK = 0.15
 SPEED_UNSTABLE_GRID_S = 0.20    # a speed swinging wider than this is not a reading
+SPEED_FIRST_VERDICT_S = 1.5     # ...and one measured over less time than this is not
+                                # a reading either.  A droplet cut to 0 V was called
+                                # "0.02 gr/s -- too slow, DISCARD" a second after the
+                                # switch, off a window that still held the seconds it
+                                # spent balanced.  Reversing a verdict already needed
+                                # this long; making the FIRST one is no cheaper.
+STILL_GRID_S = 0.05             # slower than this, with the field off, is not falling
                                 # -- the pair that produced DISCARD then USABLE two
                                 # seconds apart spanned 0.24
 # How long a droplet must go on being unbalanceable before it is crossed out.
@@ -2929,6 +2936,8 @@ def usableSpeed(t, now, speed, sinceChange = None):
             return v, None
     span = hist[-1][0] - hist[0][0] if len(hist) > 1 else 0.0
     was = getattr(t, "speedVerdict", None)
+    if was is None and span < SPEED_FIRST_VERDICT_S:
+        return v, None              # too little of it to judge -- see the constant
     lo, hi = MIN_SPEED, MAX_SPEED
     if was:
         lo, hi = lo * (1.0 - SPEED_GATE_SLACK), hi * (1.0 + SPEED_GATE_SLACK)
@@ -3048,6 +3057,13 @@ def steadyTarget(t, now, ub, volts):
         values = [float(ub)]
         target = float(ub)
     step = TARGET_HALF_STEP * (target - float(volts))
+    # The median can sit far from what THIS estimate says while it is still settling,
+    # and the operator is asked to act on the difference: "LOWER by about 35 V" went
+    # out about a droplet 2.8% off balance -- some 5 V at 197 V -- three seconds
+    # before the same droplet was called balanced.  A move no larger than the newest
+    # estimate's own gap keeps the instruction inside the physics.
+    cap = max(5.0, abs(float(ub) - float(volts)))
+    step = float(np.clip(step, -cap, cap))
     step = float(np.sign(step) * max(5.0, round(abs(step) / 5.0) * 5.0))
     if len(values) < TARGET_MIN_SAMPLES or hist[-1][0] - hist[0][0] < 3.0:
         return target, False, step
@@ -3218,9 +3234,24 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
         # droplet falling too slowly be told the same instead of that it was too slow.
         # Both were the wrong question answered first.
         shown, ok = usableSpeed(t, now, speed, sinceChange)
+        hist = getattr(t, "speedHistory", None) or []
+        span = (hist[-1][0] - hist[0][0]) if len(hist) > 1 else 0.0
         if ok is None:
+            # Two different silences.  A window too short to mean anything is not the
+            # same as a droplet whose speed will not hold still, and saying "let it
+            # settle" about the first one told the operator to wait for something
+            # that had already happened.
+            if span < SPEED_FIRST_VERDICT_S:
+                return ("picked id %d -- timing its fall" % t.id, (0, 220, 255), None)
             return ("picked id %d -- moving too unevenly to judge; let it settle"
                     % t.id, (0, 220, 255), None)
+        if abs(shown) <= STILL_GRID_S:
+            # Not falling at all with no field to hold it.  That is not a slow
+            # droplet, it is a speck stuck to the window or a stale track: on
+            # 2026-09-20 "falls -0.00 gr/s -- too slow for 0.2-0.5, DISCARD" was
+            # written about one, which reads as a verdict on the operator's droplet.
+            return ("picked id %d is not moving with the field off -- the square is "
+                    "probably not on your droplet" % t.id, (0, 140, 255), None)
         if ok:
             return ("picked id %d falls %.2f gr/s -- USABLE, balance it on `0`"
                     % (t.id, shown), (0, 255, 0), True)
@@ -3323,8 +3354,15 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
     floor = brownianFloorPct(vFree, window)
     # `coarse` means the fit fell back to a short window, where the floor is not a
     # floor and the percentage is a guess.  No green cue is given on a guess.
-    atFloor = (floor is not None and not coarse and pct <= floor * 1.3
+    # Hysteresis, like the balanced verdict above it.  Told "1.0% -- as good as it
+    # gets", then "2.0% -- still calculating, RAISE by about 5 V" seconds later, an
+    # operator has been handed two contradictory instructions about a droplet that
+    # did not change: the floor itself moves with the window it is measured over.
+    wasFloor = bool(getattr(t, "atFloorVerdict", False))
+    atFloor = (floor is not None and not coarse
+               and pct <= floor * (1.7 if wasFloor else 1.3)
                and window >= FLOOR_CLAIM_MIN_S)
+    t.atFloorVerdict = atFloor
     if pct <= limit or atFloor:
         if not ADVISORY_MIN_V <= volts <= ADVISORY_MAX_V:
             return ("picked id %d balances at %d V, outside the manual's %g-%g V"
@@ -3960,6 +3998,11 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     pickedLevel = None              # the field state when the pick was last SEEN
     lastPickedId = None             # ...and which track it was, to drop stale banners
     committedAt = None              # when the operator took charge of this droplet
+    pickSerial = 0                  # ...and which droplet of the session that is.  A
+                                    # track id changes every time the tracker loses
+                                    # the droplet for a moment, and the app announced
+                                    # a new droplet each time: DROPLET 12, 13, 14
+                                    # inside a minute, all of them the same droplet.
     noisySince = None               # when the detection count started running high
     lastVoltBucket = None           # the plate voltage last seen, bucketed to 10 V...
     voltsChangedAt = -1e9           # ...and when it changed, for CHARGE_SETTLE_S
@@ -4306,6 +4349,16 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # look at: four of nine legal falls came back with no
                         # voltage on 2026-09-08 and the diagnosis had to be
                         # guesswork.  Keep the crop and the vote spread.
+                        # Nothing balances above LIFT_VOLTS.  On 2026-09-20 a legal
+                        # fall was filed at 407 V, because the droplet had been lifted
+                        # shortly before it was released and that is what the panel
+                        # was showing.  dropletGroups already refuses to group such a
+                        # fall; the CSV kept the number anyway, which is a wrong
+                        # balance voltage in the data the team works from.  No number
+                        # is better than that one.
+                        if (t.balanceVoltage is not None
+                                and float(t.balanceVoltage) > LIFT_VOLTS):
+                            t.balanceVoltage, t.voltageFrom = None, "lift, ignored"
                         if (src.isLive and t.balanceVoltage is None
                                 and t.kinematicLegal):
                             saveRefusedPanel(outDir, t.tTop, panelReport)
@@ -4544,6 +4597,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                 or abs(float(picked.pos[0]) - chosenX)
                                 > SAME_DROPLET_X_PX):
                             committedAt = now
+                            pickSerial += 1
                         pickedSeen = now
                         pickedLevel = fieldLevel(steadyVolts)
                         lastClickAt = now
@@ -4569,6 +4623,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             pickedSeen = pickedAuto = now
                             pickedAt = (float(picked.pos[0]), float(picked.pos[1]))
                             committedAt = now      # a new droplet, a new measurement
+                            pickSerial += 1
                     # HOLD the track while it lives.  Re-selecting the nearest track
                     # every frame is not following a droplet, it is following a
                     # neighbourhood, and in a crowded frame it changes its mind: two
@@ -5464,7 +5519,11 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     clock_ = clocked[0] if clocked else None
                     running_ = clock_ is not None and clock_.tBottom is None
                     picked_ = {
-                        "id": int(picked.id),
+                        # The DROPLET, not the track: see pickSerial.  The track id
+                        # is still published, because a diagnostic that cannot be
+                        # matched to the banner is no diagnostic.
+                        "id": int(pickSerial),
+                        "trackId": int(picked.id),
                         "speedGridPerSec": None if v_ is None else round(float(v_), 3),
                         "fallSeconds": (None if clock_ is None
                                         else round(now - clock_.tTop, 2) if running_
