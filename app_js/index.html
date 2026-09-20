@@ -5,12 +5,27 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Millikan AI Assistant</title>
   <link rel="stylesheet" href="styles.css" />
+  <script>
+    // Applied before first paint so the page never flashes the wrong theme.
+    (function () {
+      try {
+        var saved = localStorage.getItem("millikanTheme");
+        var theme = saved === "light" || saved === "dark"
+          ? saved
+          : (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+        document.documentElement.dataset.theme = theme;
+      } catch (_) {
+        document.documentElement.dataset.theme = "dark";
+      }
+    })();
+  </script>
 </head>
 <body>
   <div class="page-glow" aria-hidden="true"></div>
 
   <main class="app">
     <section class="title-box">
+      <button id="themeToggle" class="theme-toggle" type="button" aria-label="Switch to light mode">🌙</button>
       <div class="main-title">🔬 Millikan Oil Drop AI Assistant</div>
       <div class="subtitle">AI-powered laboratory assistant for oil droplet selection</div>
     </section>
@@ -18,49 +33,76 @@
     <section class="main-grid">
       <div class="video-column">
         <div class="video-container" id="videoContainer">
+          <div id="sessionTimer" class="session-timer hidden" aria-hidden="true">
+            <span class="session-dot"></span><span id="sessionTimerText">00:00</span>
+          </div>
           <img id="liveFeed" class="live-feed-img hidden" alt="Live microscopic feed" draggable="false" />
           <video id="fallbackVideo" class="fallback-video hidden" autoplay muted loop playsinline>
             <source src="/app_test/test_footage.mp4" type="video/mp4" />
           </video>
-          <div id="videoPlaceholder" class="video-placeholder">MICROSCOPIC CAMERA FEED</div>
+          <div id="videoPlaceholder" class="video-placeholder">
+            <div class="empty-state-icon" aria-hidden="true">🔬</div>
+            <div class="empty-state-title">No camera feed detected</div>
+            <div class="empty-state-body">Connect the microscope camera or start the live feed to begin.</div>
+            <button id="emptyStateStartButton" class="live-button empty-state-cta" type="button">▶ Start Live Feed</button>
+          </div>
         </div>
 
-        <div class="feed-title">[ LIVE MICROSCOPIC VIEW ]</div>
+        <div class="feed-title" id="feedTitle">[ MICROSCOPIC VIEW ]</div>
         <div id="feedStatus" class="feed-status hidden"></div>
 
         <div class="feed-controls">
-          <button id="liveButton" class="live-button">▶ Start live feed</button>
+          <div class="feed-mode-group">
+            <button id="liveButton" class="live-button">▶ Start Live Feed</button>
+            <input
+              id="liveSourceInput"
+              class="live-source-input"
+              type="text"
+              placeholder="Camera index (optional)"
+              aria-label="Camera index"
+              autocomplete="off"
+            />
+          </div>
+          <div class="feed-mode-divider" aria-hidden="true">or</div>
+          <button
+            id="demoClipButton"
+            class="demo-button"
+            type="button"
+            title="Runs a bundled test clip through the pipeline -- no apparatus or dongle needed"
+          >🎬 Try Demo Video</button>
         </div>
+        <div id="feedHint" class="feed-hint hidden"></div>
       </div>
 
       <aside class="info-column">
         <div class="info-panel">
-          <div class="droplet-preview-box">
-            <div class="droplet-info">
-              <div class="droplet-title">SELECTED DROPLET</div>
-              <div class="droplet-id">ID: #12</div>
-            </div>
-            <div class="droplet-indicator">
-              <div class="droplet-ring suitable"></div>
+          <div class="droplet-id-row">
+            <div class="droplet-ring unknown" id="dropletRing"></div>
+            <div class="droplet-id-text">
+              <div class="droplet-id" id="dropletLabel">—</div>
+              <div class="droplet-status-word" id="dropletStatus">—</div>
             </div>
           </div>
 
-          <div class="info-item"><span class="info-label">STATUS</span>: Suitable</div>
-          <div class="info-item"><span class="info-label">FALL TIME</span>: 3 s</div>
-          <div class="info-item"><span class="info-label">VELOCITY</span>: 0.03 grid/s</div>
-
-          <div class="divider"></div>
-          <div class="reference-title">REFERENCE DATA</div>
-
-          <div class="reference-item"><span>Oil Density</span><span>981 kg·m⁻³</span></div>
-          <div class="reference-item"><span>Gravity</span><span>9.78 m·s⁻²</span></div>
-          <div class="reference-item"><span>Air Viscosity</span><span>1.83×10⁻⁵ kg·m⁻¹·s⁻¹</span></div>
-          <div class="reference-item"><span>Descent Distance</span><span>1.60×10⁻³ m</span></div>
-          <div class="reference-item"><span>Correction Constant</span><span>8.22×10⁻³ m·Pa</span></div>
-          <div class="reference-item"><span>Atmospheric Pressure</span><span>1.0098×10⁵ Pa</span></div>
-          <div class="reference-item"><span>Plate Distance</span><span>5.00×10⁻³ m</span></div>
+          <!-- Every value here comes from cv/api.py through /api/live/status.
+               A field the CV API did not provide stays a dash. -->
+          <div class="info-stats">
+            <div class="info-item"><span class="info-label">VOLTAGE</span><span id="dropletVoltage">—</span></div>
+            <div class="info-item"><span class="info-label">FALL TIME</span><span id="dropletFallTime">—</span></div>
+            <div class="info-item"><span class="info-label">VELOCITY</span><span id="dropletVelocity">—</span></div>
+            <div class="info-item"><span class="info-label">FIELD</span><span id="dropletField" class="field-value">—</span></div>
+          </div>
         </div>
-        <div class="feed-title">[ DROPLET ANALYSIS ]</div>
+        <div class="droplet-analysis">[ DROPLET ANALYSIS ]</div>
+
+        <div class="notification-panel">
+          <div class="notification-list" id="notificationList">
+            <div class="notification-placeholder" id="notificationPlaceholder">
+              Start a session and click a droplet to see notifications here.
+            </div>
+          </div>
+        </div>
+        <div class="feed-title">[ NOTIFICATIONS ]</div>
       </aside>
     </section>
 
@@ -147,6 +189,7 @@
         rows="3"
         placeholder="Ask something about the experiment..."
         aria-label="Ask something about the experiment"
+        style="background-color: var(--input-box-bg); opacity: 1"
       ></textarea>
       <div class="input-row">
         <div id="charCounter" class="ai-char-counter">0 / 2000</div>

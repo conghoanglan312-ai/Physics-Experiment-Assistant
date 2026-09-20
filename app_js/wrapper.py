@@ -20,9 +20,14 @@ Used two ways:
       operator quits it with `q` or Ctrl+C. No mirroring involved.
 
   from wrapper import start_live, stop_live
-      What the Streamlit UI calls. Runs the bench check, launches the live
-      pipeline in the background, waits for its window to appear, and starts
-      mirroring it. Returns a handle; stop_live(handle) tears everything down.
+      What the browser UI calls. By default (no source) this is unchanged:
+      runs the bench check, launches the live pipeline in the background,
+      waits for its window to appear, and starts mirroring it. Pass a
+      number to use that camera index directly (skipping the bench check),
+      or a clip spec (a file path, or "frames:DIR") to run it through
+      pipeline.py's own `play` entry point instead -- same window, no
+      apparatus needed. Returns a handle; stop_live(handle) tears
+      everything down.
 
 Needs pywin32 (for locating and reading the native window) and Pillow (for
 the actual screen grab), on top of what pipeline.py already needs:
@@ -41,6 +46,7 @@ import ctypes
 
 import numpy as np
 from PIL import Image
+import win32api
 import win32con
 import win32gui
 import win32ui
@@ -87,6 +93,21 @@ def _find_free_port(start = 8899, tries = 20):
             if s.connect_ex(("127.0.0.1", port)) != 0:
                 return port
     raise RuntimeError("no free port found for the live feed server")
+
+
+def _looksNumeric(value):
+    """True for anything that should be read as a camera index rather than
+    a clip spec: an int/float, or a string of digits (optionally signed).
+    Everything else -- a file path, a "frames:DIR" spec, "cam:N" -- is a
+    clip and goes through `play`, not `live`.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        return value.strip().lstrip("-").isdigit()
+    return False
 
 
 def _find_window(title, timeout, poll = 0.25):
@@ -245,10 +266,18 @@ def _mirror_window(hwnd, streamer, stop_event, fps = MIRROR_FPS):
         time.sleep(max(0.0, period - (time.time() - t0)))
 
 
-def start_live(stream_port = None, window_timeout = WINDOW_TIMEOUT_S, source = None):
-    """Run the bench check, launch the live pipeline in the background with
-    its normal native window, then start mirroring that window over HTTP.
+def start_live(source = None, stream_port = None, window_timeout = WINDOW_TIMEOUT_S):
+    """Run the bench check and launch the live pipeline in the background with its native
+    "Droplets" window, then start mirroring that window over HTTP.
 
+    `source` is optional and skips the bench check:
+      - None (default): runs the bench check to pick a real camera/dongle, then
+        `python -m cv.pipeline live <device>`.
+      - a number (int or numeric string): uses that camera index.
+      - anything else (a string): treated as a recorded clip; runs
+        `python -m cv.pipeline play <source>` through the same window (click-to-pick still works).
+    """
+    """
     `source` skips the bench check.  A number is a camera index; anything else
     is a recorded clip, which the pipeline plays through the same window at
     real speed with click-to-pick working -- so the whole app can be exercised
@@ -283,11 +312,20 @@ def start_live(stream_port = None, window_timeout = WINDOW_TIMEOUT_S, source = N
     hwnd = _find_window(WINDOW_TITLE, timeout = window_timeout)
     if hwnd is None:
         process.terminate()
+        # command is [python, -m, cv.pipeline, live|play, source] -- only a live
+        # run spends its first ~30s learning the background before the window
+        # appears, so only a live run gets the extra explanation. (This used to
+        # test command[0], which is the interpreter and is never "live", so the
+        # placeholder text on the other branch went out to the operator.)
+        learning_note = (
+            " (including the background-learning wait)"
+            if len(command) > 3 and command[3] == "live" else ""
+        )
         raise RuntimeError(
             "The pipeline started but its '%s' window never appeared within "
             "%.0fs. It prints its own progress to the console this was run "
-            "from (including the background-learning wait) -- check there "
-            "for what it's stuck on." % (WINDOW_TITLE, window_timeout)
+            "from%s -- check there for what it's stuck on."
+            % (WINDOW_TITLE, window_timeout, learning_note)
         )
 
     # Keep the pipeline window rendered for Windows' PrintWindow capture, but
@@ -333,6 +371,7 @@ def start_live(stream_port = None, window_timeout = WINDOW_TIMEOUT_S, source = N
         "hwnd": hwnd,
         "port": port,
         "device": device,
+        "source": source if source is not None else device,
         "url": "http://127.0.0.1:%d/stream" % port,
     }
 
@@ -340,11 +379,7 @@ def start_live(stream_port = None, window_timeout = WINDOW_TIMEOUT_S, source = N
 def send_click(handle, x, y):
     """Forward a click from the browser to the running pipeline.
 
-    `x` and `y` are fractions of the frame, because the browser is drawing the picture
-    at whatever size its layout gives it and only fractions survive that.  The
-    pipeline turns them back into pixels of its own frame and drops them into the same
-    queue its mouse callback feeds, so a click from the page and a click on the window
-    are the same event by the time anything acts on it.
+    `x` and `y` are fractions of the frame; the pipeline converts them to pixels.
     """
     if handle is None:
         raise RuntimeError("no live session")
@@ -356,6 +391,30 @@ def send_click(handle, x, y):
     line = json.dumps({"x": x, "y": y}) + "\n"
     process.stdin.write(line.encode("utf-8"))
     process.stdin.flush()
+
+
+def click_live(handle, x, y):
+    """Forward one left-click to the pipeline's native window at pixel coords (x, y).
+
+    This posts Win32 mouse messages so pipeline.py receives the same WM_LBUTTON events
+    as a real mouse click.
+    """
+    if not handle:
+        raise RuntimeError("no live session")
+    hwnd = handle.get("hwnd")
+    if not hwnd or not win32gui.IsWindow(hwnd):
+        raise RuntimeError("the pipeline window is not available")
+
+    width, height = _window_client_size(hwnd)
+    ix, iy = int(round(x)), int(round(y))
+    if width > 0:
+        ix = max(0, min(width - 1, ix))
+    if height > 0:
+        iy = max(0, min(height - 1, iy))
+
+    lparam = win32api.MAKELONG(ix, iy)
+    win32gui.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lparam)
+    win32gui.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lparam)
 
 
 def stop_live(handle):
