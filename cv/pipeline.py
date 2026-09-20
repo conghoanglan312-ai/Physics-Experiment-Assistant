@@ -404,6 +404,12 @@ LIVE_STATUS_S = 0.4             # how often the live status file is rewritten.  
 _liveStatusAt = [0.0]
 
 
+DARK_EARLY_S = 2.0              # ...and how long its prediction is worth trusting
+DARK_LOOK_PX = 30.0             # how near the prediction a detection still counts
+                                # as "the droplet is right there" while a track is
+                                # dark.  See darkTally, printed when a measuring
+                                # track is given up on.
+
 CONTENT_DARK = 16               # a pixel this dark carries no picture...
 CONTENT_SHARE = 0.005           # ...and a line with fewer lit than this is a black bar.
                                 # Deliberately timid: the apparatus's `V:` panel is
@@ -1455,6 +1461,14 @@ CONFIRM_POINTS = 6         # seen this many times before a track is believed;
                            # cuts peak live tracks from 604 to 52
 PROBATION_S = 0.2          # an unconfirmed track dies this fast; kills one-frame strays
 AREA_TOLERANCE = 0.7       # a re-found blob may differ this much in area
+# ...except for a track whose CLOCK IS RUNNING and which has gone dark.  Measured on
+# one_droplet_slow: of every frame where a detection the pipeline had already accepted
+# sat within 30 px of such a track's prediction and was not given to it, 74% were
+# refused by the area test alone -- against 10% taken by another track.  The test is
+# self-defeating there: a droplet goes dark BECAUSE it dimmed or bloomed, and then has
+# to come back the size it was before it did.  Everything else still applies: the x
+# window, the y window along the axis of travel, and the measuring track's priority.
+MEASURING_AREA_TOLERANCE = 2.5
 SCREEN_MIN, SCREEN_MAX = 0.15, 0.60     # provisional band, deliberately wider than legal
 
 # How long a track must have survived before the overlay draws it.  DISPLAY ONLY --
@@ -1771,7 +1785,10 @@ def assign(tracks, centres, maxStep, areaFloor, now, xGate):
                 if abs(c[0] - t.pos[0]) > xGate or not yLo <= c[1] <= yHi:
                     continue
             areaDiff = abs(c[2] - t.area) / max(t.area, areaFloor)
-            if areaDiff > AREA_TOLERANCE:
+            tol = (MEASURING_AREA_TOLERANCE
+                   if (t.miss > 0 and t.tTop is not None and t.tBottom is None)
+                   else AREA_TOLERANCE)
+            if areaDiff > tol:
                 continue
             cost[i, j] = d + areaDiff * maxStep      # appearance weighs as much as position
     pairs = {}
@@ -4380,6 +4397,61 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                               flush = True)
                 else:
                     t.miss += 1
+                    # What the DETECTOR saw where this track is pointing, every frame
+                    # it is dark -- not just at the moment it is given up on.  The
+                    # question behind every lost measurement is whether the droplet
+                    # was still in the picture, and answering it from outside the
+                    # pipeline failed twice: a blob detector of my own could not tell
+                    # the droplet from the specks around it, scoring the same in a
+                    # control column 150 px away.  The pipeline's own gates already
+                    # make that distinction, so let them answer.
+                    if t.tTop is not None and t.tBottom is None \
+                            and len(t.points) >= CONFIRM_POINTS:
+                        waitedDark = now - float(t.lastT)
+                        aimX, aimY = t.predict(now)
+                        seen = min((float(np.hypot(c[0] - aimX, c[1] - aimY))
+                                    for c in centres), default = None)
+                        gated = nearestRejected(aimX, aimY)
+                        tally = getattr(t, "darkTally", None)
+                        if tally is None:
+                            tally = t.darkTally = {"frames": 0, "accepted": 0,
+                                                   "rejected": 0, "gates": {},
+                                                   "early": 0, "earlyAcc": 0,
+                                                   "earlyRej": 0, "why": {}}
+                        tally["frames"] += 1
+                        # ...and when something WAS there and we did not take it,
+                        # which of the gates said no.  "Seen but not assigned" is
+                        # the half of these losses that is ours to fix, and the
+                        # fix depends entirely on which test refused it.
+                        if seen is not None and seen <= DARK_LOOK_PX:
+                            j = min(range(len(centres)),
+                                    key = lambda k: np.hypot(centres[k][0] - aimX,
+                                                             centres[k][1] - aimY))
+                            c = centres[j]
+                            # Gates first, "claimed" last: a blob this track was
+                            # never allowed to take is not one another track stole.
+                            if abs(float(c[2]) - t.area) / max(t.area,
+                                                               s["areaFloor"])                                     > AREA_TOLERANCE:
+                                why = "area too different"
+                            elif abs(c[0] - t.pos[0]) > s["reidX"]:
+                                why = "outside the x window"
+                            elif j in set(pairs.values()):
+                                why = "allowed, but another track took it"
+                            else:
+                                why = "outside the y window or step"
+                            tally["why"][why] = tally["why"].get(why, 0) + 1
+                        # The first couple of seconds separately.  After that the aim
+                        # is extrapolated velocity and has wandered, so "nothing
+                        # there" says as much about the prediction as the picture.
+                        early = waitedDark <= DARK_EARLY_S
+                        tally["early"] += int(early)
+                        if seen is not None and seen <= DARK_LOOK_PX:
+                            tally["accepted"] += 1
+                            tally["earlyAcc"] += int(early)
+                        elif gated is not None and gated[0] <= DARK_LOOK_PX:
+                            tally["rejected"] += 1
+                            tally["earlyRej"] += int(early)
+                            tally["gates"][gated[1]] = tally["gates"].get(gated[1], 0) + 1
             keep, buried = [], []
             probationS = max(PROBATION_S, 2 * dt)    # never shorter than two frames
             for t in live:
@@ -4418,6 +4490,10 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # at afterwards.  Without it these lines could only be counted,
                         # not checked: the frame is what says whether the droplet was
                         # really invisible or merely unassigned.
+                        tally = getattr(t, "darkTally", None) or {}
+                        gates = ", ".join("%s %d" % kv for kv in
+                                          sorted(tally.get("gates", {}).items(),
+                                                 key = lambda kv: -kv[1])[:3])
                         print("  mid-fall track %d died at %.1f s (frame %d) x=%.0f "
                               "y=%.0f after %.1f s dark (limit %.1f); own area %.0f; "
                               "nearest ACCEPTED %s; nearest REJECTED %s"
@@ -4429,6 +4505,22 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                  "%.0f px (%s, area %.0f, circ %.2f)"
                                  % (gated[0], gated[1], gated[2], gated[3])),
                               flush = True)
+                        if tally.get("frames"):
+                            print("      while dark: %d frames, ACCEPTED within "
+                                  "%.0f px on %d, REJECTED on %d%s | first %.0fs: "
+                                  "%d frames, %d accepted, %d rejected"
+                                  % (tally["frames"], DARK_LOOK_PX, tally["accepted"],
+                                     tally["rejected"],
+                                     " (%s)" % gates if gates else "",
+                                     DARK_EARLY_S, tally["early"], tally["earlyAcc"],
+                                     tally["earlyRej"]),
+                                  flush = True)
+                            if tally.get("why"):
+                                print("      not taken because: %s"
+                                      % ", ".join("%s %d" % kv for kv in
+                                                  sorted(tally["why"].items(),
+                                                         key = lambda kv: -kv[1])),
+                                      flush = True)
                     buried.append(t)                 # only confirmed tracks are worth keeping
             live = keep
             morgue.extend(buried)
