@@ -24,7 +24,8 @@ import re
 import threading
 import time
 
-from cv.api import llm_context, liveStatusPath
+from cv.api import llm_context, liveStatusPath, droplets_from_falls
+from cv.api import _Row, TARGET_DROPLETS, TARGET_FALLS_PER_DROPLET
 
 # Being stuck is a stretch of time with no progress, so every threshold here is in
 # seconds and every one of them is deliberately long. A tutor that interrupts a
@@ -299,61 +300,67 @@ def whyPrompt(status):
 def debriefFacts(rows):
     """What a finished session amounts to, from its falls.
 
-    `rows` are falls.csv as dicts. Everything here is timing, counts and the
-    scatter between repeats -- the things that decide the uncertainty the student
-    will report, and none of which is a step towards the charge.
-    """
-    def num(v):
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
+    `rows` are falls.csv as dicts. The first version counted every traverse in
+    the file as an attempt, and the model duly told an operator that "the high
+    number of rejected falls suggests you struggled" -- about 19 traverses of
+    debris they never touched. cv.api.droplets_from_falls() makes the division
+    the pipeline itself makes: the droplets that were measured, the traverses in
+    their columns, and everything else falling past the camera.
 
-    legal = [r for r in rows if str(r.get("legal")).lower() == "true"]
-    times = [num(r.get("seconds")) for r in legal]
-    times = [t for t in times if t is not None]
-    kin = [r for r in rows if str(r.get("kinematicLegal")).lower() == "true"]
-    fieldOn = [r for r in kin if str(r.get("fieldOff")).lower() == "false"]
-    reacq = sum(1 for r in legal if num(r.get("reacquired")))
+    Everything here is timing, counts and the scatter between repeats -- the
+    things that decide the uncertainty the student reports, and none of which is
+    a step towards the charge.
+    """
+    groups, mine, background = droplets_from_falls(rows)
+    legal = [f for f in mine if f.legal]
     facts = {
-        "traverses": len(rows),
-        "legalFalls": len(legal),
-        "rejectedForPace": len(rows) - len(kin),
-        "rejectedForFieldOn": len(fieldOn),
-        "fallsNeedingReacquisition": reacq,
+        # What the manual asks for, so "you are 1 of 3 droplets in" is available
+        # to say instead of generic encouragement.
+        "targetDroplets": TARGET_DROPLETS,
+        "targetFallsPerDroplet": TARGET_FALLS_PER_DROPLET,
+        "dropletsMeasured": len(groups),
+        "fallsPerDroplet": [len(g) for g in groups],
+        "yourTraverses": len(mine),
+        "backgroundTraversesNotYours": len(background),
+        "yourFallsVoidedByLiveField": sum(1 for f in mine
+                                          if f.kinematicLegal and f.fieldOff is False),
+        "yourFallsOffThePace": sum(1 for f in mine if not f.kinematicLegal),
+        "yourFallsNeedingReacquisition": sum(1 for f in legal if f.reacquired),
     }
-    if times:
+    times = [f.seconds for g in groups for f in g if f.seconds]
+    if len(times) > 1:
         mean = sum(times) / len(times)
-        spread = max(times) - min(times)
-        sd = (sum((t - mean) ** 2 for t in times) / max(1, len(times) - 1)) ** 0.5
+        sd = (sum((t - mean) ** 2 for t in times) / (len(times) - 1)) ** 0.5
         facts.update({
             "meanFallSeconds": round(mean, 2),
-            "spreadSeconds": round(spread, 2),
-            "sdSeconds": round(sd, 3),
+            "spreadSeconds": round(max(times) - min(times), 2),
             "sdPercent": round(100.0 * sd / mean, 2),
             "sdOfTheMeanPercent": round(100.0 * sd / (len(times) ** 0.5) / mean, 2),
         })
-    if rows:
-        starts = [num(r.get("startTime")) for r in rows]
-        starts = [t for t in starts if t is not None]
-        firstLegal = min((num(r.get("startTime")) for r in legal), default = None)
-        if starts:
-            facts["sessionMinutes"] = round((max(starts) - min(starts)) / 60.0, 1)
-        if firstLegal is not None and starts:
+    starts = [f.tTop for f in [_Row(d) for d in rows] if f.tTop is not None]
+    firstLegal = min((f.tTop for f in legal if f.tTop is not None), default=None)
+    if starts:
+        facts["sessionMinutes"] = round((max(starts) - min(starts)) / 60.0, 1)
+        if firstLegal is not None:
             facts["minutesToFirstLegalFall"] = round((firstLegal - min(starts)) / 60.0, 1)
     return facts
 
 
 def debriefPrompt(facts):
     return (
-        "A student has just finished a Millikan oil-drop session. Here is what "
-        "their measurement aid recorded (times in seconds; a LEGAL fall is one "
-        "timed over the full 1.6 mm with the field off, at a pace the manual "
-        "accepts; plate voltages are deliberately withheld):\n%s\n\n"
-        "Write a short debrief in ENGLISH for the student, at most 120 words, in "
-        "plain prose: what went well, what cost them time, and the single change "
-        "most likely to improve the next session. If the repeats are already "
-        "consistent, say so plainly rather than inventing a problem. Do not "
-        "compute or state any charge, electron count or voltage."
+        "A student has just finished a Millikan oil-drop session. Below is what "
+        "their measurement aid recorded.\n\nRead the field names carefully. The "
+        "aid times EVERY droplet that crosses the grid, so most traverses in a "
+        "session are debris drifting past the camera; only `yourTraverses` were "
+        "the student's own droplets, and `backgroundTraversesNotYours` is not a "
+        "count of anything they did. A LEGAL fall is one timed over the full "
+        "1.6 mm with the field off, at a pace the manual accepts. Plate voltages "
+        "are deliberately withheld. Times are in seconds.\n\n%s\n\n"
+        "Write a debrief in ENGLISH for the student, at most 110 words, in plain "
+        "prose. Judge the session by what they measured and how consistent the "
+        "repeats were, not by how many droplets the camera saw. If the repeats "
+        "are consistent, say so plainly instead of inventing a problem. Name at "
+        "most one thing to change next time, and only if the numbers support it. "
+        "Do not compute or state any charge, electron count or voltage."
         % json.dumps(facts, ensure_ascii = False, indent = 1)
     )
