@@ -90,6 +90,15 @@ CONTRACT_VERSION = 2
 # --------------------------------------------------------------------------
 
 LLM_KEYS = (
+    # From a LIVE session, so the tutor can talk about what is happening now. The
+    # test for adding one is whether it names a voltage: times, speeds, counts and
+    # states do not, and none of them is a step from q. `voltageV` and `message`
+    # are absent on purpose -- the banner says "BALANCED to 0.0% at 153 V" in plain
+    # text, which is the reading itself. `voltageInWorkingRange` is the boolean
+    # llm/util/voltageSafeguard.py replaces the reading with.
+    "phase", "elapsedSeconds", "fieldState", "voltageInWorkingRange",
+    "tracked", "legalFalls", "id", "trackId", "fallSeconds", "fallRunning",
+    "balancePercent",
     # per fall
     "seconds", "speedGridPerSec", "kinematicLegal", "fieldOff", "legal",
     "fallDrift", "fallDirection", "holdDrift", "holdDirection",
@@ -100,7 +109,7 @@ LLM_KEYS = (
     # health
     "roiOk", "detectionsPerFrame",
     # containers — not values, but the filter has to descend through them
-    "droplets", "falls",
+    "droplets", "falls", "picked",
 )
 
 
@@ -122,7 +131,8 @@ LIVE_KEYS = (
     "tracked", "falls", "legalFalls", "dropletsCompleted", "targetFallsPerDroplet",
     "voltageV", "fieldState",           # the panel reading -- app only, see THE SEAL
     "frameWidth", "frameHeight",        # so a click can be sent as a fraction
-    "picked", "id", "speedGridPerSec", "fallSeconds", "fallRunning", "balancePercent",
+    "picked", "id", "trackId", "speedGridPerSec", "fallSeconds", "fallRunning",
+    "balancePercent",
 )
 
 

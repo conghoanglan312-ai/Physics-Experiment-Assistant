@@ -37,6 +37,11 @@
             <span class="session-dot"></span><span id="sessionTimerText">00:00</span>
           </div>
           <img id="liveFeed" class="live-feed-img hidden" alt="Live microscopic feed" draggable="false" />
+          <div id="feedLoading" class="feed-loading hidden">
+            <div class="feed-spinner" aria-hidden="true"></div>
+            <div class="feed-loading-title">Starting the camera…</div>
+            <div class="feed-loading-body" id="feedLoadingBody">Running the bench check.</div>
+          </div>
           <video id="fallbackVideo" class="fallback-video hidden" autoplay muted loop playsinline>
             <source src="/app_test/test_footage.mp4" type="video/mp4" />
           </video>
@@ -94,6 +99,7 @@
           </div>
         </div>
         <div class="droplet-analysis">[ DROPLET ANALYSIS ]</div>
+        <div class="guidance-line" id="guidanceLine">Start a session to see the aid's guidance here.</div>
 
         <div class="notification-panel">
           <div class="notification-list" id="notificationList">

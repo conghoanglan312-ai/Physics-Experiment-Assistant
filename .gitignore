@@ -7,7 +7,6 @@ __pycache__/
 .DS_Store
 /llm/chroma_db/
 test.py
-*.pdf
 *.log
 test/
 CLAUDE.md
@@ -23,3 +22,6 @@ uvc_check/
 # deliverable -- the charge table and the raw per-traverse rows behind every figure
 # quoted.  Scoped to that one directory so the rule above still holds everywhere else.
 !cv/for_report/*.csv
+
+# The Demo button plays this one, so it ships with the repo (6.8 MB).
+!app_js/fixtures/demo_clip.mp4

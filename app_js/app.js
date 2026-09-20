@@ -16,6 +16,8 @@ const demoClipButton = document.getElementById("demoClipButton");
 const liveFeed = document.getElementById("liveFeed");
 const fallbackVideo = document.getElementById("fallbackVideo");
 const videoPlaceholder = document.getElementById("videoPlaceholder");
+const feedLoading = document.getElementById("feedLoading");
+const feedLoadingBody = document.getElementById("feedLoadingBody");
 const videoContainer = document.getElementById("videoContainer");
 const feedHint = document.getElementById("feedHint");
 const feedStatus = document.getElementById("feedStatus");
@@ -34,6 +36,7 @@ const dropletVoltage = document.getElementById("dropletVoltage");
 const dropletFallTime = document.getElementById("dropletFallTime");
 const dropletVelocity = document.getElementById("dropletVelocity");
 const dropletField = document.getElementById("dropletField");
+const guidanceLine = document.getElementById("guidanceLine");
 
 const state = {
   messages: [],
@@ -57,6 +60,7 @@ const state = {
   // Used to notice droplet-pick and suitability *transitions* so the Message
   // panel gets one note per real event rather than one per poll.
   lastDropletLabel: null,
+  lastBannerText: null,       // the aid's line as it currently reads
   lastSuitable: null,
 };
 
@@ -644,6 +648,11 @@ async function startLive(explicitSource) {
       ? `Starting playback for "${source}"...`
       : "Running bench check and starting capture...";
   feedStatus.classList.remove("hidden", "error", "live", "demo");
+  showLoading(state.isDemo
+    ? "Opening the clip."
+    : source
+      ? `Opening "${source}".`
+      : "Running the bench check, then learning the background for about 30 seconds. Do not spray yet.");
 
   try {
     const response = await fetch("/api/live/start", {
@@ -674,7 +683,20 @@ async function startLive(explicitSource) {
   }
 }
 
+function showLoading(text) {
+  if (text) feedLoadingBody.textContent = text;
+  videoPlaceholder.classList.add("hidden");
+  fallbackVideo.classList.add("hidden");
+  liveFeed.classList.add("hidden");
+  feedLoading.classList.remove("hidden");
+}
+
+function hideLoading() {
+  feedLoading.classList.add("hidden");
+}
+
 function showLiveFeed(url, device, source) {
+  hideLoading();
   fallbackVideo.pause();
   fallbackVideo.classList.add("hidden");
   videoPlaceholder.classList.add("hidden");
@@ -694,6 +716,8 @@ function showLiveFeed(url, device, source) {
 }
 
 function showFallback() {
+  hideLoading();
+  unfitFeedBox();
   liveFeed.removeAttribute("src");
   liveFeed.classList.add("hidden");
   if (fallbackVideo.readyState > 0) {
@@ -745,6 +769,27 @@ async function sendLiveClick(x, y) {
     // Best-effort -- a dropped click just means the operator clicks again.
   }
 }
+
+// Shape the box to the frame, so `contain` has nothing left to letterbox. An
+// MJPEG <img> is one endless response, so its load event cannot be relied on to
+// fire per frame -- the status carries the same two numbers, so either will do.
+function fitFeedBox(w, h) {
+  if (!w || !h) return;
+  videoContainer.style.aspectRatio = `${w} / ${h}`;
+  videoContainer.style.height = "auto";
+  videoContainer.style.minHeight = "0";
+}
+
+// Idle, the box keeps the apparatus's shape rather than a tall placeholder: an
+// empty panel far taller than any frame it will ever show is dead space before
+// the session has even started. Real numbers replace these on the first frame.
+const FEED_ASPECT_W = 909, FEED_ASPECT_H = 645;
+
+function unfitFeedBox() {
+  fitFeedBox(FEED_ASPECT_W, FEED_ASPECT_H);
+}
+
+liveFeed.addEventListener("load", () => fitFeedBox(liveFeed.naturalWidth, liveFeed.naturalHeight));
 
 liveFeed.addEventListener("click", (event) => {
   if (!state.live || !liveFeed.naturalWidth || !liveFeed.naturalHeight) return;
@@ -854,6 +899,43 @@ function fallSecondsToDisplay(data) {
   return state.lastFallSeconds;
 }
 
+// The pipeline's own guidance line -- what it draws along the bottom of its
+// window -- shown here instead, because the feed is cropped to the microscope
+// picture on purpose. It is the instruction the operator acts on.
+//
+// ONE line, replaced in place, exactly like the banner in the pipeline's window.
+// It was first built as notifications, and the operator's verdict was that stale
+// cards piling up are "very disrupting": the aid's line is an instruction about
+// right now, so a superseded one is not worth reading. Nothing here accumulates.
+function bannerClass(text) {
+  if (/BALANCED|USABLE|within the noise|as good as it gets/.test(text)) return "good";
+  if (/DISCARD|no reachable balance/.test(text)) return "bad";
+  if (/lost your droplet|left the view|DIFFERENT droplet|too heavy|RISING|barely held|will not hold still/.test(text)) return "warn";
+  return "";
+}
+
+function showBanner(status, selected) {
+  const raw = (status && status.message) || "";
+  if (!raw) {
+    guidanceLine.textContent = "Waiting for the aid…";
+    guidanceLine.className = "guidance-line idle";
+    return;
+  }
+  // "picked id 4015" is the tracker's number; the panel calls it DROPLET 9.
+  const label = (selected && selected.label) || null;
+  const text = label ? raw.replace(/picked id \d+/g, label) : raw;
+  if (text === state.lastBannerText) return;      // same words, no repaint
+  state.lastBannerText = text;
+  guidanceLine.textContent = text;
+  guidanceLine.className = `guidance-line ${bannerClass(text)}`;
+}
+
+function clearBanner() {
+  state.lastBannerText = null;
+  guidanceLine.textContent = "Start a session to see the aid's guidance here.";
+  guidanceLine.className = "guidance-line idle";
+}
+
 function renderSelectedDroplet(selected) {
   const data = selected || {};
   const verdict = SUITABILITY[data.suitable] || SUITABILITY.unknown;
@@ -899,7 +981,7 @@ function renderSelectedDroplet(selected) {
 // that only re-reads the same file. When nothing is running there is nothing to
 // keep up with, so ease off rather than stopping: the page then picks up a
 // session started from elsewhere without anyone reloading it.
-const LIVE_POLL_MS = 1000;
+const LIVE_POLL_MS = 500;
 const IDLE_POLL_MS = 5000;
 
 function scheduleLivePoll(delay) {
@@ -928,6 +1010,11 @@ async function pollLiveState() {
   }
 
   renderSelectedDroplet(payload.selected);
+  if (payload.running && payload.status) {
+    fitFeedBox(payload.status.frameWidth, payload.status.frameHeight);
+  }
+  if (payload.running) showBanner(payload.status, payload.selected);
+  else clearBanner();
   scheduleLivePoll(payload.running ? LIVE_POLL_MS : IDLE_POLL_MS);
 }
 
