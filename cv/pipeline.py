@@ -404,6 +404,41 @@ LIVE_STATUS_S = 0.4             # how often the live status file is rewritten.  
 _liveStatusAt = [0.0]
 
 
+CONTENT_DARK = 16               # a pixel this dark carries no picture...
+CONTENT_SHARE = 0.005           # ...and a line with fewer lit than this is a black bar.
+                                # Deliberately timid: the apparatus's `V:` panel is
+                                # sparse bright text on black and sits OUTSIDE the ROI,
+                                # so anything less cautious would crop the reading the
+                                # operator balances against.
+
+
+def contentBox(img, roi):
+    """The apparatus picture inside the captured frame, as (x, y, w, h).
+
+    The dongle delivers the microscope's 4:3 picture inside a 16:9 frame, so every
+    frame arrives with a black bar down each side.  In the pipeline's own window
+    that costs nothing, but the app draws the same frame into a panel beside the
+    text, where the bars are most of the width and the operator called it dead
+    space.  This is the picture with the bars cut off -- the WHOLE picture, grid
+    and `V:` panel included, not the measured ROI.
+
+    The ROI is always inside the result: a dim apparatus must never crop away the
+    region the measurement is made in.
+    """
+    # A SHARE of the line, not its brightest pixel: one hot pixel or a speck of
+    # sensor noise in the bar would otherwise keep the whole bar.
+    grey = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    lit = grey > CONTENT_DARK
+    cols = np.where(lit.mean(axis = 0) > CONTENT_SHARE)[0]
+    rows = np.where(lit.mean(axis = 1) > CONTENT_SHARE)[0]
+    x, y, w, h = roi
+    if len(cols) == 0 or len(rows) == 0:
+        return (0, 0, int(grey.shape[1]), int(grey.shape[0]))
+    x0, x1 = min(int(cols[0]), x), max(int(cols[-1]) + 1, x + w)
+    y0, y1 = min(int(rows[0]), y), max(int(rows[-1]) + 1, y + h)
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
 def publishFrame(display):
     """Hand the drawn frame to the publisher thread, if one is running."""
     if _publishPort[0] is None:
@@ -3806,7 +3841,9 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     lastClickAt = 0.0               # ...and when they last clicked anything
     pickedAuto = -1e9               # when the aid last picked one for them
     clicks = []                     # filled by the mouse callback, drained in the loop
-    remoteClicks = []               # ...and by a parent process, as frame fractions
+    remoteClicks = []               # ...and by a parent process, as fractions of the
+                                    # picture the app shows -- see contentBox
+    webBox = None                   # that picture: the frame without its black bars
 
     def onMouse(event, mx, my, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -3973,6 +4010,11 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     try:
         for frame, now in src.frames(fromFrame, toFrame):
             n += 1
+            if webBox is None:              # the picture the app is shown; see contentBox
+                webBox = contentBox(frame, (X, Y, W, H))
+                print("  app view %dx%d at (%d,%d) of a %dx%d frame"
+                      % (webBox[2], webBox[3], webBox[0], webBox[1],
+                         frame.shape[1], frame.shape[0]), flush = True)
             # dt comes from the timestamps, never from fps.  A dropped frame then widens
             # every gate by exactly the right amount instead of orphaning the track.
             dt = (1.0 / fps) if prevT is None else max(1e-6, now - prevT)
@@ -4460,12 +4502,13 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # AUTOSIZE and shows it 1:1.  Convert and they are the same event.
                     while remoteClicks:
                         fx, fy = remoteClicks.pop()
-                        # Fractions of the picture the app is SHOWING, which is the
-                        # ROI -- see publishFrame below.  The window still shows the
-                        # whole frame, so a remote click is put back where a mouse
-                        # click on the same droplet would have landed.
-                        clicks.append((int(round(fx * W)) + X,
-                                       int(round(fy * H)) + Y))
+                        # Fractions of the picture the app is SHOWING -- the frame
+                        # with its black bars cut off, see contentBox.  The window
+                        # shows the whole frame, so the click is put back where a
+                        # mouse click on the same droplet would have landed.
+                        bx, by, bw, bh = webBox or (0, 0, frame.shape[1], frame.shape[0])
+                        clicks.append((int(round(fx * bw)) + bx,
+                                       int(round(fy * bh)) + by))
                     while clicks:
                         mx, my = clicks.pop()
                         rx, ry = mx - X, my - Y
@@ -5424,8 +5467,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         fieldState = fieldLevel(steadyVolts),
                         message = banner or "",
                         picked = picked_,
-                        frameWidth = int(W),        # the picture the app is shown: the
-                        frameHeight = int(H),       # ROI, which is what a click maps to
+                        frameWidth = int(webBox[2]),    # the picture the app is
+                        frameHeight = int(webBox[3]),   # shown, which clicks map to
                         dropletsCompleted = len(dropletGroups(falls)),
                         targetFallsPerDroplet = TARGET_FALLS_PER_DROPLET,
                     )
@@ -5474,16 +5517,15 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         display = frame.copy()
                         display[Y:Y + H, X:X + W] = plain
                         cv2.rectangle(display, (X, Y), (X + W, Y + H), (0, 160, 0), 1)
+                    # The app gets the same picture, minus the black bars the dongle
+                    # pads the frame with -- in a browser panel those were most of its
+                    # width.  Everything the operator looks at stays: the grid, the
+                    # droplets, the apparatus's own `V:` readout.  Published BEFORE
+                    # the HUD, which the app draws itself and does not want burnt in.
+                    bx, by, bw, bh = webBox
+                    publishFrame(display[by:by + bh, bx:bx + bw].copy())
+                    if not blind:
                         drawHud(display)
-                    # The app gets the ROI alone.  The whole frame carries a black
-                    # border and the dongle's grey margins around the apparatus
-                    # picture, which in a browser panel is dead space around the only
-                    # thing anyone is looking at.  The window keeps the full frame --
-                    # the operator needs the `V:` readout where the apparatus puts it,
-                    # and the banner along the bottom -- and the app has both already:
-                    # the voltage in its panel, the guidance in its own line.
-                    publishFrame((frame[Y:Y + H, X:X + W] if blind
-                                  else plain).copy())
                     cv2.imshow("Droplets", display)
                     if src.isLive:
                         delay = 1           # a camera sets its own pace; never wait on it

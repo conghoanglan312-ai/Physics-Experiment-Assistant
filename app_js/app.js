@@ -780,10 +780,13 @@ function fitFeedBox(w, h) {
   videoContainer.style.minHeight = "0";
 }
 
+// Idle, the box keeps the apparatus's shape rather than a tall placeholder: an
+// empty panel far taller than any frame it will ever show is dead space before
+// the session has even started. Real numbers replace these on the first frame.
+const FEED_ASPECT_W = 909, FEED_ASPECT_H = 645;
+
 function unfitFeedBox() {
-  videoContainer.style.removeProperty("aspect-ratio");
-  videoContainer.style.removeProperty("height");
-  videoContainer.style.removeProperty("min-height");
+  fitFeedBox(FEED_ASPECT_W, FEED_ASPECT_H);
 }
 
 liveFeed.addEventListener("load", () => fitFeedBox(liveFeed.naturalWidth, liveFeed.naturalHeight));
