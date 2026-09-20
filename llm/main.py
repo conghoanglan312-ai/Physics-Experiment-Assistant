@@ -21,13 +21,26 @@ def _session_id(session_id):
     return session_id if session_id is not None else str(uuid4())
 
 def getSafeDropletData(sessionID):
-    from cv.api import live_status
+    """The live session, filtered down to what may enter a prompt.
+
+    voltage_selection_filter() replaces the `voltageV` reading with a boolean, but
+    it passes everything else through -- including `message`, which is the aid's
+    banner and names the voltage in plain text:
+
+        "picked id 4015 BALANCED to 0.0% at 153 V -- STOP ADJUSTING ..."
+
+    With a fall time beside it that is q = K(t)*d/U_n, which is the answer rubric
+    三.1.4 says the student must produce. llm_context() is the allow-list that
+    exists to stop exactly this, so it runs last and has the final say: anything
+    not named in cv/api.py's LLM_KEYS does not reach the model.
+    """
+    from cv.api import live_status, llm_context
     from .util.voltageSafeguard import voltage_selection_filter
     memory.updateDropletSessionData(sessionID, live_status())
 
     data = memory.getDropletSessionData(sessionID)
-    data = voltage_selection_filter(data)
-    
+    data = llm_context(voltage_selection_filter(data))
+
     print("Safe Droplet Data: ", data)
     return data
 
