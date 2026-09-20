@@ -26,6 +26,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app_js import tutor as T
 
+# A replay must not write into the live log: a bench session is reviewed from
+# that file, and stub replies from an offline run are not part of it.
+T.TUTOR_LOG = "tutor_replay_log.jsonl"
+
 
 def replay(path, ask):
     rows = [json.loads(line) for line in open(path, encoding="utf-8")]

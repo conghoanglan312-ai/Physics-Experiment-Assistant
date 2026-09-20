@@ -417,16 +417,45 @@ def click_live(handle, x, y):
     win32gui.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lparam)
 
 
+QUIT_WAIT_S = 25.0          # how long a session may take to write its artefacts
+
+
 def stop_live(handle):
-    """Tear down everything start_live() started. Safe to call twice."""
+    """Tear down everything start_live() started. Safe to call twice.
+
+    Quits the session the way `q` does, and WAITS. Terminating the pipeline
+    kills it mid-frame: report() never runs, so falls.csv is never written and
+    the recording is left unfinalised -- a whole session's measurements gone
+    because a button said "Stop". An operator lost one that way on 2026-09-20,
+    having been told beforehand that Stop did exactly this, which is not a
+    warning so much as an admission.
+
+    So: post `q` to the window, which is the path the pipeline already handles
+    cleanly, and only fall back to terminating it if it will not go.
+    """
     if not handle:
         return
+    proc = handle.get("process")
+    hwnd = handle.get("hwnd")
+    if proc is not None and proc.poll() is None and hwnd:
+        try:
+            win32gui.PostMessage(hwnd, win32con.WM_KEYDOWN, ord("Q"), 0)
+            win32gui.PostMessage(hwnd, win32con.WM_CHAR, ord("q"), 0)
+            win32gui.PostMessage(hwnd, win32con.WM_KEYUP, ord("Q"), 0)
+        except Exception:
+            pass                                # the window is already gone
+        deadline = time.time() + QUIT_WAIT_S
+        while proc.poll() is None and time.time() < deadline:
+            time.sleep(0.25)
+    # The mirror is stopped only now: while the pipeline is finishing its
+    # report it is still a running session, and the feed can keep showing it.
     handle["stop_event"].set()
     streamer = handle.get("streamer")
     if streamer is not None:
         streamer.stop()
-    proc = handle.get("process")
     if proc is not None and proc.poll() is None:
+        print("live session did not quit within %.0fs; terminating it -- this "
+              "session's falls.csv may be missing" % QUIT_WAIT_S, flush = True)
         proc.terminate()
 
 

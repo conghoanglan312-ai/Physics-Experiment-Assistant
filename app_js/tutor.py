@@ -24,14 +24,19 @@ import re
 import threading
 import time
 
-from cv.api import llm_context, liveStatusPath, droplets_from_falls
-from cv.api import _Row, TARGET_DROPLETS, TARGET_FALLS_PER_DROPLET
+from cv.api import llm_context, liveStatusPath
 
 # Being stuck is a stretch of time with no progress, so every threshold here is in
 # seconds and every one of them is deliberately long. A tutor that interrupts a
 # student who is doing fine is worse than one that says nothing at all.
 STALL_TUNING_S = 90.0           # balancing this long with no balance reached
 STALL_NO_FALL_S = 180.0         # a droplet held this long with no legal fall
+STALL_IDLE_S = 120.0            # ...or this long of a running session with no legal
+                                # fall at all, picked droplet or not.  An operator sat
+                                # for four minutes getting nowhere on 2026-09-20 and
+                                # the tutor said nothing, because every other rule
+                                # needs a droplet to be selected -- and having nothing
+                                # selected for four minutes IS the problem.
 LOST_REPEATS = 3                # times the pick is lost...
 LOST_WINDOW_S = 60.0            # ...inside this window
 FLIP_REPEATS = 3                # USABLE/DISCARD reversals...
@@ -91,6 +96,9 @@ class Tutor:
         self._flipAt = []
         self._lastVerdict = None
         self._legalFalls = 0
+        self._lastProgress = None   # when a legal fall last landed
+        self._toldOffline = False   # ...and whether the student has been told the
+                                    # model is unreachable, which is said once
         self._kindAt = {}           # stall kind -> when it was last said
         self._kindSaid = {}         # ...and how often, this session
 
@@ -113,6 +121,7 @@ class Tutor:
             self._tuningSince = None
         if legal != self._legalFalls:               # progress: the clock resets
             self._legalFalls = legal
+            self._lastProgress = now
             self._pickedSince = now
             self._tuningSince = None
 
@@ -152,11 +161,27 @@ class Tutor:
                     "%.0f seconds without reaching balance"
                     % (now - self._tuningSince))
         if len(self._lostAt) >= LOST_REPEATS:
-            return ("lost", "the aid has lost the student's droplet %d times in "
-                    "the last minute" % len(self._lostAt))
+            # Say whose fault it is. Told only that the droplet "was lost", the
+            # model explained it as physics -- "your droplet is falling too
+            # slowly to be tracked, it is probably too small" -- about a droplet
+            # the operator was holding balanced and could see perfectly well.
+            # The tracker losing sight of something is a limitation of ours, and
+            # advice that starts by blaming the student is worse than silence.
+            return ("lost", "the aid's TRACKER keeps losing sight of the droplet "
+                    "(%d times in the last minute) -- this is a limitation of the "
+                    "software, not a property of their droplet, and it happens most "
+                    "to a droplet held still by the field. Tell them how to carry on "
+                    "measuring despite it" % len(self._lostAt))
         if len(self._flipAt) >= FLIP_REPEATS:
             return ("flapping", "the droplet's verdict has flipped between USABLE "
                     "and DISCARD %d times in the last minute" % len(self._flipAt))
+        if (self._started and now - max(self._started, self._lastProgress or 0)
+                >= STALL_IDLE_S):
+            return ("idle", "the session has been running for %.0f seconds without a "
+                    "single legal fall being completed, and right now %s"
+                    % (now - self._started,
+                       "no droplet is selected" if picked.get("id") is None
+                       else "a droplet is selected but not producing falls"))
         if (picked.get("id") is not None and self._pickedSince
                 and now - self._pickedSince >= STALL_NO_FALL_S):
             return ("nofall", "the student has held the same droplet for %.0f "
@@ -190,6 +215,18 @@ class Tutor:
             print("live tutor: %s" % exc, flush = True)
         finally:
             self._busy = False
+        if text is None and not self._toldOffline:
+            # The rules found a stall and the model could not be reached -- on
+            # 2026-09-20 because the lab's proxy had stopped routing the API. The
+            # tutor's silence then looks exactly like "nothing is wrong", and the
+            # operator waited six minutes for a message that had already been
+            # composed and thrown away. Say so once, and never again this session.
+            self._toldOffline = True
+            with self._lock:
+                self._pending.append({
+                    "text": "The tutor cannot reach the AI service, so it will stay "
+                            "quiet this session. The measurement aid is unaffected.",
+                    "at": time.time(), "offline": True})
         if text and FORBIDDEN.search(text):
             # See FORBIDDEN. The student reads a voltage off the apparatus, never
             # off a model that guessed one.
@@ -239,11 +276,11 @@ class Tutor:
 
 
 # ---------------------------------------------------------------------------
-#  Two things the student ASKS for, rather than the tutor volunteering.
+#  What the student ASKS for, rather than the tutor volunteering.
 #
-#  Neither can flood anything: one runs when a session has ended, the other
-#  when a button is pressed. Both are built from the same sealed material as
-#  everything else here -- times, speeds, counts, states, never a voltage.
+#  It cannot flood anything: it answers a button. It is built from the same
+#  sealed material as everything else here -- times, speeds, counts, states,
+#  never a voltage.
 # ---------------------------------------------------------------------------
 
 # What the banner is saying, as a KIND rather than its words. The banner names
@@ -294,73 +331,4 @@ def whyPrompt(status):
         "their measurement. Do not compute or state any charge, electron count or "
         "voltage."
         % (kind, json.dumps(safe, ensure_ascii = False))
-    )
-
-
-def debriefFacts(rows):
-    """What a finished session amounts to, from its falls.
-
-    `rows` are falls.csv as dicts. The first version counted every traverse in
-    the file as an attempt, and the model duly told an operator that "the high
-    number of rejected falls suggests you struggled" -- about 19 traverses of
-    debris they never touched. cv.api.droplets_from_falls() makes the division
-    the pipeline itself makes: the droplets that were measured, the traverses in
-    their columns, and everything else falling past the camera.
-
-    Everything here is timing, counts and the scatter between repeats -- the
-    things that decide the uncertainty the student reports, and none of which is
-    a step towards the charge.
-    """
-    groups, mine, background = droplets_from_falls(rows)
-    legal = [f for f in mine if f.legal]
-    facts = {
-        # What the manual asks for, so "you are 1 of 3 droplets in" is available
-        # to say instead of generic encouragement.
-        "targetDroplets": TARGET_DROPLETS,
-        "targetFallsPerDroplet": TARGET_FALLS_PER_DROPLET,
-        "dropletsMeasured": len(groups),
-        "fallsPerDroplet": [len(g) for g in groups],
-        "yourTraverses": len(mine),
-        "backgroundTraversesNotYours": len(background),
-        "yourFallsVoidedByLiveField": sum(1 for f in mine
-                                          if f.kinematicLegal and f.fieldOff is False),
-        "yourFallsOffThePace": sum(1 for f in mine if not f.kinematicLegal),
-        "yourFallsNeedingReacquisition": sum(1 for f in legal if f.reacquired),
-    }
-    times = [f.seconds for g in groups for f in g if f.seconds]
-    if len(times) > 1:
-        mean = sum(times) / len(times)
-        sd = (sum((t - mean) ** 2 for t in times) / (len(times) - 1)) ** 0.5
-        facts.update({
-            "meanFallSeconds": round(mean, 2),
-            "spreadSeconds": round(max(times) - min(times), 2),
-            "sdPercent": round(100.0 * sd / mean, 2),
-            "sdOfTheMeanPercent": round(100.0 * sd / (len(times) ** 0.5) / mean, 2),
-        })
-    starts = [f.tTop for f in [_Row(d) for d in rows] if f.tTop is not None]
-    firstLegal = min((f.tTop for f in legal if f.tTop is not None), default=None)
-    if starts:
-        facts["sessionMinutes"] = round((max(starts) - min(starts)) / 60.0, 1)
-        if firstLegal is not None:
-            facts["minutesToFirstLegalFall"] = round((firstLegal - min(starts)) / 60.0, 1)
-    return facts
-
-
-def debriefPrompt(facts):
-    return (
-        "A student has just finished a Millikan oil-drop session. Below is what "
-        "their measurement aid recorded.\n\nRead the field names carefully. The "
-        "aid times EVERY droplet that crosses the grid, so most traverses in a "
-        "session are debris drifting past the camera; only `yourTraverses` were "
-        "the student's own droplets, and `backgroundTraversesNotYours` is not a "
-        "count of anything they did. A LEGAL fall is one timed over the full "
-        "1.6 mm with the field off, at a pace the manual accepts. Plate voltages "
-        "are deliberately withheld. Times are in seconds.\n\n%s\n\n"
-        "Write a debrief in ENGLISH for the student, at most 110 words, in plain "
-        "prose. Judge the session by what they measured and how consistent the "
-        "repeats were, not by how many droplets the camera saw. If the repeats "
-        "are consistent, say so plainly instead of inventing a problem. Name at "
-        "most one thing to change next time, and only if the numbers support it. "
-        "Do not compute or state any charge, electron count or voltage."
-        % json.dumps(facts, ensure_ascii = False, indent = 1)
     )

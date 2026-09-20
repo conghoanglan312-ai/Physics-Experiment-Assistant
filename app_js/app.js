@@ -38,7 +38,9 @@ const dropletVelocity = document.getElementById("dropletVelocity");
 const dropletField = document.getElementById("dropletField");
 const guidanceLine = document.getElementById("guidanceLine");
 const whyButton = document.getElementById("whyButton");
-const debriefButton = document.getElementById("debriefButton");
+const whyAnswer = document.getElementById("whyAnswer");
+const whyText = document.getElementById("whyText");
+const whyMore = document.getElementById("whyMore");
 
 const state = {
   messages: [],
@@ -63,6 +65,7 @@ const state = {
   // panel gets one note per real event rather than one per poll.
   lastDropletLabel: null,
   lastBannerText: null,       // the aid's line as it currently reads
+  lastWhy: null,              // ...and the explanation showing for it, if any
   lastSuitable: null,
 };
 
@@ -791,34 +794,45 @@ function unfitFeedBox() {
   fitFeedBox(FEED_ASPECT_W, FEED_ASPECT_H);
 }
 
-// "Why?" explains the line above it; the debrief reviews the session that has
-// just finished. Both put their answer in the chat, so it stays part of one
-// conversation and can be argued with, and both disable themselves while the
-// model is working -- one question at a time is all the LLM layer allows.
-async function askAi(button, url, waitingText) {
-  if (button.disabled) return;
-  const label = button.textContent;
-  button.disabled = true;
-  button.textContent = "…";
-  addMessage("user", waitingText);
+// "Why?" explains the line above it. The answer lands in the chat, so it stays
+// part of one conversation and can be argued with, and the button disables
+// itself while the model works -- one question at a time is all the LLM layer
+// allows.
+async function askWhy() {
+  if (whyButton.disabled) return;
+  const asked = state.lastBannerText;
+  whyButton.disabled = true;
+  whyAnswer.classList.remove("hidden");
+  whyAnswer.classList.add("thinking");
+  whyText.textContent = "Working it out…";
   try {
-    const response = await fetch(url, { method: "POST" });
+    const response = await fetch("/api/ai/why", { method: "POST" });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "The assistant could not answer.");
-    addMessage("assistant", payload.text);
-    if (!aiPanel.classList.contains("open")) aiFab.classList.add("has-unread");
+    whyAnswer.classList.remove("thinking");
+    whyText.textContent = payload.text;
+    state.lastWhy = { asked, answer: payload.text };
   } catch (error) {
-    addMessage("assistant", `_${error.message}_`);
+    whyAnswer.classList.remove("thinking");
+    whyText.textContent = error.message;
+    state.lastWhy = null;
   } finally {
-    button.textContent = label;
-    button.disabled = false;
+    whyButton.disabled = false;
   }
 }
 
-whyButton.addEventListener("click", () =>
-  askAi(whyButton, "/api/ai/why", "Why is the aid telling me this?"));
-debriefButton.addEventListener("click", () =>
-  askAi(debriefButton, "/api/ai/debrief", "How did that session go?"));
+// The chat keeps the conversation; the panel keeps the answer. Following up puts
+// both halves in the chat so the model has the context the student is replying to.
+function whyIntoChat() {
+  if (!state.lastWhy) return;
+  addMessage("user", `Why is the aid saying: "${state.lastWhy.asked}"?`);
+  addMessage("assistant", state.lastWhy.answer);
+  openAi();
+  aiInput.focus();
+}
+
+whyButton.addEventListener("click", askWhy);
+whyMore.addEventListener("click", whyIntoChat);
 
 liveFeed.addEventListener("load", () => fitFeedBox(liveFeed.naturalWidth, liveFeed.naturalHeight));
 
@@ -958,12 +972,18 @@ function showBanner(status, selected) {
   if (text === state.lastBannerText) return;      // same words, no repaint
   state.lastBannerText = text;
   whyButton.disabled = false;
+  if (state.lastWhy && state.lastWhy.asked !== text) {
+    whyAnswer.classList.add("hidden");       // it explained a line that has moved on
+    state.lastWhy = null;
+  }
   guidanceLine.textContent = text;
   guidanceLine.className = `guidance-line ${bannerClass(text)}`;
 }
 
 function clearBanner() {
   state.lastBannerText = null;
+  state.lastWhy = null;
+  whyAnswer.classList.add("hidden");
   whyButton.disabled = true;
   guidanceLine.textContent = "Start a session to see the aid's guidance here.";
   guidanceLine.className = "guidance-line idle";
@@ -999,7 +1019,6 @@ function renderSelectedDroplet(selected) {
   // dropping back out after being suitable) gets its own note. Both reuse
   // the server's own note text -- nothing here is invented client-side.
   if (data.label && data.label !== state.lastDropletLabel) {
-    if (data.note) pushSystemMessage("info", `${data.label} selected — ${data.note}`);
     // A different droplet: drop the previous one's held voltage / fall time now,
     // instead of waiting for fieldState to overwrite them.
     resetHeldMeasurements();

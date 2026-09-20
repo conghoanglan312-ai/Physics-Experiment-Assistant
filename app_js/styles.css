@@ -297,8 +297,23 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 .guidance-line.bad { color: var(--danger); }
 .guidance-line.idle { font-weight: 500; opacity: .6; font-style: italic; }
 
-/* Both are asked for, never volunteered: "Why?" explains the line above it, and
-   the debrief reviews the session that has just finished. Neither polls. */
+/* Asked for, never volunteered: "Why?" explains the line above it. No polling.
+   The answer appears HERE rather than in the chat: the student is mid-measurement
+   with one hand on the knob, and making them open a panel to read two sentences
+   is a click they cannot spare. The chat still gets it, for following up. */
+.why-answer {
+  margin: 2px 0 8px; padding: 12px 14px;
+  border-radius: 12px; background: var(--accent-soft);
+  border: 1px solid var(--panel-border);
+  font-size: 13.5px; line-height: 1.45;
+}
+.why-text { color: rgba(var(--text-rgb), .92); }
+.why-answer.thinking .why-text { opacity: .6; font-style: italic; }
+.why-more {
+  margin-top: 8px; padding: 0; border: none; background: none;
+  color: var(--accent); font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.why-more:hover { text-decoration: underline; }
 .guidance-actions { display: flex; gap: 8px; justify-content: center; margin-bottom: 6px; }
 .ghost-button {
   border: 1px solid var(--panel-border); background: transparent;

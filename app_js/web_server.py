@@ -7,7 +7,6 @@ llm.main.getResponseFromGemini() as browser-accessible HTTP endpoints.
 
 from __future__ import annotations
 
-import csv
 import json
 import mimetypes
 import os
@@ -21,8 +20,9 @@ from urllib.parse import parse_qs, urlparse
 
 from llm.main import getResponseFromGemini
 from app_js.wrapper import start_live, stop_live, send_click
-from app_js.tutor import Tutor, whyPrompt, debriefFacts, debriefPrompt
-from cv.api import live_status, outDirFor
+from app_js.quick_ai import ask as quick_ask, available as quick_available
+from app_js.tutor import Tutor, whyPrompt
+from cv.api import live_status
 
 ROOT = Path(__file__).resolve().parent
 HOST = "127.0.0.1"
@@ -45,12 +45,20 @@ _live_token = None
 # ---------------------------------------------------------------------------
 TUTOR_SESSION = "millikan_test_session"
 _tutor = None
-_last_run_dir = None            # where the session this server started wrote its
-                                # artefacts, so a debrief reviews THAT run
 
 
 def _ask_model(prompt):
-    """One turn from the LLM, or None if it will not answer right now."""
+    """One turn from the LLM, or None if it will not answer right now.
+
+    The quick path first: it is a single call with no retrieval and no session
+    lock, which is what a student mid-measurement needs and also what stops the
+    tutor being refused because the student is typing. The chat path stays as
+    the fallback, so a missing quick-path key changes nothing.
+    """
+    if quick_available():
+        quick = quick_ask(prompt)
+        if quick:
+            return quick
     out = []
     for event in getResponseFromGemini(userQuery = prompt, sessionID = TUTOR_SESSION):
         kind, data = getattr(event, "type", None), getattr(event, "data", None)
@@ -291,9 +299,23 @@ def selection_view(status, running):
     balance-voltage reading AND one free-fall-speed reading for this droplet,
     the verdict is "unknown"; it is never inferred from just one of the two.
     """
-    if not running or not isinstance(status, dict):
+    if not running:
         reset_selection()
         return _blank_selection()
+    if not isinstance(status, dict):
+        # A session that IS running whose status could not be read this once --
+        # the file is rewritten by atomic replace several times a second, and a
+        # reader occasionally arrives mid-swap. Resetting on that renumbered the
+        # operator's droplets from 5 back to 1 in the middle of a session
+        # (2026-09-20, 6:18 into the run). The droplet has not changed just
+        # because one poll came back empty.
+        with _selection_lock:
+            blank = _blank_selection()
+            blank["picked"] = _selection["id"] is not None
+            blank["label"] = _selection["label"]
+            blank["suitable"] = _selection["suitable"]
+            blank["note"] = "Waiting for the next reading."
+            return blank
 
     voltage = _number(status.get("voltageV"))
     field = status.get("fieldState")
@@ -487,9 +509,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/ai/why":
             self._why()
             return
-        if path == "/api/ai/debrief":
-            self._debrief()
-            return
         if path == "/api/live/stop":
             self._stop_live()
             return
@@ -566,12 +585,6 @@ class Handler(BaseHTTPRequestHandler):
             handle = start_live(source=source)
             reset_selection()          # a new session picks its own droplets
             start_tutor()
-            global _last_run_dir
-            try:
-                _last_run_dir = outDirFor(handle.get("source")
-                                          if source else "cam:%s" % handle.get("device"))
-            except Exception:
-                _last_run_dir = None
             token = secrets.token_urlsafe(24)
             set_live(handle, token)
             self._json({
@@ -608,42 +621,6 @@ class Handler(BaseHTTPRequestHandler):
                        status=503)
             return
         self._json({"text": text.strip()})
-
-    def _debrief(self):
-        """A short review of the session that just finished, from its falls.csv."""
-        # This server's own session first. Falling back to "the newest falls.csv
-        # anywhere" reviewed a gate fixture's output once, which is a confident
-        # debrief about a run the student never did.
-        runs = []
-        if _last_run_dir:
-            own = Path(_last_run_dir) / "falls.csv"
-            if own.exists():
-                runs = [own]
-        if not runs:
-            runs = sorted(ROOT.parent.glob("test/output/live_*/falls.csv"),
-                          key=lambda q: q.stat().st_mtime, reverse=True)
-        if not runs:
-            self._json({"error": "No finished session to review yet."}, status=409)
-            return
-        try:
-            with open(runs[0], encoding="utf-8") as f:
-                rows = list(csv.DictReader(f))
-        except OSError as exc:
-            self._json({"error": "Could not read %s: %s" % (runs[0].name, exc)},
-                       status=500)
-            return
-        facts = debriefFacts(rows)
-        if not facts.get("traverses"):
-            self._json({"error": "That session recorded nothing to review."},
-                       status=409)
-            return
-        text = _ask_model(debriefPrompt(facts))
-        if not text:
-            self._json({"error": "The assistant is busy; try again in a moment."},
-                       status=503)
-            return
-        self._json({"text": text.strip(), "facts": facts,
-                    "session": runs[0].parent.name})
 
     def _click(self):
         """{"x": 0.42, "y": 0.63, "token": "..."} -- fractions of the frame.
