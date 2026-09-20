@@ -468,10 +468,24 @@ def liveStatusPath():
     return os.path.join(OUTPUT, "live_status.json")
 
 
+_liveOwner = [False]            # has THIS process claimed the status file?
+
+
 def writeLiveStatus(**fields):
-    """Publish the current state, at most once a second.  Never raises."""
+    """Publish the current state, at most once a second.  Never raises.
+
+    Only a run that has published a `learning` or `running` state owns the file.
+    An offline analysis ends by calling report() like any other run, and its
+    "Session finished" would otherwise land on top of a live session that is
+    still going -- the app would show the operator's own run as over.
+    """
     now = time.time()
-    if fields.get("phase") != "learning" and now - _liveStatusAt[0] < LIVE_STATUS_S:
+    phase = fields.get("phase")
+    if phase in ("learning", "running"):
+        _liveOwner[0] = True
+    elif not _liveOwner[0]:
+        return
+    if phase != "learning" and now - _liveStatusAt[0] < LIVE_STATUS_S:
         return
     _liveStatusAt[0] = now
     fields["updatedAt"] = now
@@ -4446,8 +4460,12 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # AUTOSIZE and shows it 1:1.  Convert and they are the same event.
                     while remoteClicks:
                         fx, fy = remoteClicks.pop()
-                        clicks.append((int(round(fx * frame.shape[1])),
-                                       int(round(fy * frame.shape[0]))))
+                        # Fractions of the picture the app is SHOWING, which is the
+                        # ROI -- see publishFrame below.  The window still shows the
+                        # whole frame, so a remote click is put back where a mouse
+                        # click on the same droplet would have landed.
+                        clicks.append((int(round(fx * W)) + X,
+                                       int(round(fy * H)) + Y))
                     while clicks:
                         mx, my = clicks.pop()
                         rx, ry = mx - X, my - Y
@@ -5390,21 +5408,27 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                            if getattr(picked, "balanceDriftPct", None)
                                            is not None else None),
                     }
-                writeLiveStatus(
-                    phase = "running",
-                    elapsedSeconds = round(float(now - (firstT or 0)), 1),
-                    tracked = int(nTracked),
-                    falls = len(falls),
-                    legalFalls = sum(1 for f in falls if f.legal),
-                    voltageV = None if steadyVolts is None else int(steadyVolts),
-                    fieldState = fieldLevel(steadyVolts),
-                    message = banner or "",
-                    picked = picked_,
-                    frameWidth = int(frame.shape[1]),
-                    frameHeight = int(frame.shape[0]),
-                    dropletsCompleted = len(dropletGroups(falls)),
-                    targetFallsPerDroplet = TARGET_FALLS_PER_DROPLET,
-                )
+                # A session the operator is watching.  An offline analysis of a clip
+                # writes the same file, and one running in the background overwrote a
+                # LIVE session's status: the app's panel would have been fed another
+                # run's droplets mid-measurement.  Only a run with a window -- live or
+                # playback, which is what the app starts -- says what it is doing.
+                if show:
+                    writeLiveStatus(
+                        phase = "running",
+                        elapsedSeconds = round(float(now - (firstT or 0)), 1),
+                        tracked = int(nTracked),
+                        falls = len(falls),
+                        legalFalls = sum(1 for f in falls if f.legal),
+                        voltageV = None if steadyVolts is None else int(steadyVolts),
+                        fieldState = fieldLevel(steadyVolts),
+                        message = banner or "",
+                        picked = picked_,
+                        frameWidth = int(W),        # the picture the app is shown: the
+                        frameHeight = int(H),       # ROI, which is what a click maps to
+                        dropletsCompleted = len(dropletGroups(falls)),
+                        targetFallsPerDroplet = TARGET_FALLS_PER_DROPLET,
+                    )
                 hud = "tracked %d   falls %d   legal %d   V %s" % (
                     nTracked, len(falls), sum(1 for f in falls if f.legal),
                     "?" if steadyVolts is None else "%d" % steadyVolts)
@@ -5451,7 +5475,15 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         display[Y:Y + H, X:X + W] = plain
                         cv2.rectangle(display, (X, Y), (X + W, Y + H), (0, 160, 0), 1)
                         drawHud(display)
-                    publishFrame(display.copy())
+                    # The app gets the ROI alone.  The whole frame carries a black
+                    # border and the dongle's grey margins around the apparatus
+                    # picture, which in a browser panel is dead space around the only
+                    # thing anyone is looking at.  The window keeps the full frame --
+                    # the operator needs the `V:` readout where the apparatus puts it,
+                    # and the banner along the bottom -- and the app has both already:
+                    # the voltage in its panel, the guidance in its own line.
+                    publishFrame((frame[Y:Y + H, X:X + W] if blind
+                                  else plain).copy())
                     cv2.imshow("Droplets", display)
                     if src.isLive:
                         delay = 1           # a camera sets its own pace; never wait on it

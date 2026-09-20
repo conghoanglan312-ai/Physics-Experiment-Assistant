@@ -16,6 +16,8 @@ const demoClipButton = document.getElementById("demoClipButton");
 const liveFeed = document.getElementById("liveFeed");
 const fallbackVideo = document.getElementById("fallbackVideo");
 const videoPlaceholder = document.getElementById("videoPlaceholder");
+const feedLoading = document.getElementById("feedLoading");
+const feedLoadingBody = document.getElementById("feedLoadingBody");
 const videoContainer = document.getElementById("videoContainer");
 const feedHint = document.getElementById("feedHint");
 const feedStatus = document.getElementById("feedStatus");
@@ -646,6 +648,11 @@ async function startLive(explicitSource) {
       ? `Starting playback for "${source}"...`
       : "Running bench check and starting capture...";
   feedStatus.classList.remove("hidden", "error", "live", "demo");
+  showLoading(state.isDemo
+    ? "Opening the clip."
+    : source
+      ? `Opening "${source}".`
+      : "Running the bench check, then learning the background for about 30 seconds. Do not spray yet.");
 
   try {
     const response = await fetch("/api/live/start", {
@@ -676,7 +683,20 @@ async function startLive(explicitSource) {
   }
 }
 
+function showLoading(text) {
+  if (text) feedLoadingBody.textContent = text;
+  videoPlaceholder.classList.add("hidden");
+  fallbackVideo.classList.add("hidden");
+  liveFeed.classList.add("hidden");
+  feedLoading.classList.remove("hidden");
+}
+
+function hideLoading() {
+  feedLoading.classList.add("hidden");
+}
+
 function showLiveFeed(url, device, source) {
+  hideLoading();
   fallbackVideo.pause();
   fallbackVideo.classList.add("hidden");
   videoPlaceholder.classList.add("hidden");
@@ -696,6 +716,8 @@ function showLiveFeed(url, device, source) {
 }
 
 function showFallback() {
+  hideLoading();
+  unfitFeedBox();
   liveFeed.removeAttribute("src");
   liveFeed.classList.add("hidden");
   if (fallbackVideo.readyState > 0) {
@@ -747,6 +769,24 @@ async function sendLiveClick(x, y) {
     // Best-effort -- a dropped click just means the operator clicks again.
   }
 }
+
+// Shape the box to the frame, so `contain` has nothing left to letterbox. An
+// MJPEG <img> is one endless response, so its load event cannot be relied on to
+// fire per frame -- the status carries the same two numbers, so either will do.
+function fitFeedBox(w, h) {
+  if (!w || !h) return;
+  videoContainer.style.aspectRatio = `${w} / ${h}`;
+  videoContainer.style.height = "auto";
+  videoContainer.style.minHeight = "0";
+}
+
+function unfitFeedBox() {
+  videoContainer.style.removeProperty("aspect-ratio");
+  videoContainer.style.removeProperty("height");
+  videoContainer.style.removeProperty("min-height");
+}
+
+liveFeed.addEventListener("load", () => fitFeedBox(liveFeed.naturalWidth, liveFeed.naturalHeight));
 
 liveFeed.addEventListener("click", (event) => {
   if (!state.live || !liveFeed.naturalWidth || !liveFeed.naturalHeight) return;
@@ -967,6 +1007,9 @@ async function pollLiveState() {
   }
 
   renderSelectedDroplet(payload.selected);
+  if (payload.running && payload.status) {
+    fitFeedBox(payload.status.frameWidth, payload.status.frameHeight);
+  }
   if (payload.running) showBanner(payload.status, payload.selected);
   else clearBanner();
   scheduleLivePoll(payload.running ? LIVE_POLL_MS : IDLE_POLL_MS);

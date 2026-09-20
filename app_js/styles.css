@@ -190,6 +190,25 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
   overflow: hidden;
 }
 
+/* Pressing start is followed by a bench check and ~30 s of background learning
+   before a single frame exists. The feed box used to sit there unchanged for all
+   of it, with only a line of small print underneath to say anything was
+   happening, which reads as a dead button. */
+.feed-loading {
+  position: absolute; inset: 0; z-index: 2;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  background: var(--inset-bg); border-radius: 15px; text-align: center; padding: 24px;
+}
+.feed-spinner {
+  width: 46px; height: 46px; border-radius: 50%;
+  border: 3px solid rgba(var(--text-rgb), .18);
+  border-top-color: var(--accent, #6668FA);
+  animation: feedSpin 0.9s linear infinite;
+}
+@keyframes feedSpin { to { transform: rotate(360deg); } }
+.feed-loading-title { font-size: 19px; font-weight: 700; letter-spacing: .5px; }
+.feed-loading-body { font-size: 14px; opacity: .7; max-width: 340px; line-height: 1.5; }
+
 .video-placeholder {
   width: 95%; height: 90%;
   background: var(--inset-bg);
@@ -205,14 +224,11 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 .empty-state-cta { margin-top: 8px; }
 
 .live-feed-img, .fallback-video {
+  /* The pipeline publishes the ROI alone -- the apparatus picture and nothing
+     else -- so there is no debug overlay to clip and no dongle margin to hide.
+     The container takes the frame's own aspect ratio (set in app.js once the
+     first frame arrives), so `contain` leaves no letterbox either. */
   width: 100%; height: 100%; object-fit: contain; border-radius: 15px; user-select: none; background: #000;
-  /* The pipeline burns a status/timestamp line into the very top of each
-     frame and, sometimes, a red diagnostic line into the very bottom. Both
-     are internal debug overlays, not meant for the student-facing view, so
-     they're clipped out of the displayed frame here. This only affects
-     painting/hit-testing at the clipped edges -- the click-to-select math in
-     app.js still maps against the full, unclipped frame. */
-  clip-path: inset(6% 0 7% 0);
 }
 .fallback-video { pointer-events: none; }
 .live-feed-img { pointer-events: auto; cursor: crosshair; }
