@@ -398,7 +398,9 @@ PUBLISH_QUALITY = 80
 _publishSlot = [None]
 _publishWake = threading.Event()
 
-LIVE_STATUS_S = 1.0             # how often the live status file is rewritten
+LIVE_STATUS_S = 0.4             # how often the live status file is rewritten.  The
+                                # app shows this as its own banner, so at 1 s it read
+                                # visibly behind the window it mirrors.
 _liveStatusAt = [0.0]
 
 
@@ -2984,6 +2986,18 @@ def steadyTarget(t, now, ub, volts):
         hist.pop(0)
     values = [u for _ts, u in hist]
     target = float(np.median(values))
+    # Estimates from the other side of balance describe a drift that is gone.  A
+    # falling droplet's own estimate is always above the panel and a rising one's
+    # below it, so a median on the far side of the reading from THIS estimate can
+    # only be old samples -- and it comes out as advice that argues with itself:
+    # "RAISE to about 206 V" with the panel at 214, seconds after the same droplet
+    # had been told to LOWER.  Seen twice on 2026-09-20, on both the picked-droplet
+    # line and the MEASURING line, which is why the test lives here and not in
+    # either caller.
+    if (target - float(volts)) * (float(ub) - float(volts)) < 0:
+        del hist[:-1]
+        values = [float(ub)]
+        target = float(ub)
     step = TARGET_HALF_STEP * (target - float(volts))
     step = float(np.sign(step) * max(5.0, round(abs(step) / 5.0) * 5.0))
     if len(values) < TARGET_MIN_SAMPLES or hist[-1][0] - hist[0][0] < 3.0:
@@ -3161,6 +3175,16 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
         if ok:
             return ("picked id %d falls %.2f gr/s -- USABLE, balance it on `0`"
                     % (t.id, shown), (0, 255, 0), True)
+        if shown <= -MIN_SPEED / 2.0:
+            # With the plates at 0 V nothing rises.  At the end of the 2026-09-20
+            # session the square sat on empty field by the panel while the operator
+            # watched their droplet mid-frame, and the aid reported that stray as
+            # "falls -0.25 gr/s -- too slow for 0.2-0.5, DISCARD" over and over: a
+            # verdict, on the wrong object, in words that hid what had happened.
+            # Rising at 0 V is not a slow droplet, it is the wrong droplet.
+            return ("picked id %d is RISING %.2f gr/s with the field off -- the square "
+                    "is probably not on your droplet; click it again"
+                    % (t.id, abs(shown)), (0, 140, 255), None)
         why = "too fast" if shown > MAX_SPEED else "too slow"
         return ("picked id %d falls %.2f gr/s -- %s for %g-%g, DISCARD"
                 % (t.id, shown, why, MIN_SPEED, MAX_SPEED), (0, 0, 255), False)
@@ -3300,16 +3324,6 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
         return ("picked id %d drifts %+.3f gr/s -- no reachable balance, DISCARD"
                 % (t.id, drift), (0, 0, 255), False)
     target, steady, step = steadyTarget(t, now, ub, volts)
-    if (target - float(volts)) * (1.0 if drift > 0 else -1.0) < 0:
-        # The target is a median of the last few seconds, the direction is this
-        # moment's drift, and when they come from opposite sides of balance they
-        # disagree.  On 2026-09-20 the column had been told "LOWER to about 140 V"
-        # about a rising droplet; the pick there was then falling, and the aid said
-        # "RAISE to about 144 V" with the panel at 152 -- it balanced at 153 V.  A
-        # falling droplet's own estimate is always above the panel, so a target
-        # below it can only be old estimates: drop them and start from this one.
-        TARGET_HISTORY.pop(int(round(float(t.pos[0]) / CHARGE_COLUMN_PX)), None)
-        target, steady, step = steadyTarget(t, now, ub, volts)
     if not steady:
         # ...and if it never settles, say that instead of asking forever.  An operator
         # tuned one droplet from 2:19 to the end of the session and never got a usable
@@ -4284,10 +4298,15 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # ROI coordinates: REJECT_POINTS is recorded in the same frame
                         # of reference the tracks live in.
                         gated = nearestRejected(t.pos[0], t.pos[1])
-                        print("  mid-fall track %d died at x=%.0f y=%.0f after %.1f s "
-                              "dark (limit %.1f); own area %.0f; nearest ACCEPTED %s; "
-                              "nearest REJECTED %s"
-                              % (t.id, t.pos[0], t.pos[1], waited, allowed, t.area,
+                        # ...and WHEN, so the raw footage at that moment can be looked
+                        # at afterwards.  Without it these lines could only be counted,
+                        # not checked: the frame is what says whether the droplet was
+                        # really invisible or merely unassigned.
+                        print("  mid-fall track %d died at %.1f s (frame %d) x=%.0f "
+                              "y=%.0f after %.1f s dark (limit %.1f); own area %.0f; "
+                              "nearest ACCEPTED %s; nearest REJECTED %s"
+                              % (t.id, now - (firstT or 0.0), n,
+                                 t.pos[0], t.pos[1], waited, allowed, t.area,
                                  "none" if near is None else "%.0f px (area %.0f)"
                                  % (near[0], near[1]),
                                  "none" if gated is None else
@@ -4436,9 +4455,24 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                 if not t.miss and len(t.points) >= CONFIRM_POINTS
                                 and np.hypot(t.pos[0] - rx, t.pos[1] - ry)
                                 <= PICK_RADIUS_PX]
+                        was = picked
                         picked = (min(near, key = lambda t: np.hypot(t.pos[0] - rx,
                                                                     t.pos[1] - ry))
                                   if near else None)
+                        # Clicking a DIFFERENT droplet starts a different measurement.
+                        # committedAt was set on the session's first pick and cleared
+                        # only when nothing was picked AND no column was pinned, so it
+                        # survived every re-pick: on 2026-09-20 the banner read
+                        # "MEASURING -- 1 of 5 falls" about a droplet being balanced at
+                        # 214 V, counting a 250 V fall that had ended four minutes
+                        # earlier in the same column.  Re-clicking the SAME droplet --
+                        # which is how a lost track is taken back -- keeps the count.
+                        if picked is not None and (
+                                was is None
+                                or (was is not picked
+                                    and abs(float(was.pos[0]) - float(picked.pos[0]))
+                                    > SAME_DROPLET_X_PX)):
+                            committedAt = now
                         pickedSeen = now
                         pickedLevel = fieldLevel(steadyVolts)
                         lastClickAt = now
@@ -4463,6 +4497,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             picked = min(room, key = lambda t: abs(t.pos[1] - mid))
                             pickedSeen = pickedAuto = now
                             pickedAt = (float(picked.pos[0]), float(picked.pos[1]))
+                            committedAt = now      # a new droplet, a new measurement
                     # HOLD the track while it lives.  Re-selecting the nearest track
                     # every frame is not following a droplet, it is following a
                     # neighbourhood, and in a crowded frame it changes its mind: two
@@ -5302,10 +5337,18 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                     (p[0] + 16, p[1] + 13),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, done, 1)
                     elif t.tTop is not None:                     # clock is running
-                        cv2.circle(marked, p, 13, (0, 255, 255), 1)
-                        cv2.putText(marked, "%.1f s" % (now - t.tTop),
+                        # Past the legal maximum the fall cannot count however it
+                        # ends, so it stops looking like a measurement in progress.
+                        # On 2026-09-20 a clock ran to 94 s in plain sight -- more
+                        # than twice MAX_FALL_S -- with nothing to say it was already
+                        # spent, which is an operator waiting for nothing.
+                        late = (now - t.tTop) > MAX_FALL_S
+                        clockColour = (150, 150, 150) if late else (0, 255, 255)
+                        cv2.circle(marked, p, 13, clockColour, 1)
+                        cv2.putText(marked, "%.1f s%s" % (now - t.tTop,
+                                                          " over" if late else ""),
                                     (p[0] + 16, p[1] + 13),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, clockColour, 1)
                 nTracked = sum(1 for t in live
                                if t.miss == 0 and len(t.points) >= CONFIRM_POINTS)
                 # The same numbers the HUD draws, published for the app.  The operator

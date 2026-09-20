@@ -34,6 +34,7 @@ const dropletVoltage = document.getElementById("dropletVoltage");
 const dropletFallTime = document.getElementById("dropletFallTime");
 const dropletVelocity = document.getElementById("dropletVelocity");
 const dropletField = document.getElementById("dropletField");
+const guidanceLine = document.getElementById("guidanceLine");
 
 const state = {
   messages: [],
@@ -57,6 +58,7 @@ const state = {
   // Used to notice droplet-pick and suitability *transitions* so the Message
   // panel gets one note per real event rather than one per poll.
   lastDropletLabel: null,
+  lastBannerText: null,       // the aid's line as it currently reads
   lastSuitable: null,
 };
 
@@ -854,6 +856,43 @@ function fallSecondsToDisplay(data) {
   return state.lastFallSeconds;
 }
 
+// The pipeline's own guidance line -- what it draws along the bottom of its
+// window -- shown here instead, because the feed is cropped to the microscope
+// picture on purpose. It is the instruction the operator acts on.
+//
+// ONE line, replaced in place, exactly like the banner in the pipeline's window.
+// It was first built as notifications, and the operator's verdict was that stale
+// cards piling up are "very disrupting": the aid's line is an instruction about
+// right now, so a superseded one is not worth reading. Nothing here accumulates.
+function bannerClass(text) {
+  if (/BALANCED|USABLE|within the noise|as good as it gets/.test(text)) return "good";
+  if (/DISCARD|no reachable balance/.test(text)) return "bad";
+  if (/lost your droplet|left the view|DIFFERENT droplet|too heavy|RISING|barely held|will not hold still/.test(text)) return "warn";
+  return "";
+}
+
+function showBanner(status, selected) {
+  const raw = (status && status.message) || "";
+  if (!raw) {
+    guidanceLine.textContent = "Waiting for the aid…";
+    guidanceLine.className = "guidance-line idle";
+    return;
+  }
+  // "picked id 4015" is the tracker's number; the panel calls it DROPLET 9.
+  const label = (selected && selected.label) || null;
+  const text = label ? raw.replace(/picked id \d+/g, label) : raw;
+  if (text === state.lastBannerText) return;      // same words, no repaint
+  state.lastBannerText = text;
+  guidanceLine.textContent = text;
+  guidanceLine.className = `guidance-line ${bannerClass(text)}`;
+}
+
+function clearBanner() {
+  state.lastBannerText = null;
+  guidanceLine.textContent = "Start a session to see the aid's guidance here.";
+  guidanceLine.className = "guidance-line idle";
+}
+
 function renderSelectedDroplet(selected) {
   const data = selected || {};
   const verdict = SUITABILITY[data.suitable] || SUITABILITY.unknown;
@@ -899,7 +938,7 @@ function renderSelectedDroplet(selected) {
 // that only re-reads the same file. When nothing is running there is nothing to
 // keep up with, so ease off rather than stopping: the page then picks up a
 // session started from elsewhere without anyone reloading it.
-const LIVE_POLL_MS = 1000;
+const LIVE_POLL_MS = 500;
 const IDLE_POLL_MS = 5000;
 
 function scheduleLivePoll(delay) {
@@ -928,6 +967,8 @@ async function pollLiveState() {
   }
 
   renderSelectedDroplet(payload.selected);
+  if (payload.running) showBanner(payload.status, payload.selected);
+  else clearBanner();
   scheduleLivePoll(payload.running ? LIVE_POLL_MS : IDLE_POLL_MS);
 }
 
