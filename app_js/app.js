@@ -955,11 +955,21 @@ function renderSelectedDroplet(selected) {
     state.lastDropletLabel = data.label;
     state.lastSuitable = null;
   }
-  if (data.suitable && data.suitable !== state.lastSuitable) {
+  // The verdict comes from web_server.py, which already does the field-aware
+  // check: a fall speed only counts while the field is "off", the balance
+  // voltage only while it is "work", the verdict stays "unknown" until both
+  // readings exist, and it only flips after SETTLE_SECONDS. So nothing is
+  // re-checked here -- the popup just announces the server's verdict and its
+  // own note (which spells out which reading is out of range).
+  if (data.suitable && data.suitable !== "unknown" && data.suitable !== state.lastSuitable) {
+    const name = data.label || "the droplet";
     if (data.suitable === "yes") {
-      pushSystemMessage("success", `Valid measurement — ${data.label || "the droplet"} is suitable.${data.note ? ` ${data.note}` : ""}`);
-    } else if (data.suitable === "no" && state.lastSuitable === "yes") {
-      pushSystemMessage("warning", `${data.label || "The droplet"} is no longer suitable.${data.note ? ` ${data.note}` : ""}`);
+      pushSystemMessage("success", `Valid measurement — ${name} is suitable.${data.note ? ` ${data.note}` : ""}`);
+    } else {
+      pushSystemMessage(
+        "warning",
+        `${name} ${state.lastSuitable === "yes" ? "is no longer suitable." : "is not suitable."}${data.note ? ` ${data.note}` : ""}`
+      );
     }
     state.lastSuitable = data.suitable;
   }
