@@ -214,6 +214,10 @@ def process_is_running(handle) -> bool:
 # ---------------------------------------------------------------------------
 FALL_SPEED_MIN, FALL_SPEED_MAX = 0.2, 0.5        # grid/s, with the field off
 BALANCE_VOLTS_MIN, BALANCE_VOLTS_MAX = 150.0, 250.0
+# How still a droplet has to be before the voltage holding it counts as ITS
+# balance voltage. Free fall is 0.2-0.5 grid/s, so this is a droplet the field
+# has stopped, not merely slowed.
+BALANCED_GRID_S = 0.05
 # A reading has to hold on the same side of the two bands above for this long,
 # continuously, before the verdict actually changes. A single noisy sample --
 # a hand still settling the knob, a momentary tracker glitch -- must not flip
@@ -365,8 +369,12 @@ def selection_view(status, running):
         if field == "off" and speed is not None:
             # Field off, so this speed IS the free-fall speed Ⅳ.2 judges.
             _selection["speed"] = speed
-        if (field == "work" and voltage is not None):
-            # Held against a live field: this voltage IS its balance voltage.
+        if (field == "work" and voltage is not None
+                and speed is not None and abs(speed) <= BALANCED_GRID_S):
+            # Held STILL against a live field: this voltage IS its balance voltage.
+            # Being on live plates is not enough -- a droplet picked while 250 V
+            # happened to be set was announced as "balances in range. Balanced at
+            # 250 V" the instant it was clicked, while it climbed out of frame.
             _selection["volts"] = voltage
 
         label = _selection["label"]
