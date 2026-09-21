@@ -151,20 +151,65 @@ class LiveSource(FrameSource):
     # whatever it has, which is what would have happened anyway.
     DEFAULT_SIZE = (1280, 720)
 
+    # Switches for the capture path, chosen at the bench without a rebuild:
+    #
+    #     MILLIKAN_CAPTURE=mjpg          ask the device for MJPG instead of raw
+    #     MILLIKAN_CAPTURE=buffer1       keep one frame queued, not the driver's
+    #     MILLIKAN_CAPTURE=msmf          Media Foundation instead of DirectShow
+    #     MILLIKAN_CAPTURE=mjpg,buffer1  any combination, comma separated
+    #
+    # Default unchanged, because none of these is known to help HERE yet.  On
+    # 2026-09-21 the tracker received 22.1 of the camera's 30 fps, and the eight
+    # missing ones each cost something: tracks died mid-fall, the square lost its
+    # droplet repeatedly, and one fall was never finalised.
+    #
+    # The suspects, in the order they are worth trying.  Uncompressed 720p is
+    # about 27 MB/s over USB and a dongle that cannot sustain it simply delivers
+    # fewer frames, where MJPG asks the device to compress instead.  A deep driver
+    # queue means the frame we decode is already old and the NEWEST is the one
+    # dropped.  DirectShow is the legacy path and Media Foundation is sometimes
+    # faster on the same hardware.
+    #
+    # Which to use is decided by the capture line the session prints, not by
+    # guessing: it reports milliseconds inside the camera against milliseconds
+    # inside the pipeline, and only the first kind is what these can fix.
+    @staticmethod
+    def _wanted():
+        raw = os.environ.get("MILLIKAN_CAPTURE", "")
+        return set(w.strip().lower() for w in raw.split(",") if w.strip())
+
     def __init__(self, index = 0, width = None, height = None, fps = None,
                  backend = None, warmupS = 1.0):
         if width is None and height is None:
             width, height = self.DEFAULT_SIZE
+        want = self._wanted()
         if backend is None and sys.platform == "win32":
-            backend = cv2.CAP_DSHOW      # the default backend on Windows is slow to open
+            # DSHOW is the default: it is what every baseline was measured on.
+            backend = cv2.CAP_MSMF if "msmf" in want else cv2.CAP_DSHOW
         cap = cv2.VideoCapture(index, backend) if backend else cv2.VideoCapture(index)
         if not cap.isOpened():
             raise IOError("no camera at index %s. Run cv/UVC_check.py to see what is "
                           "connected." % index)
+        # BEFORE the size: several drivers apply a pixel format only while the mode
+        # is being negotiated and ignore it afterwards.
+        if "mjpg" in want:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        if "buffer1" in want:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if width:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         if height:
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        if want:
+            # Say what the device actually agreed to.  A request that was ignored
+            # and one that worked look identical from here otherwise, which is the
+            # whole point on a bench where the switch is chosen by trial.
+            code = int(cap.get(cv2.CAP_PROP_FOURCC)) or 0
+            fourcc = "".join(chr((code >> (8 * k)) & 0xFF) for k in range(4)).strip()
+            print("  capture switches %s -> backend %s, format %s"
+                  % (",".join(sorted(want)),
+                     "MSMF" if backend == cv2.CAP_MSMF else "DSHOW",
+                     fourcc or "?"), flush = True)
         if fps:
             cap.set(cv2.CAP_PROP_FPS, fps)
         self.index = index

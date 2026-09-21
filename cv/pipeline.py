@@ -2302,6 +2302,10 @@ CHARGE_SETTLE_S = 0.5
 # arrived at from data already in hand.  The window bounds how stale a reading may be
 # and still describe the fall that followed it.
 WORKING_VOLTS_MEMORY_S = 120.0
+# How old the V: line's fallback may be when it is WRITTEN INTO A FALL.  The
+# operator sets the voltage and then cuts to 0 within a second or two, so a
+# working reading older than this belongs to something else.
+WORKING_VOLTS_RECORD_S = 20.0
 
 # A droplet whose column produced a legal fall this recently is being MEASURED, not
 # hunted, however the tracker happens to have re-numbered it since.
@@ -2433,6 +2437,8 @@ LIFT_TOLERANCE_V = 15.0
 # How long the panel must keep reading zero before the aid acts on it.  See the
 # use site: the reader's failure mode is 0000, and everything keys off this.
 ZERO_HOLD_S = 1.0
+# ...and how long a reading stays worth believing once the panel stops reading.
+VOLTS_STALE_S = 4.0
 
 
 
@@ -4266,6 +4272,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     volts = None                    # last plate voltage read off the `V:` line
     steadyVolts = None              # ...voted over ~1 s, for deciding the hunt mode
     zeroSince = None                # when the vote first read 0; see ZERO_HOLD_S
+    lastVoltsAt = None              # when the panel last actually read
     lastFieldLevel = None           # off/work/lift, to drop held lines on a change
     panelAlign = None               # digit positions, found once and reused
     alignCells = collections.deque(maxlen = 8)      # median to align and read from
@@ -4385,6 +4392,17 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                 # Ⅳ.2's selection and nothing automated it before.
                 vCell = cv2.cvtColor(frame[box[1]:box[3], box[0]:box[2]],
                                      cv2.COLOR_BGR2GRAY)
+                # A READ THAT FAILS IS NOT A READING.  `volts` was never cleared
+                # here, so whenever the median would not read -- which happens
+                # whenever the knob is moving, and for a whole session on
+                # 2026-09-21 when the alignment kept landing on 1111 -- the last
+                # good value was handed on as though it had just been measured.
+                # It was voted into steadyVolts, fed to the lift watch, and
+                # appended to workingVolts with a FRESH timestamp, which is how
+                # four legal falls came to be recorded at 144 V while the operator
+                # balanced at 155 V and the panel said so on screen.  A wrong
+                # balance voltage is a wrong charge; that is the whole measurement.
+                volts = None
                 # Zero is read WITHOUT the digit templates.  `+0000V` is four identical
                 # glyphs, so there is nothing to tell the four digit runs from the `+`
                 # and the `V`, and an alignment found on it lands on the wrong columns
@@ -4428,6 +4446,16 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                                              "panel_implausible.png"), med)
                                 except Exception:
                                     pass
+                if volts is not None:
+                    lastVoltsAt = now
+                elif lastVoltsAt is not None and now - lastVoltsAt > VOLTS_STALE_S:
+                    # Nothing has been read for a while, so the aid does not know
+                    # the voltage.  Saying so is what `None` is for: pickedVerdict
+                    # answers "panel unreadable, cannot judge it" rather than
+                    # judging against a number from a minute ago.
+                    steadyVolts = None
+                    voltHistory.clear()
+                    zeroSince = None
                 if volts is not None:
                     voltHistory.append(volts)
                     # The mode over the last few reads, so one misread cannot move it.
@@ -4664,9 +4692,15 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # The latch did not hold.  Use the last steady non-zero
                     # reading before the droplet was released -- which is what
                     # the latched line is meant to be showing.
+                    # ...and recently.  This window was the two minutes the
+                    # banner uses, which is far more than the operator needs
+                    # between setting the voltage and cutting to 0 -- and long
+                    # enough to hand a fall the voltage of the droplet before it.
+                    # No number is better than a wrong one: the charge is
+                    # computed from this.
                     got = next((v for ts, v in reversed(workingVolts)
                                 if ts <= t.tTop
-                                and t.tTop - ts <= WORKING_VOLTS_MEMORY_S),
+                                and t.tTop - ts <= WORKING_VOLTS_RECORD_S),
                                None)
                     if got:
                         t.balanceVoltage = got

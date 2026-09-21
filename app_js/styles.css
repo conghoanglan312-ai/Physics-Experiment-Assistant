@@ -389,6 +389,9 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 /* Suitability has three answers, not two: the third is "not enough data yet",
    which must not be shown as either a pass or a fail. */
 .droplet-ring.unknown { border-color:var(--warning); box-shadow:0 0 15px var(--warning-glow); }
+/* Half of IV.2's test passed: a usable falling speed, or a balance in the
+   working band. Not a warning and not yet a pass. */
+.droplet-ring.partial { border-color:var(--accent, #6668FA); box-shadow:0 0 15px rgba(102,104,250,.55); }
 .droplet-id-text { min-width:0; }
 .droplet-id { font-size:24px; font-weight:700; color: var(--droplet-text-color); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; opacity: 1;}
 .droplet-status-word { font-size:14px; margin-top:2px; opacity:.85; color: var(--droplet-text-color);}

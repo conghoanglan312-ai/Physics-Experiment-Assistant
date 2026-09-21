@@ -122,3 +122,29 @@ rather than shown.
 
 **Afterwards:** every trigger, the prompt it was given and what it said are in
 `test/output/tutor_log.jsonl`, including anything withheld.
+
+## If the picture stutters and the square keeps losing droplets
+
+Every session now ends with a line like:
+
+    capture: 22.1 fps delivered of 30 nominal, 2100 dropped; 31.2 ms in the
+    camera, 12.8 ms in the pipeline, per frame
+
+Those two milliseconds figures are the whole diagnosis. **Camera** is the time
+spent waiting for the device to hand a frame over; **pipeline** is everything
+this code does before it asks for the next one. Whichever is larger is the one
+costing you frames, and only the first kind is fixable from the settings below.
+
+If the camera is the larger, restart the app with one of these and compare the
+same line:
+
+| Start it with | What it changes |
+|---|---|
+| `MILLIKAN_CAPTURE=mjpg` | asks the dongle for compressed frames instead of raw -- uncompressed 720p is about 27 MB/s over USB |
+| `MILLIKAN_CAPTURE=buffer1` | keeps one frame queued, so what arrives is the newest rather than the oldest |
+| `MILLIKAN_CAPTURE=msmf` | Media Foundation instead of DirectShow |
+| `MILLIKAN_CAPTURE=mjpg,buffer1` | any combination, comma separated |
+
+The session prints which switches it applied and what the device agreed to, so a
+request the dongle ignored is visible rather than assumed. Nothing else about
+the measurement changes: the fall clock runs on capture timestamps either way.

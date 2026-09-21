@@ -231,6 +231,9 @@ _selection = {
                           # (something out), None (not enough data to judge yet)
     "rangeSince": None,   # monotonic timestamp when rangeState last changed
     "suitable": "unknown",  # the debounced verdict actually shown to the student
+    # Each half of IV.2's test, remembered once met.  See the latch in the view.
+    "speedEver": False,   # it has fallen at a usable free-fall speed
+    "voltsEver": False,   # it has balanced at a voltage in the working band
 }
 
 
@@ -260,7 +263,8 @@ def reset_selection():
     with _selection_lock:
         _selection.update(id=None, label=None, picks=0,
                            speed=None, volts=None,
-                           rangeState=None, rangeSince=None, suitable="unknown")
+                           rangeState=None, rangeSince=None, suitable="unknown",
+                           speedEver=False, voltsEver=False)
 
 
 def _number(value):
@@ -343,6 +347,7 @@ def selection_view(status, running):
                 picks=_selection["picks"] + 1,
                 speed=None, volts=None,
                 rangeState=None, rangeSince=None, suitable="unknown",
+                speedEver=False, voltsEver=False,
             )
             _selection["label"] = "DROPLET %d" % _selection["picks"]
 
@@ -379,6 +384,22 @@ def selection_view(status, running):
         else:
             in_range = speed_ok and volts_ok
 
+        # EACH HALF IS LATCHED.  Suitability is a property of the droplet, not of
+        # what it happens to be doing this second: a droplet that fell at 0.25
+        # grid/s HAS a usable free-fall speed, and holding it still on the plates
+        # afterwards cannot take that away.  Judged live, the two cards
+        # contradicted each other within seconds on 2026-09-21 -- "DROPLET 1 is
+        # suitable, falls at 0.25 grid/s and balances at 250 V" directly above
+        # "DROPLET 1 is no longer suitable, currently falls at -0.06 grid/s" --
+        # about a droplet the operator was balancing, which is what the aid had
+        # asked them to do.  The speed it complained about WAS the balanced one.
+        #
+        # So: remember that each half was met, and let the note say which is
+        # still missing.  They are forgotten only when the droplet is.
+        if speed_ok:
+            _selection["speedEver"] = True
+        if volts_ok:
+            _selection["voltsEver"] = True
         if in_range != _selection["rangeState"]:
             _selection["rangeState"] = in_range
             _selection["rangeSince"] = now
@@ -386,7 +407,11 @@ def selection_view(status, running):
         # None too (nothing observed yet at all) -- there is nothing to time.
         elapsed = 0.0 if _selection["rangeSince"] is None else now - _selection["rangeSince"]
 
-        if in_range is None:
+        if _selection["speedEver"] and _selection["voltsEver"]:
+            _selection["suitable"] = "yes"          # both halves met; see above
+        elif _selection["suitable"] == "yes":
+            pass                                    # never demoted
+        elif in_range is None:
             _selection["suitable"] = "unknown"
         elif elapsed >= SETTLE_SECONDS:
             _selection["suitable"] = "yes" if in_range else "no"
@@ -395,35 +420,31 @@ def selection_view(status, running):
 
         suitable = _selection["suitable"]
 
-    if speed_ok is None and volts_ok is None:
-        note = "Balance it, then cut to 0 V to time its fall."
-    elif speed_ok is None:
-        note = "Balanced at %d V. Cut to 0 V to measure its falling speed." % round(balance_volts)
-    elif volts_ok is None:
+    # The note describes the DROPLET's two halves, not this second's readings.
+    # See the latch above: each half is remembered once met, so the note says what
+    # is still missing rather than reporting the balanced droplet as too slow.
+    got_speed = _selection["speedEver"]
+    got_volts = _selection["voltsEver"]
+    if got_speed and got_volts:
+        note = "Falls at %.2f grid/s and balances at %d V." % (
+            free_fall, round(balance_volts))
+    elif got_speed:
         note = "Falls at %.2f grid/s. Balance it to read its balance voltage." % free_fall
-    elif in_range:
-        if suitable == "yes":
-            note = "Falls at %.2f grid/s and balances at %d V." % (
-                free_fall, round(balance_volts))
-        else:
-            remaining = max(0.0, SETTLE_SECONDS - elapsed)
-            note = "Falls at %.2f grid/s and balances at %d V -- confirming suitable in %.0fs." % (
-                free_fall, round(balance_volts), remaining)
+    elif got_volts:
+        note = "Balanced at %d V. Cut to 0 V to measure its falling speed." % round(
+            balance_volts)
+    elif speed_ok is False:
+        note = "Falls at %.2f grid/s (needs %g-%g) -- time it again, or pick another." % (
+            free_fall, FALL_SPEED_MIN, FALL_SPEED_MAX)
+    elif volts_ok is False:
+        note = "Balances at %d V (needs %g-%g)." % (
+            round(balance_volts), BALANCE_VOLTS_MIN, BALANCE_VOLTS_MAX)
     else:
-        problems = []
-        if not speed_ok:
-            problems.append("falls at %.2f grid/s (needs %g-%g)" % (
-                free_fall, FALL_SPEED_MIN, FALL_SPEED_MAX))
-        if not volts_ok:
-            problems.append("balances at %d V (needs %g-%g)" % (
-                round(balance_volts), BALANCE_VOLTS_MIN, BALANCE_VOLTS_MAX))
-        reason = " and ".join(problems)
-        if suitable == "yes":
-            remaining = max(0.0, SETTLE_SECONDS - elapsed)
-            note = "Drifted out of range (%s) -- reverts to unsuitable in %.0fs if it stays there." % (
-                reason, remaining)
-        else:
-            note = "Currently %s." % reason
+        note = "Balance it, then cut to 0 V to time its fall."
+
+    # Which of the two it has so far, for the card under the droplet's name.
+    stage = ("suitable" if got_speed and got_volts else
+             "speed" if got_speed else "balance" if got_volts else None)
 
     return {
         "picked": True,
@@ -434,6 +455,7 @@ def selection_view(status, running):
         "balancePercent": balance,
         "fieldState": field,
         "suitable": suitable,
+        "stage": stage,
         "note": note,
     }
 

@@ -67,6 +67,7 @@ const state = {
   lastBannerText: null,       // the aid's line as it currently reads
   lastWhy: null,              // ...and the explanation showing for it, if any
   lastSuitable: null,
+  lastStage: null,          // which half of the test it has met
 };
 
 function pythonLen(text) {
@@ -788,7 +789,12 @@ function fitFeedBox(w, h) {
 // Idle, the box keeps the apparatus's shape rather than a tall placeholder: an
 // empty panel far taller than any frame it will ever show is dead space before
 // the session has even started. Real numbers replace these on the first frame.
-const FEED_ASPECT_W = 909, FEED_ASPECT_H = 645;
+// The DONGLE's frame, not the ROI's. These were the ROI's proportions, 909x645,
+// which is a taller box than any frame the feed will ever put in it -- so the
+// panel shrank the moment a session started and the whole column jumped with it.
+// What the pipeline publishes is the app view, and that is the 1280x720 the
+// capture delivers.
+const FEED_ASPECT_W = 1280, FEED_ASPECT_H = 720;
 
 function unfitFeedBox() {
   fitFeedBox(FEED_ASPECT_W, FEED_ASPECT_H);
@@ -900,6 +906,14 @@ async function stopLive() {
 // ---------------------------------------------------------------------------
 const MISSING = "—";
 
+// IV.2 asks two things of a droplet and they are met at different moments: a
+// usable free-fall speed, and a balance voltage in the working band. The card
+// says which one it has, because "Not suitable" on a droplet that has already
+// passed half the test reads as a rejection of the operator's own work.
+const STAGE = {
+  speed: { text: "Speed suitable", ring: "partial" },
+  balance: { text: "Balanceable", ring: "partial" },
+};
 const SUITABILITY = {
   yes: { text: "Suitable", ring: "suitable" },
   no: { text: "Not suitable", ring: "unsuitable" },
@@ -1012,7 +1026,8 @@ function showTutor(messages) {
 
 function renderSelectedDroplet(selected) {
   const data = selected || {};
-  const verdict = SUITABILITY[data.suitable] || SUITABILITY.unknown;
+  const verdict = (data.suitable !== "yes" && STAGE[data.stage])
+    || SUITABILITY[data.suitable] || SUITABILITY.unknown;
 
   // A genuinely new pick (not just the same droplet polled again) gets a
   // one-time guidance note; a suitability change (confirmed suitable, or
@@ -1024,19 +1039,27 @@ function renderSelectedDroplet(selected) {
     resetHeldMeasurements();
     state.lastDropletLabel = data.label;
     state.lastSuitable = null;
+    state.lastStage = null;
   }
-  if (data.suitable && data.suitable !== state.lastSuitable) {
-    if (data.suitable === "yes") {
+  // One card as each half of the test is met, and none for losing it: the
+  // server no longer demotes a droplet that has passed, so the pair of
+  // contradicting cards that appeared seconds apart cannot happen again.
+  if (data.stage && data.stage !== state.lastStage) {
+    if (data.stage === "suitable") {
       pushSystemMessage("success", `Valid measurement — ${data.label || "the droplet"} is suitable.${data.note ? ` ${data.note}` : ""}`);
-    } else if (data.suitable === "no" && state.lastSuitable === "yes") {
-      pushSystemMessage("warning", `${data.label || "The droplet"} is no longer suitable.${data.note ? ` ${data.note}` : ""}`);
+    } else if (data.stage === "speed") {
+      pushSystemMessage("success", `${data.label || "The droplet"} has a usable falling speed.${data.note ? ` ${data.note}` : ""}`);
+    } else if (data.stage === "balance") {
+      pushSystemMessage("success", `${data.label || "The droplet"} balances in range.${data.note ? ` ${data.note}` : ""}`);
     }
-    state.lastSuitable = data.suitable;
+    state.lastStage = data.stage;
   }
+  state.lastSuitable = data.suitable;
   if (!data.label) {
     resetHeldMeasurements();
     state.lastDropletLabel = null;
     state.lastSuitable = null;
+    state.lastStage = null;
   }
 
   dropletLabel.textContent = data.label || MISSING;
