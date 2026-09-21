@@ -125,26 +125,34 @@ rather than shown.
 
 ## If the picture stutters and the square keeps losing droplets
 
-Every session now ends with a line like:
+Every session ends with a line like:
 
-    capture: 22.1 fps delivered of 30 nominal, 2100 dropped; 31.2 ms in the
-    camera, 12.8 ms in the pipeline, per frame
+    capture: 30.0 fps delivered of 30 nominal, 0 dropped; 33.3 ms in the
+    camera, 8.1 ms in the pipeline, per frame
 
-Those two milliseconds figures are the whole diagnosis. **Camera** is the time
-spent waiting for the device to hand a frame over; **pipeline** is everything
-this code does before it asks for the next one. Whichever is larger is the one
-costing you frames, and only the first kind is fixable from the settings below.
+Those two milliseconds figures are the diagnosis. **Camera** is time spent
+waiting for the device to hand a frame over; **pipeline** is everything this code
+does before asking for the next one. Whichever is larger is what costs you
+frames.
 
-If the camera is the larger, restart the app with one of these and compare the
-same line:
+The camera is opened through Media Foundation, measured on 2026-09-21 as the
+faster path on this dongle: 30.0 fps against DirectShow's 23.6, which could not
+be moved off uncompressed YUY2. If a different device behaves differently, these
+can be set without a rebuild:
 
 | Start it with | What it changes |
 |---|---|
-| `MILLIKAN_CAPTURE=mjpg` | asks the dongle for compressed frames instead of raw -- uncompressed 720p is about 27 MB/s over USB |
-| `MILLIKAN_CAPTURE=buffer1` | keeps one frame queued, so what arrives is the newest rather than the oldest |
-| `MILLIKAN_CAPTURE=msmf` | Media Foundation instead of DirectShow |
-| `MILLIKAN_CAPTURE=mjpg,buffer1` | any combination, comma separated |
+| `MILLIKAN_CAPTURE=dshow` | DirectShow instead of Media Foundation |
+| `MILLIKAN_CAPTURE=mjpg` | asks the device for compressed frames |
+| `MILLIKAN_CAPTURE=buffer1` | keeps one frame queued, so what arrives is the newest |
+| `MILLIKAN_CAPTURE=dshow,mjpg` | any combination, comma separated |
 
-The session prints which switches it applied and what the device agreed to, so a
-request the dongle ignored is visible rather than assumed. Nothing else about
-the measurement changes: the fall clock runs on capture timestamps either way.
+To measure them all on a new device, with the chamber empty and nothing else
+running:
+
+    python test/tools/capture_bench.py
+
+It prints the delivered rate for each setting and takes about a minute. The
+session also prints which switches it applied and what the device agreed to, so
+a request the dongle ignored is visible rather than assumed. Nothing about the
+measurement changes either way: the fall clock runs on capture timestamps.

@@ -155,24 +155,17 @@ class LiveSource(FrameSource):
     #
     #     MILLIKAN_CAPTURE=mjpg          ask the device for MJPG instead of raw
     #     MILLIKAN_CAPTURE=buffer1       keep one frame queued, not the driver's
-    #     MILLIKAN_CAPTURE=msmf          Media Foundation instead of DirectShow
+    #     MILLIKAN_CAPTURE=dshow         DirectShow instead of Media Foundation
     #     MILLIKAN_CAPTURE=mjpg,buffer1  any combination, comma separated
     #
-    # Default unchanged, because none of these is known to help HERE yet.  On
-    # 2026-09-21 the tracker received 22.1 of the camera's 30 fps, and the eight
-    # missing ones each cost something: tracks died mid-fall, the square lost its
-    # droplet repeatedly, and one fall was never finalised.
+    # The default is Media Foundation because it was measured to be faster here;
+    # see __init__ for the numbers. These exist so the next device that behaves
+    # differently can be handled at the bench without a rebuild, and so the
+    # measurement can be repeated: test/tools/capture_bench.py tries them all.
     #
-    # The suspects, in the order they are worth trying.  Uncompressed 720p is
-    # about 27 MB/s over USB and a dongle that cannot sustain it simply delivers
-    # fewer frames, where MJPG asks the device to compress instead.  A deep driver
-    # queue means the frame we decode is already old and the NEWEST is the one
-    # dropped.  DirectShow is the legacy path and Media Foundation is sometimes
-    # faster on the same hardware.
-    #
-    # Which to use is decided by the capture line the session prints, not by
-    # guessing: it reports milliseconds inside the camera against milliseconds
-    # inside the pipeline, and only the first kind is what these can fix.
+    # Every session prints what it got -- milliseconds inside the camera against
+    # milliseconds inside the pipeline -- so a device that needs a different
+    # setting says so rather than quietly costing frames.
     @staticmethod
     def _wanted():
         raw = os.environ.get("MILLIKAN_CAPTURE", "")
@@ -184,8 +177,27 @@ class LiveSource(FrameSource):
             width, height = self.DEFAULT_SIZE
         want = self._wanted()
         if backend is None and sys.platform == "win32":
-            # DSHOW is the default: it is what every baseline was measured on.
-            backend = cv2.CAP_MSMF if "msmf" in want else cv2.CAP_DSHOW
+            # MEDIA FOUNDATION, measured on this dongle on 2026-09-21 with
+            # test/tools/capture_bench.py, twelve seconds per mode:
+            #
+            #     (default, DSHOW)   23.6 fps   YUY2
+            #     mjpg               23.6 fps   YUY2   <- request ignored
+            #     buffer1            23.6 fps   YUY2
+            #     mjpg,buffer1       23.6 fps   YUY2
+            #     msmf               30.0 fps
+            #     msmf,mjpg          30.0 fps
+            #
+            # DirectShow could not be moved off uncompressed YUY2 -- it accepted
+            # the FOURCC and kept the format -- and 1280x720 of it is about
+            # 27 MB/s, which this device sustains at 23.6 fps and no more. Media
+            # Foundation delivers the full 30.0, opens in 1.2 s, and hands back
+            # the same 1280x720 frames.
+            #
+            # That is a quarter more samples per second for every speed estimate,
+            # and it is the frames the tracker was missing: a session delivered
+            # 22.1 fps on 2026-09-20, tracks died mid-fall, and the square kept
+            # losing droplets the operator could see perfectly well.
+            backend = cv2.CAP_DSHOW if "dshow" in want else cv2.CAP_MSMF
         cap = cv2.VideoCapture(index, backend) if backend else cv2.VideoCapture(index)
         if not cap.isOpened():
             raise IOError("no camera at index %s. Run cv/UVC_check.py to see what is "
