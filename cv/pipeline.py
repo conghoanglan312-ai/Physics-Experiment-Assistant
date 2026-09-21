@@ -6981,6 +6981,19 @@ def _glyphBand(line):
         # them legible.
         band = line
         return band, band > max(120, float(np.percentile(band, 88)))
+    # A WHOLE READOUT CELL, which is what the live path hands over: it reads the
+    # panel by calling panelAlignment(med) and readPanelVolts(med, ...) with the
+    # cell itself, so a fix that lived in voltageLine was never once used by a
+    # session. The cell holds `V:` above `t:`, and the `V:` line is a fixed
+    # fraction of it -- see voltageLine for why a fraction and not a threshold.
+    # Which line is wanted is already known -- usingTemplates() says so, because
+    # the two lines have their own template sets. Asking the picture instead
+    # ("does this cell hold two runs of text?") gets a different answer as the
+    # exposure moves, and answered "one" on a cell plainly holding V: and t:.
+    if _ACTIVE_TEMPLATES == "v":
+        h = line.shape[0]
+        band = line[int(V_LINE_TOP * h):int(V_LINE_BOTTOM * h), :]
+        return band, band > max(120, float(np.percentile(band, 88)))
     top = float(np.percentile(inner, 99.5))
     if top > 20.0:
         inner = np.clip(inner.astype(np.float32) * (220.0 / top),
@@ -7173,6 +7186,28 @@ def panelAlignment(line, gapRange = (30, 56)):
     runs = _candidates(band, hotBand)
     if len(runs) < 4:
         return None
+    # A PANEL LINE READS `:+ D D D D V`.  When segmentation finds exactly those
+    # six, the digits are the middle four and there is nothing to search for.
+    # The search that follows is for the cases where it does not -- and left to
+    # itself it chose a chain STARTING AT THE SIGN on 2026-09-21, because a `+`
+    # correlates well enough with a `0` to pass the leading-zero rule, and read
+    # 1946 V off a line that showed nothing of the sort.
+    # `[:] + D D D D V` -- the colon is there on the `V:` line and not on the
+    # latched one, and it comes and goes with the exposure, so COUNT FROM THE
+    # RIGHT: the digits are the four runs before the trailing V, whatever is to
+    # their left.  Counting from the left read 0250 as 9979 the moment the colon
+    # appeared, because the chain then started on the `+`.
+    if len(runs) >= 6:
+        return [(a, b) for a, b in runs[-5:-1]]
+    # ...and when it does not, the sign and the V are still not digits.  The
+    # search below chose a chain starting at the `+` and read 1946 V off a line
+    # showing 0269; dropping the outermost runs from what it may choose leaves
+    # it searching only where digits can be.  Five runs means one of the two
+    # merged with its neighbour, so only the leading sign is certain.
+    if len(runs) >= 6:
+        runs = runs[1:-1]
+    elif len(runs) == 5:
+        runs = runs[1:]
     scored = [(a, b) + _scoreRun(band, hotBand, a, b) for a, b in runs]
     # The supply tops out near 459 V -- the 210 V lift step on top of the working
     # voltage -- so on a four-digit display the first digit is ALWAYS `0`.  That is
@@ -7261,9 +7296,10 @@ def readPanelDigits(line, alignment):
     # with a digit, or the sign was lost in noise -- which is what it was built
     # for.
     runs = _candidates(band, hotBand)
-    if len(runs) == 6:
+    if len(runs) >= 6:
+        runs = runs[-5:-1]           # see panelAlignment: count from the V
         text = ""
-        for a, b in runs[1:5]:
+        for a, b in runs:
             d, _sc = _scoreRun(band, hotBand, a, b)
             if d is None:
                 text = None
