@@ -446,31 +446,50 @@ def findCamera(index = 0, accept = None, **kw):
     this frame show the reticle.  The requested index is tried first, so an
     operator who names one still gets it if it is right.
     """
-    tried = []
-    for k in [index] + [i for i in range(CAMERA_SCAN) if i != index]:
-        try:
-            src = LiveSource(k, **kw)
-        except IOError:
-            tried.append(k)
-            continue
-        if accept is None:
-            return src
-        ok = False
-        try:
-            for frame, _t in src.frames():
-                ok = bool(accept(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)))
-                break
-        except Exception:
+    # ...AND NEITHER IS THE BACKEND.  Media Foundation is the faster path on the
+    # machine this was measured on, but OpenCV builds differ: a teammate's logged
+    # "VIDEOIO(MSMF): backend is generally available but can't be used to capture
+    # by index" for every index, so making MSMF the default took their bench
+    # from working to dead (issue #17).  Where it cannot capture, fall back to
+    # DirectShow and say so -- a slower session is a session; no camera is not.
+    backends = [kw.pop("backend", None)]
+    if backends[0] is None and sys.platform == "win32":
+        backends = [None, cv2.CAP_DSHOW if "dshow" not in LiveSource._wanted()
+                    else cv2.CAP_MSMF]
+    tried, found = [], None
+    for backend in backends:
+        for k in [index] + [i for i in range(CAMERA_SCAN) if i != index]:
+            try:
+                src = LiveSource(k, backend = backend, **kw)
+            except IOError:
+                tried.append(k)
+                continue
+            if accept is None:
+                return src
             ok = False
-        if ok:
-            if k != index:
-                print("  camera %d is not the dongle; using camera %d, which shows "
-                      "the grid" % (index, k), flush = True)
-            return src
-        src.close()
-        tried.append(k)
-    raise IOError("no camera showing the grid (tried %s). Run cv/UVC_check.py."
-                  % ", ".join(str(t) for t in tried))
+            try:
+                for frame, _t in src.frames():
+                    ok = bool(accept(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)))
+                    break
+            except Exception:
+                ok = False
+            if ok:
+                found = (k, backend)
+                break
+            src.close()
+            tried.append(k)
+        if found:
+            break
+    if not found:
+        raise IOError("no camera showing the grid (tried %s, on both Windows "
+                      "capture backends). Run cv/UVC_check.py."
+                      % ", ".join(str(t) for t in tried))
+    k, backend = found
+    if k != index or backend is not None:
+        print("  camera: index %d%s -- it is the one showing the grid"
+              % (k, "" if backend is None else " via DirectShow, because Media "
+                 "Foundation would not capture by index here"), flush = True)
+    return src
 
 
 def openSource(spec, **kw):
