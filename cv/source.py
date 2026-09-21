@@ -145,6 +145,11 @@ class LiveSource(FrameSource):
     # whatever it has, which is what would have happened anyway.
     DEFAULT_SIZE = (1280, 720)
 
+    # Given a frame, is this the device we want?  Set by the pipeline to "does
+    # this show the reticle", which is the only question that actually
+    # identifies the dongle -- see accept() below.
+    accept = None
+
     def __init__(self, index = 0, width = None, height = None, fps = None,
                  backend = None, warmupS = 1.0):
         if width is None and height is None:
@@ -355,6 +360,52 @@ class FramesSource(FrameSource):
             self.frameCount, self.nominalFps)
 
 
+# How many camera indices to look at when the requested one is not the dongle.
+CAMERA_SCAN = 4
+
+
+def findCamera(index = 0, accept = None, **kw):
+    """A LiveSource showing what `accept` wants, starting at `index`.
+
+    THE INDEX IS NOT AN IDENTITY.  DirectShow and Media Foundation enumerate the
+    same two devices in opposite orders on this laptop -- measured 2026-09-21:
+    the dongle is 0 under DSHOW and 1 under MSMF, with the built-in webcam taking
+    the other slot.  So changing the backend silently pointed every "device 0" in
+    the project at the webcam, and the session opened, ran, learned a background
+    and reported "Auto-ROI failed: no grid in frame" with the operator standing at
+    the apparatus wondering what they had unplugged.
+
+    `accept(gray)` answers the only question that identifies the dongle: does
+    this frame show the reticle.  The requested index is tried first, so an
+    operator who names one still gets it if it is right.
+    """
+    tried = []
+    for k in [index] + [i for i in range(CAMERA_SCAN) if i != index]:
+        try:
+            src = LiveSource(k, **kw)
+        except IOError:
+            tried.append(k)
+            continue
+        if accept is None:
+            return src
+        ok = False
+        try:
+            for frame, _t in src.frames():
+                ok = bool(accept(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)))
+                break
+        except Exception:
+            ok = False
+        if ok:
+            if k != index:
+                print("  camera %d is not the dongle; using camera %d, which shows "
+                      "the grid" % (index, k), flush = True)
+            return src
+        src.close()
+        tried.append(k)
+    raise IOError("no camera showing the grid (tried %s). Run cv/UVC_check.py."
+                  % ", ".join(str(t) for t in tried))
+
+
 def openSource(spec, **kw):
     """Turn a specification into a FrameSource. Explicit, never guessed.
 
@@ -371,14 +422,16 @@ def openSource(spec, **kw):
     if isinstance(spec, FrameSource):
         return spec
     if isinstance(spec, int):
-        return LiveSource(spec, **kw)
+        return findCamera(spec, accept = LiveSource.accept, **kw)
     text = str(spec)
     if text.lower().startswith(FRAMES_PREFIX):
         return FramesSource(text[len(FRAMES_PREFIX):].strip())
     for prefix in CAMERA_PREFIXES:
         if text.lower().startswith(prefix):
             tail = text[len(prefix):].strip()
-            return LiveSource(int(tail) if tail.isdigit() else tail, **kw)
+            if tail.isdigit():
+                return findCamera(int(tail), accept = LiveSource.accept, **kw)
+            return LiveSource(tail, **kw)
     return FileSource(text)
 
 
