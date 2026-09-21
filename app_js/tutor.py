@@ -323,6 +323,20 @@ class Tutor:
 # the plate voltage in plain text ("BALANCED to 0.0% at 153 V"), so it cannot be
 # forwarded; the situation it describes can.
 BANNER_KINDS = (
+    # ORDER MATTERS: the first needle found wins, so the lines that describe where
+    # the measurement has got to come before the ones about the current number.
+    # "DONE -- 5 of 5 falls" matched nothing at all until 2026-09-21, so a student
+    # who pressed Why? on a finished droplet was told about balancing in general.
+    ("DONE --", "the droplet's five falls are all recorded and it is finished"),
+    ("of 5 falls", "a measurement is under way and some of the five falls are done"),
+    ("MEASURING", "a measurement is in progress"),
+    ("lifting", "the lift is being held, which suspends the balance measurement"),
+    ("panel unreadable", "the aid cannot read the plate voltage off the panel"),
+    ("timing its fall", "the fall clock is running"),
+    ("worth swapping", "the droplet balances outside the voltage range the manual asks for"),
+    ("RAISE", "the droplet needs a higher voltage to balance"),
+    ("LOWER", "the droplet needs a lower voltage to balance"),
+    ("watching it", "the aid is still gathering evidence about this droplet"),
     ("too slow for", "the droplet falls too slowly to measure"),
     ("too fast for", "the droplet falls too fast to measure"),
     ("is RISING", "the droplet is rising while the panel reads 0 V"),

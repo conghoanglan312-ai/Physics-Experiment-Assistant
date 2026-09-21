@@ -2121,6 +2121,11 @@ STILL_GRID_S = 0.05             # slower than this, with the field off, is not f
 # statement -- with this voltage on the plates it is still falling at free-fall pace,
 # so no voltage the supply can reach will hold it -- and that is the thing the operator
 # actually needs: do not chase this one.
+# OFF, by the operator's decision of 2026-09-21: it was drawn on a droplet that
+# had plainly answered the field and was being balanced at 195 V, and a cross that
+# fires wrongly is worse than no cross at all in a demonstration.  The verdict
+# behind it stays -- only the mark on the picture is withheld.
+SHOW_WONT_BALANCE = False
 UNREACHABLE_SHOW_S = 3.0
 CHOSEN_IDLE_S = 90.0            # pinned column with nothing measured: let it go
 # ...and how long a REAL measurement holds the banner with no new fall arriving.  An
@@ -2399,6 +2404,21 @@ class LiftWatch:
                 and level <= self.base + LIFT_TOLERANCE_V:
             # Released without a clean step -- readings dropped through the change.
             self.lifting, self.since, self.base = False, now, None
+        elif self.lifting and level <= LIFT_VOLTS:
+            # A LIFT IS A PLACE, NOT JUST A LATCH.  提升 adds 210 V on top of the
+            # working voltage, so while it is held the plates sit above LIFT_VOLTS.
+            # Both releases above can miss it: the step test needs the whole drop
+            # inside half a second, which a hand on the knob never manages, and the
+            # base test needs the level back where the lift departed from -- which
+            # was 0 V whenever the lift began from a panel reading of zero, so
+            # nothing short of cutting the field could clear it.
+            #
+            # On 2026-09-21 that left "lifting; balance is not measured during a
+            # lift" on screen with the panel showing 150 V.  A lift suspends the
+            # balance fit, so the droplet the operator was holding was not being
+            # measured at all while it said so.  If the plates are not above
+            # LIFT_VOLTS, no lift is being held, whatever the latch remembers.
+            self.lifting, self.since, self.base = False, now, None
         return self.lifting
 
     def quiet(self, now):
@@ -2410,6 +2430,9 @@ class LiftWatch:
 # Kept because the lift latch compares a released voltage against its starting point,
 # and because DESIGN_NOTES cites it.
 LIFT_TOLERANCE_V = 15.0
+# How long the panel must keep reading zero before the aid acts on it.  See the
+# use site: the reader's failure mode is 0000, and everything keys off this.
+ZERO_HOLD_S = 1.0
 
 
 
@@ -3074,6 +3097,18 @@ def keepInstruction(pickId, text, colour, now):
     return text, colour
 
 
+def forgetInstruction():
+    """Drop every held instruction, because the field they were about has changed.
+
+    keepInstruction holds the last real line for FILLER_HOLD_S so a number stays
+    readable.  That also kept verdicts alive across the very change that refuted
+    them: with the panel misreading zero for one frame, "falls -0.08 gr/s -- too
+    slow, DISCARD" was computed against no field and then shown for twelve seconds
+    with 150 V on the panel beside it.
+    """
+    _lastReal.clear()
+
+
 def forgetHeld(key):
     """Drop a held line at once, because what it described is gone.
 
@@ -3118,6 +3153,9 @@ TARGET_STABLE_FRAC = 0.12
 TARGET_MIN_SAMPLES = 6
 TARGET_HALF_STEP = 0.5
 TARGET_GIVE_UP_S = 25.0         # ...after this long unsettled, stop promising a number
+# Smaller than this and the number is inside its own error, and inside the knob's
+# resolution.  Say the direction instead.
+MIN_NUDGE_V = 5.0
 
 
 def steadyTarget(t, now, ub, volts):
@@ -3328,8 +3366,15 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
         # that is off and judged the droplet's speed against the falling band, which
         # is only the right test when the field really is off.
         return "picked id %d -- panel unreadable, cannot judge it" % t.id, (0, 220, 255), None
-    if (not volts) and lastWorkingVolts and abs(speed) <= STILL_GRID_S:
-        # The panel says 0 V, the droplet is not moving, and a working voltage was
+    if (not volts) and lastWorkingVolts and abs(speed) < MIN_SPEED:
+        # The panel says 0 V, the droplet is moving slower than anything can fall
+        # freely, and a working voltage was on the plates seconds ago.  With the
+        # field truly off there is only gravity, and IV.2's own band puts free fall
+        # at 0.2-0.5 grid/s: a droplet doing less than that is being held up by
+        # something.  This test was `is not moving at all` and so missed -0.08 and
+        # -0.03 grid/s, which are just as impossible at 0 V and were reported as
+        # "too slow for 0.2-0.5, DISCARD".
+        #
         # on the plates seconds ago. `volts` is OCR of a display that misreads --
         # it voted 1759 V on a panel showing 0175 on 2026-09-21 -- and when it
         # reads 0 by mistake, a BALANCED droplet looks like a lost square: the
@@ -4220,6 +4265,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     live, morgue, falls, n = [], [], [], fromFrame
     volts = None                    # last plate voltage read off the `V:` line
     steadyVolts = None              # ...voted over ~1 s, for deciding the hunt mode
+    zeroSince = None                # when the vote first read 0; see ZERO_HOLD_S
+    lastFieldLevel = None           # off/work/lift, to drop held lines on a change
     panelAlign = None               # digit positions, found once and reused
     alignCells = collections.deque(maxlen = 8)      # median to align and read from
     # Short windows on purpose.  These lag the knob: the median is taken over the
@@ -4386,11 +4433,40 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # The mode over the last few reads, so one misread cannot move it.
                     # The RAW value is what feeds observeVoltage: the charge test has
                     # to see a 0.5 s toggle, which smoothing would erase.
-                    steadyVolts = collections.Counter(
-                        voltHistory).most_common(1)[0][0]
+                    mode = collections.Counter(voltHistory).most_common(1)[0][0]
+                    # ...and a ZERO has to last before it is believed.  Every verdict
+                    # on the screen hangs off this one number -- which branch of
+                    # pickedVerdict runs, whether the field reads off/work/lift,
+                    # whether a speed is recorded as free fall and therefore whether
+                    # the droplet is still called suitable -- and a dim glyph matches
+                    # the `0` template better than anything else, so the panel's
+                    # failure mode is to read 0000.
+                    #
+                    # On 2026-09-21 that cost, repeatedly and in one run: "falls
+                    # -0.08 gr/s -- too slow, DISCARD" at 150 V; FIELD reading off at
+                    # 147 V; and "DROPLET 2 is no longer suitable, currently falls at
+                    # -0.03 grid/s" about a droplet the operator was holding balanced,
+                    # which the aid itself had called suitable a minute earlier.
+                    #
+                    # Cutting to 0 V is a deliberate act and the panel then reads zero
+                    # for the whole fall -- twenty seconds and more -- so waiting a
+                    # second before believing it costs nothing.  Legality is not
+                    # affected either way: a fall's field-off check votes over its own
+                    # panel crops, not over this.
+                    if mode == 0:
+                        zeroSince = now if zeroSince is None else zeroSince
+                    else:
+                        zeroSince = None
+                    if not (mode == 0 and steadyVolts
+                            and now - zeroSince < ZERO_HOLD_S):
+                        steadyVolts = mode
                 # The RAW reading, not the mode: the lift is recognised by how fast
                 # it moves, and voltHistory's mode would smear a one-reading step
                 # across half a second, which is the very edge being measured.
+                if fieldLevel(steadyVolts) != lastFieldLevel:
+                    # See forgetInstruction: what the held line described is gone.
+                    lastFieldLevel = fieldLevel(steadyVolts)
+                    forgetInstruction()
                 liftWatch.update(volts, now)
                 # A clock running while the field is lifting is measuring nothing.
                 #
@@ -5073,9 +5149,17 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                     # direction is not a matter of degree.
                                     return False
                                 return abs(v - was) <= STEAL_SPEED_GAP * 2.0
+                            # NO AGE GATE HERE.  oldEnoughToPick keeps the square
+                            # off two-frame noise when it is CHOOSING a droplet; this
+                            # is the square taking back the droplet it was already on,
+                            # and the evidence is the position and the motion, which
+                            # are tested below.  Requiring two seconds of history meant
+                            # a droplet that reappeared as a fresh track could not be
+                            # claimed until the coast had already expired: on
+                            # 2026-09-21 the operator watched detection come back and
+                            # had to click their droplet again by hand.
                             near = [q for q in live
                                     if q is not picked and not q.miss
-                                    and oldEnoughToPick(q, now)
                                     and abs(q.pos[0] - aim[0]) <= s["reidX"]
                                     and np.hypot(q.pos[0] - aim[0],
                                                  q.pos[1] - aim[1]) <= reach
@@ -5115,8 +5199,10 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             reach = (PICK_LIFT_PX if liftWatch.lifting
                                      else PICK_FOLLOW_PX)
                             reach = min(PICK_REACH_MAX_PX, reach + PICK_REACH_GROW * gap)
+                            # ...and the same here: this is the pick being handed
+                            # back to where its droplet was predicted to be.
                             near = [t for t in live
-                                    if not t.miss and oldEnoughToPick(t, now)
+                                    if not t.miss
                                     and np.hypot(t.pos[0] - aim[0], t.pos[1] - aim[1])
                                     <= reach]
                             # A droplet falls and rises; it does not travel sideways.
@@ -5668,9 +5754,18 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             else:
                                 target, steady, step = steadyTarget(me, now, ub, volts)
                                 if not steady:
+                                    # A number the operator cannot act on is noise
+                                    # dressed as an instruction.  While the estimate
+                                    # is still moving, a "RAISE by about 3 V" is
+                                    # inside its own uncertainty and inside what a
+                                    # hand on that knob can do: say which way, and
+                                    # leave the number out until it means something.
                                     add = ("   balance %s%.1f%% -- still calculating; "
                                            "%s by about %d V" % (mark, pct, way,
-                                                                 abs(step)))
+                                                                 abs(step))
+                                           if abs(step) >= MIN_NUDGE_V else
+                                           "   balance %s%.1f%% -- still calculating; "
+                                           "%s slowly" % (mark, pct, way))
                                 elif timing:
                                     # "Retune" on its own is not an instruction.  Which
                                     # way, and to what, is the whole content of it.
@@ -5875,6 +5970,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     lifting = liftWatch.lifting or (volts and float(volts) > LIFT_VOLTS)
                     if (getattr(t, "notHeldSince", None) is not None
                             and now - t.notHeldSince >= UNREACHABLE_SHOW_S
+                            and SHOW_WONT_BALANCE
                             and not lifting
                             and not getattr(t, "answeredField", False)
                             and not (t.tTop is not None and t.tBottom is None)):
@@ -5888,7 +5984,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         continue
                     v = t.recentSpeed(spacing)
                     plausible = v is not None and SCREEN_MIN <= v <= SCREEN_MAX
-                    if (getattr(t, "unreachableSince", None) is not None
+                    if (SHOW_WONT_BALANCE
+                            and getattr(t, "unreachableSince", None) is not None
                             and now - t.unreachableSince >= UNREACHABLE_SHOW_S
                             and not lifting
                             and not getattr(t, "answeredField", False)):
@@ -6110,9 +6207,27 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                        "nominalFps": fps,
                        "droppedFrames": src.dropped,
                        "framesRead": n,
+                       # WHERE the missing frames went.  See source.py: `grab` is
+                       # the camera handing a frame over, `work` is everything this
+                       # pipeline does before it asks for the next one.  Whichever
+                       # is the larger is the one worth fixing, and until these
+                       # existed the answer was guesswork.
+                       "grabMsPerFrame": round(1000.0 * getattr(src, "grabS", 0.0)
+                                               / max(1, n), 1),
+                       "workMsPerFrame": round(1000.0 * getattr(src, "workS", 0.0)
+                                               / max(1, n), 1),
                        "backgroundResyncs": resyncs,
                        "spraySpans": spraySpans([t for t, _c in detSeries],
                                                 [c for _t, c in detSeries])})
+    # Printed, not just returned: a live session's health dict goes nowhere the
+    # operator can see, and the frame rate is the one number that explains a run
+    # where tracks kept dying.
+    if health is not None and health.get("framesRead"):
+        print("  capture: %.1f fps delivered of %s nominal, %d dropped; "
+              "%.1f ms in the camera, %.1f ms in the pipeline, per frame"
+              % (health.get("fps") or 0.0, health.get("nominalFps"),
+                 health.get("droppedFrames", 0), health.get("grabMsPerFrame", 0.0),
+                 health.get("workMsPerFrame", 0.0)), flush = True)
     return falls
 
 

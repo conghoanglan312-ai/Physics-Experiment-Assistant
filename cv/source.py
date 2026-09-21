@@ -44,6 +44,12 @@ class FrameSource(object):
     height = 0
     frameCount = 0          # 0 when unknown, which is always true of a live source
     dropped = 0             # frames the source itself lost, counted where detectable
+    # Where the time goes, so a run can answer it without a separate bench slot.
+    # 2026-09-21: 22.1 of the camera's 30 fps reached the pipeline, and the question
+    # "is the camera slow to hand frames over, or are we slow to come back for them"
+    # could not be answered from outside -- both look identical from the far end.
+    grabS = 0.0             # seconds inside grab()+retrieve()
+    workS = 0.0             # seconds the consumer spent before asking for the next
 
     def frames(self, first = 0, last = None):
         """Yield (bgrFrame, t). `t` is seconds, monotonic, from one clock."""
@@ -214,10 +220,13 @@ class LiveSource(FrameSource):
             # grab() is the capture; retrieve() is the decode.  Stamping between them
             # is as close to the shutter as OpenCV will let us get -- anything later
             # measures our own processing lag instead of the experiment.
+            _t1 = time.perf_counter()
             if not cap.grab():
                 break
             t = self._stamp()
             ok, frame = cap.retrieve()
+            _t2 = time.perf_counter()
+            self.grabS += _t2 - _t1
             if not ok:
                 continue
             n += 1
@@ -229,6 +238,7 @@ class LiveSource(FrameSource):
             if last is not None and n > last:
                 break
             yield frame, t
+            self.workS += time.perf_counter() - _t2
 
     def learnBackground(self, samples = 61, seconds = 30.0, first = 0, last = None):
         """Spread `samples` grabs over `seconds` and take the median.
