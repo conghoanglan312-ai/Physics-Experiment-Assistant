@@ -1678,6 +1678,22 @@ class Track:
         pts = self.points[-window:]
         if len(pts) < 8:
             return None
+        # DROP THE FRAMES WHERE A GRID LINE IS UNDER THE DROPLET.  The reticle is
+        # drawn into the video, so while a droplet overlaps a line the bright line
+        # is inside its contour and drags the centroid: the operator noticed that
+        # slow droplets' readings surge as they cross, and on 2026-09-21 one such
+        # surge to 0.21 grid/s was enough to call a droplet that had been falling
+        # at about 0.15 USABLE. The bias is an artefact of the picture, not motion.
+        #
+        # Only if enough is left to fit: near the `0` line a balanced droplet sits
+        # ON a line for minutes, and refusing to measure it at all would be worse
+        # than measuring it with the bias.
+        rows = getattr(self, "gridRows", None)
+        if rows:
+            clear = [p for p in pts
+                     if min(abs(float(p[1]) - r) for r in rows) > GRID_BIAS_PX]
+            if len(clear) >= 8:
+                pts = clear
         ts = np.array([p[0] for p in pts], dtype = float)
         y = np.array([p[1] for p in pts], dtype = float)
         if ts[-1] == ts[0]:
@@ -3372,14 +3388,20 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
         # that is off and judged the droplet's speed against the falling band, which
         # is only the right test when the field really is off.
         return "picked id %d -- panel unreadable, cannot judge it" % t.id, (0, 220, 255), None
-    if (not volts) and lastWorkingVolts and abs(speed) < MIN_SPEED:
-        # The panel says 0 V, the droplet is moving slower than anything can fall
-        # freely, and a working voltage was on the plates seconds ago.  With the
-        # field truly off there is only gravity, and IV.2's own band puts free fall
-        # at 0.2-0.5 grid/s: a droplet doing less than that is being held up by
-        # something.  This test was `is not moving at all` and so missed -0.08 and
-        # -0.03 grid/s, which are just as impossible at 0 V and were reported as
-        # "too slow for 0.2-0.5, DISCARD".
+    if (not volts) and lastWorkingVolts and speed < STILL_GRID_S:
+        # The panel says 0 V, the droplet is NOT FALLING, and a working voltage was
+        # on the plates seconds ago.  With the field off there is only gravity, so
+        # a droplet that hovers or climbs is being held up by something and the
+        # reading is wrong -- which is how -0.08 and -0.03 grid/s came to be
+        # reported as "too slow for 0.2-0.5, DISCARD" at 150 V.
+        #
+        # The test is the DIRECTION, not the magnitude.  It was briefly "slower
+        # than the 0.2-0.5 band", which is a different claim and a false one: that
+        # band is the band of droplets worth measuring, not a law about falling.
+        # A droplet too heavy for it falls at 0.15 grid/s quite legitimately, and
+        # treating that as a misread meant the aid never said "too slow" at all --
+        # it judged a genuinely slow droplet against a field that was not there and
+        # reported "the field is not holding it yet" for eighteen seconds.
         #
         # on the plates seconds ago. `volts` is OCR of a display that misreads --
         # it voted 1759 V on a panel showing 0175 on 2026-09-21 -- and when it
@@ -3736,6 +3758,11 @@ PICK_RADIUS_PX = 40.0         # how near a click has to land to select a droplet
 # failed the gate twice, the PICK is a different matter: a droplet the operator is
 # measuring has always been visible for seconds, and noise never is. This costs
 # nothing in the gate, which makes no picks at all.
+# How near a grid line a point has to be before its centroid is distrusted. The
+# lines are about 2 px wide in the dongle's picture and a droplet is 5-9 px
+# across, so this is "the line is inside the blob".
+GRID_BIAS_PX = 5.0
+
 PICK_MIN_AGE_S = 2.0
 
 
@@ -4765,6 +4792,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     if now - voltsChangedAt >= CHARGE_SETTLE_S:
                         t.observeVoltage(volts, spacing)
                         noteColumnVoltage(columnVolts, t, volts, spacing)
+                    t.gridRows = s["gridRows"]     # see recentSpeed
                     updateDivision(t, s["gridRows"])
                     updateHold(t, yTop, spacing, now, volts, columnVolts,
                                now - voltsChangedAt if voltsChangedAt else None,
@@ -6228,9 +6256,6 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
 
     elapsed = (lastT - firstT) if (firstT is not None and lastT is not None) else 0
     measuredFps = (n - fromFrame - 1) / elapsed if elapsed > 0 else 0.0
-    if src.isLive and measuredFps:
-        print("  delivered %.2f fps against %.2f advertised, %d dropped"
-              % (measuredFps, fps, src.dropped), flush = True)
     if health is not None:
         health.update({"bgWindowS": bgWindowS,
                        "fromFrame": fromFrame,
@@ -6261,12 +6286,14 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     # Printed, not just returned: a live session's health dict goes nowhere the
     # operator can see, and the frame rate is the one number that explains a run
     # where tracks kept dying.
-    if health is not None and health.get("framesRead"):
-        print("  capture: %.1f fps delivered of %s nominal, %d dropped; "
+    if src.isLive and n:
+        # Unconditionally, because the live path passes no health dict and this is
+        # the number that explains a session where tracks kept dying.
+        print("  capture: %.1f fps delivered of %.0f nominal, %d dropped; "
               "%.1f ms in the camera, %.1f ms in the pipeline, per frame"
-              % (health.get("fps") or 0.0, health.get("nominalFps"),
-                 health.get("droppedFrames", 0), health.get("grabMsPerFrame", 0.0),
-                 health.get("workMsPerFrame", 0.0)), flush = True)
+              % (measuredFps or 0.0, fps, src.dropped,
+                 1000.0 * getattr(src, "grabS", 0.0) / max(1, n),
+                 1000.0 * getattr(src, "workS", 0.0) / max(1, n)), flush = True)
     return falls
 
 
