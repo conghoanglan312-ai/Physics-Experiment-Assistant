@@ -100,7 +100,7 @@ LLM_KEYS = (
     # text, which is the reading itself. `voltageInWorkingRange` is the boolean
     # llm/util/voltageSafeguard.py replaces the reading with.
     "phase", "elapsedSeconds", "fieldState", "voltageInWorkingRange",
-    "tracked", "legalFalls", "id", "trackId", "fallSeconds", "fallRunning",
+    "tracked", "legalFalls", "id", "trackId", "fallSeconds", "fallRunning", "trackAgeS",
     "balancePercent",
     # per fall
     "seconds", "speedGridPerSec", "kinematicLegal", "fieldOff", "legal",
@@ -134,7 +134,7 @@ LIVE_KEYS = (
     "tracked", "falls", "legalFalls", "dropletsCompleted", "targetFallsPerDroplet",
     "voltageV", "fieldState",           # the panel reading -- app only, see THE SEAL
     "frameWidth", "frameHeight",        # so a click can be sent as a fraction
-    "picked", "id", "trackId", "speedGridPerSec", "fallSeconds", "fallRunning",
+    "picked", "id", "trackId", "speedGridPerSec", "fallSeconds", "fallRunning", "trackAgeS",
     "balancePercent",
 )
 

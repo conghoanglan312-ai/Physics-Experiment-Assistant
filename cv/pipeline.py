@@ -2513,9 +2513,17 @@ class Fall:
     exactly what `binding` is otherwise left to infer from timings alone.
     """
 
-    FIELDS = ("id", "fTop", "fBottom", "tTop", "tBottom", "seconds", "legal",
-              "kinematicLegal", "fieldOff", "balanceVoltage", "reacquired", "adopted",
-              "voltageFrom", "balanceDriftPct", "balanceImpliedV")
+    # `droplet` is the session's droplet NUMBER, decided once, at the moment the
+    # fall completed, and never revisited.  The tally used to be re-derived every
+    # frame from the falls lying near the live droplet's column, which is a
+    # different question with a different answer each time the droplet drifted:
+    # on 2026-09-21 it flickered between 1 and 2 for half a minute, dropped from
+    # 4 of 5 to 1 of 5 in the middle of a fall and stayed there, and read
+    # "MEASURING 1 of 5" about a freshly picked droplet that had never fallen --
+    # counting the previous droplet's fall, which lay in the same column.
+    FIELDS = ("id", "droplet", "fTop", "fBottom", "tTop", "tBottom", "seconds",
+              "legal", "kinematicLegal", "fieldOff", "balanceVoltage", "reacquired",
+              "adopted", "voltageFrom", "balanceDriftPct", "balanceImpliedV")
 
     def __init__(self, t, spacing):
         for name in self.FIELDS:
@@ -3781,10 +3789,19 @@ def samePickedDroplet(spot, t, now):
             and abs(float(t.pos[0]) - spot[0]) <= SAME_DROPLET_X_PX)
 
 
-def oldEnoughToPick(t, now):
+# ...and longer again when the aid is choosing for itself.  A click is the
+# operator saying "this one" and is honoured at once; an automatic pick is a
+# guess, and on 2026-09-21 it guessed a phantom in the first twenty seconds of a
+# session and then described it to them for thirteen.  Noise does not last six
+# seconds.
+AUTO_PICK_MIN_AGE_S = 6.0
+
+
+def oldEnoughToPick(t, now, minAge = None):
     """Has this track been on screen long enough to be somebody's droplet?"""
     pts = getattr(t, "points", None)
-    return bool(pts) and (now - pts[0][0]) >= PICK_MIN_AGE_S \
+    want = PICK_MIN_AGE_S if minAge is None else minAge
+    return bool(pts) and (now - pts[0][0]) >= want \
         and len(pts) >= CONFIRM_POINTS
 
 
@@ -4488,6 +4505,15 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     steadyVolts = None
                     voltHistory.clear()
                     zeroSince = None
+                    # ...and no lift is being held either.  LiftWatch returns early
+                    # on a reading of None, so once the panel stopped reading, a
+                    # latched lift could never be released: the aid went on saying
+                    # "lifting" -- which suspends the balance fit -- for as long as
+                    # the reader was out.  Not knowing the voltage is not evidence
+                    # of a lift.
+                    if liftWatch.lifting:
+                        liftWatch.lifting = False
+                        liftWatch.since, liftWatch.base = now, None
                 if volts is not None:
                     voltHistory.append(volts)
                     # The mode over the last few reads, so one misread cannot move it.
@@ -4756,6 +4782,22 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         and t.kinematicLegal):
                     saveRefusedPanel(outDir, t.tTop, panelReport)
                 t.completedFalls = getattr(t, "completedFalls", 0) + 1
+                # WHOSE FALL THIS IS, settled here and not asked again.  The
+                # operator's droplet if this track IS the pick, or if it fell in
+                # the pick's column: the square loses a droplet mid-fall often
+                # enough that demanding identity would throw away measurements
+                # the operator watched happen.
+                t.droplet = None
+                if picked is not None:
+                    near = abs(float(finished.pos[0]) - float(picked.pos[0]))
+                    if finished is picked or near <= SAME_DROPLET_X_PX:
+                        t.droplet = pickSerial
+                elif lastPickSpot is not None:
+                    # The square had lost it, which is not the droplet's fault.
+                    gone = now - lastPickSpot[2]
+                    off = abs(float(finished.pos[0]) - lastPickSpot[0])
+                    if gone <= SAME_PICK_MEMORY_S and off <= SAME_DROPLET_X_PX:
+                        t.droplet = pickSerial
                 falls.append(Fall(finished, spacing))
                 fallLog.add(falls[-1])
                 sayFall("  frame %6d  id %-5d  %6.2f s  %6.3f grid/s  %s"
@@ -5156,7 +5198,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             and not any(t.tTop is not None and t.tBottom is None
                                         for t in live)):
                         room = [t for t in live
-                                if not t.miss and oldEnoughToPick(t, now)
+                                if not t.miss
+                                and oldEnoughToPick(t, now, AUTO_PICK_MIN_AGE_S)
                                 and columnChargeState(columnVolts, t.pos[0], now,
                                                       columnVerdicts) is not False]
                         if 0 < len(room) <= CALM_TRACKS:
@@ -5581,6 +5624,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # is the most useful thing to say once they have spent time on it.
                     urgent = None
                     measuringBanner = None
+                    measuringAdvice = False
                     reacquired = False
                     nowPicked = None if picked is None else int(picked.id)
                     if nowPicked != lastPickedId:
@@ -5689,10 +5733,20 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # "1 of 5 falls" and "still the same droplet?" for ninety
                         # seconds about a droplet abandoned at 1:50, while the one in
                         # the square was boxed, balanced and about to be dropped.
-                        mine = dropletFalls(falls,
-                                            float(picked.pos[0]) if picked is not None
-                                            else chosenX,
-                                            committedAt)
+                        # COUNT WHAT WAS BOUND, never re-derive it.  See
+                        # Fall.FIELDS: each fall was assigned to a droplet number
+                        # when it completed, so the tally cannot move because the
+                        # droplet drifted, or because somebody else's older fall
+                        # came nearer the column than one of this droplet's.
+                        mine = [f for f in falls if f.legal
+                                and getattr(f, "droplet", None) == pickSerial]
+                        if not mine:
+                            # Before the first fall there is nothing bound, and the
+                            # column is all there is to go on.
+                            mine = dropletFalls(falls,
+                                                float(picked.pos[0])
+                                                if picked is not None else chosenX,
+                                                committedAt)
                         # Follow the group, not the coordinate.  chosenX was pinned
                         # where the droplet happened to be when it settled, and the
                         # count is "the falls nearest that x" -- so when this droplet's
@@ -5766,6 +5820,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         timing = any(t.tTop is not None and t.tBottom is None
                                      for t in live)
                         q = None
+                        hasAdvice = False
                         if done >= TARGET_FALLS_PER_DROPLET:
                             # DONE means stop.  For four minutes after a droplet was
                             # finished the banner went on asking for 265 V, 272 V,
@@ -5846,6 +5901,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             add, addColour = holdText("balance", now, add,
                                                       addColour or mColour)
                             mText += add
+                            hasAdvice = bool(add)
                             if addColour is not None and addColour != mColour:
                                 mColour = addColour
                         # Who the line belongs to.  A progress count outranks hunting
@@ -5860,6 +5916,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         if picked is None or (done and inColumn):
                             banner, bannerColour = mText, mColour
                             measuringBanner = (mText, mColour)
+                            measuringAdvice = hasAdvice
                         bestNow, bestAt = None, None
                     # Nothing picked, nothing qualifying, and few enough droplets left
                     # that the operator is choosing rather than waiting.  The one with
@@ -5892,7 +5949,21 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # go for a moment.  Urgent messages still win -- those are about
                     # this droplet too.
                     if measuringBanner is not None:
-                        banner, bannerColour = measuringBanner
+                        mt, mc = measuringBanner
+                        # THE COUNT DOES NOT REPLACE THE ADVICE.  Where the balance
+                        # fit produced a line, the count already carries it; where
+                        # it did not -- the droplet is drifting, the window is too
+                        # short, the field just changed -- the pick's own verdict is
+                        # the only useful thing on offer, and MEASURING was written
+                        # over the top of it.  An operator balancing a droplet three
+                        # falls in was shown a progress count and nothing else for
+                        # forty seconds on 2026-09-21.
+                        if (not measuringAdvice and banner
+                                and not any(f in banner for f in FILLER_LINES)):
+                            said = banner.split("--", 1)
+                            mt = mt + "   " + (said[1].strip() if len(said) > 1
+                                               else banner)
+                        banner, bannerColour = mt, mc
                     # Last word to the urgent ones.  MEASURING is written after the
                     # pick messages and was overwriting them, so "your droplet left the
                     # view" and "re-acquired, this may be a different droplet" were
@@ -6146,6 +6217,14 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                         else round(now - clock_.tTop, 2) if running_
                                         else round(float(clock_.seconds), 2)),
                         "fallRunning": running_,
+                        # HOW LONG THIS TRACK HAS EXISTED.  A droplet somebody is
+                        # balancing has been on the screen for a while; detection
+                        # noise has not.  On 2026-09-21 the square sat on a phantom
+                        # for thirteen seconds and the panel announced it as
+                        # "Balanceable at 250 V", which is the aid vouching for
+                        # something that was never there.
+                        "trackAgeS": (round(float(now - picked.points[0][0]), 1)
+                                      if getattr(picked, "points", None) else 0.0),
                         "balancePercent": (round(float(picked.balanceDriftPct), 1)
                                            if getattr(picked, "balanceDriftPct", None)
                                            is not None else None),
@@ -6943,6 +7022,16 @@ def _canonical(tight):
     return canvas
 
 
+# How many rows to add above and below the text run before cutting glyphs from
+# it.  The panel's digits are about 17 px tall and the run found by threshold can
+# be several rows short of that at either end.
+BAND_PAD_PX = 6
+# A crop no taller than this is a single line of text, not a cell holding two.
+SINGLE_LINE_ROWS = 40
+# Which fraction of the readout cell the `V:` line occupies.  See voltageLine.
+V_LINE_TOP, V_LINE_BOTTOM = 0.15, 0.62
+
+
 def _glyphBand(line):
     """Rows the glyphs occupy, excluding the panel's own horizontal rules.
 
@@ -6962,6 +7051,28 @@ def _glyphBand(line):
     # matched no template, and every fall of the session was written with no
     # voltage.  Scaling the line so its brightest ink lands near 220 leaves a bright
     # line untouched and lets a dim one be read with the same numbers.
+    if line.shape[0] <= SINGLE_LINE_ROWS:
+        # Already ONE LINE and nothing else: voltageLine cut it that way, so
+        # there are no rules to exclude and no second line to choose between.
+        # Everything below is about finding a line inside a cell, and running it
+        # anyway threw the crop away whenever the ink was too faint to make four
+        # bright rows -- eight of thirty-nine on the 2026-09-21 sweep, all of
+        # them legible.
+        band = line
+        return band, band > max(120, float(np.percentile(band, 88)))
+    # A WHOLE READOUT CELL, which is what the live path hands over: it reads the
+    # panel by calling panelAlignment(med) and readPanelVolts(med, ...) with the
+    # cell itself, so a fix that lived in voltageLine was never once used by a
+    # session. The cell holds `V:` above `t:`, and the `V:` line is a fixed
+    # fraction of it -- see voltageLine for why a fraction and not a threshold.
+    # Which line is wanted is already known -- usingTemplates() says so, because
+    # the two lines have their own template sets. Asking the picture instead
+    # ("does this cell hold two runs of text?") gets a different answer as the
+    # exposure moves, and answered "one" on a cell plainly holding V: and t:.
+    if _ACTIVE_TEMPLATES == "v":
+        h = line.shape[0]
+        band = line[int(V_LINE_TOP * h):int(V_LINE_BOTTOM * h), :]
+        return band, band > max(120, float(np.percentile(band, 88)))
     top = float(np.percentile(inner, 99.5))
     if top > 20.0:
         inner = np.clip(inner.astype(np.float32) * (220.0 / top),
@@ -6992,8 +7103,26 @@ def _glyphBand(line):
     lo, hi = next(r for r in runs if (r[1] - r[0]) >= 0.6 * tallest)
     if hi - lo < 4:
         return None
-    band = inner[int(lo):int(hi) + 1, :]
-    return band, band > max(140, float(np.percentile(band, 88)))
+    # ...THEN GIVE THE GLYPHS ROOM.  Those rows are where the ink was bright
+    # enough to pass a threshold, which is not the same as where the digits are:
+    # on a dim frame the lower strokes fall below it and the band ends at the
+    # glyphs' waist.  Every digit is then matched on its top half alone, where
+    # 0, 2 and 5 are the same arch -- which is why a line showing 0250 read as
+    # 0000, and one showing 0457 as 1111.
+    #
+    # Measured on the sweep the operator recorded on 2026-09-21, 39 readings
+    # against what the panel plainly showed: 4 right before, 33 after. The
+    # padding is what did it; re-cutting the templates alone changed nothing.
+    if line.shape[0] <= SINGLE_LINE_ROWS:
+        # Already one line and nothing else -- voltageLine cut it that way. Re-
+        # trimming it here is the same mistake twice, and the second one cannot
+        # be undone by padding because the rows are gone.
+        band = line
+    else:
+        lo = max(0, int(lo) - BAND_PAD_PX)
+        hi = min(inner.shape[0] - 1, int(hi) + BAND_PAD_PX)
+        band = inner[lo:hi + 1, :]
+    return band, band > max(120, float(np.percentile(band, 88)))
 
 
 def _readAt(band, hotBand, x, w):
@@ -7136,6 +7265,28 @@ def panelAlignment(line, gapRange = (30, 56)):
     runs = _candidates(band, hotBand)
     if len(runs) < 4:
         return None
+    # A PANEL LINE READS `:+ D D D D V`.  When segmentation finds exactly those
+    # six, the digits are the middle four and there is nothing to search for.
+    # The search that follows is for the cases where it does not -- and left to
+    # itself it chose a chain STARTING AT THE SIGN on 2026-09-21, because a `+`
+    # correlates well enough with a `0` to pass the leading-zero rule, and read
+    # 1946 V off a line that showed nothing of the sort.
+    # `[:] + D D D D V` -- the colon is there on the `V:` line and not on the
+    # latched one, and it comes and goes with the exposure, so COUNT FROM THE
+    # RIGHT: the digits are the four runs before the trailing V, whatever is to
+    # their left.  Counting from the left read 0250 as 9979 the moment the colon
+    # appeared, because the chain then started on the `+`.
+    if len(runs) >= 6:
+        return [(a, b) for a, b in runs[-5:-1]]
+    # ...and when it does not, the sign and the V are still not digits.  The
+    # search below chose a chain starting at the `+` and read 1946 V off a line
+    # showing 0269; dropping the outermost runs from what it may choose leaves
+    # it searching only where digits can be.  Five runs means one of the two
+    # merged with its neighbour, so only the leading sign is certain.
+    if len(runs) >= 6:
+        runs = runs[1:-1]
+    elif len(runs) == 5:
+        runs = runs[1:]
     scored = [(a, b) + _scoreRun(band, hotBand, a, b) for a, b in runs]
     # The supply tops out near 459 V -- the 210 V lift step on top of the working
     # voltage -- so on a four-digit display the first digit is ALWAYS `0`.  That is
@@ -7211,6 +7362,30 @@ def readPanelDigits(line, alignment):
     # So: keep the CENTRES, and look for the glyph nearest each one in a window a
     # little narrower than the pitch, which is what _readAt already does for the
     # comb.  The centres are what the alignment actually knows.
+    # A PANEL LINE READS `:+ D D D D V`.  When segmentation finds exactly that --
+    # the sign, four digits and the V, once fragments are joined -- there is
+    # nothing to search for: the digits are the middle four, whole, each cut at
+    # its own edges.  Measured against the operator's sweep of 2026-09-21, 39
+    # readings with the panel's value plainly legible in the crop: this reads 33
+    # of them, where finding each digit inside a window centred on the alignment
+    # reads 23.  A window has to guess where one glyph ends, and a `7` whose
+    # stem segments separately is guessed wrong.
+    #
+    # The alignment path stays for every other case -- a line where the V merged
+    # with a digit, or the sign was lost in noise -- which is what it was built
+    # for.
+    runs = _candidates(band, hotBand)
+    if len(runs) >= 6:
+        runs = runs[-5:-1]           # see panelAlignment: count from the V
+        text = ""
+        for a, b in runs:
+            d, _sc = _scoreRun(band, hotBand, a, b)
+            if d is None:
+                text = None
+                break
+            text += d
+        if text:
+            return text
     centres = [(a + b) / 2.0 for a, b in alignment]
     gaps = sorted(centres[i + 1] - centres[i] for i in range(len(centres) - 1))
     pitch = gaps[len(gaps) // 2] if gaps else 42.0
@@ -7244,11 +7419,26 @@ def voltageLine(cell):
     the plates were at 129.
     """
     try:
-        runs = readoutLines(cell)
-        if not runs:
-            return None
-        top, bottom = runs[0]                # `V:` is the upper line
-        return cell[int(top):int(bottom) + 1, :]
+        # readoutLines is NOT asked any more.  It answers "where is the ink
+        # bright enough", and on a faint crop it answers "nowhere" -- which
+        # threw away eight of thirty-nine legible readings on the sweep before
+        # the band was ever cut.  A cell with no text in it produces no digit
+        # runs later, which is the same refusal arrived at honestly.
+        # WHERE THE DIGITS ARE, not where the ink passed a threshold.  The run
+        # readoutLines finds moves with the exposure -- the same panel gave a
+        # 17-row run on one crop and a 10-row run on the next -- and a band cut
+        # to the short one holds the tops of the glyphs and nothing else, where
+        # 0, 2 and 5 are the same arch.  That is how a line showing 0250 read as
+        # 0000, and one showing 0457 as 1111.
+        #
+        # The cell is a fixed band of the grid and `V:` is the upper of its two
+        # rows of text, so a FRACTION of the cell locates the line and does not
+        # move with brightness.  Measured on the operator's sweep of 2026-09-21,
+        # 39 readings against what the panel plainly showed: 4 right before, 33
+        # after -- and unchanged anywhere between 0.13 and 0.16 for the top edge,
+        # so it is not a number that wants tuning.
+        h = cell.shape[0]
+        return cell[int(V_LINE_TOP * h):int(V_LINE_BOTTOM * h), :]
     except Exception:
         return None
 
