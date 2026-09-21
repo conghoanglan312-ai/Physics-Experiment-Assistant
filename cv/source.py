@@ -44,6 +44,12 @@ class FrameSource(object):
     height = 0
     frameCount = 0          # 0 when unknown, which is always true of a live source
     dropped = 0             # frames the source itself lost, counted where detectable
+    # Where the time goes, so a run can answer it without a separate bench slot.
+    # 2026-09-21: 22.1 of the camera's 30 fps reached the pipeline, and the question
+    # "is the camera slow to hand frames over, or are we slow to come back for them"
+    # could not be answered from outside -- both look identical from the far end.
+    grabS = 0.0             # seconds inside grab()+retrieve()
+    workS = 0.0             # seconds the consumer spent before asking for the next
 
     def frames(self, first = 0, last = None):
         """Yield (bgrFrame, t). `t` is seconds, monotonic, from one clock."""
@@ -145,20 +151,77 @@ class LiveSource(FrameSource):
     # whatever it has, which is what would have happened anyway.
     DEFAULT_SIZE = (1280, 720)
 
+    # Switches for the capture path, chosen at the bench without a rebuild:
+    #
+    #     MILLIKAN_CAPTURE=mjpg          ask the device for MJPG instead of raw
+    #     MILLIKAN_CAPTURE=buffer1       keep one frame queued, not the driver's
+    #     MILLIKAN_CAPTURE=dshow         DirectShow instead of Media Foundation
+    #     MILLIKAN_CAPTURE=mjpg,buffer1  any combination, comma separated
+    #
+    # The default is Media Foundation because it was measured to be faster here;
+    # see __init__ for the numbers. These exist so the next device that behaves
+    # differently can be handled at the bench without a rebuild, and so the
+    # measurement can be repeated: test/tools/capture_bench.py tries them all.
+    #
+    # Every session prints what it got -- milliseconds inside the camera against
+    # milliseconds inside the pipeline -- so a device that needs a different
+    # setting says so rather than quietly costing frames.
+    @staticmethod
+    def _wanted():
+        raw = os.environ.get("MILLIKAN_CAPTURE", "")
+        return set(w.strip().lower() for w in raw.split(",") if w.strip())
+
     def __init__(self, index = 0, width = None, height = None, fps = None,
                  backend = None, warmupS = 1.0):
         if width is None and height is None:
             width, height = self.DEFAULT_SIZE
+        want = self._wanted()
         if backend is None and sys.platform == "win32":
-            backend = cv2.CAP_DSHOW      # the default backend on Windows is slow to open
+            # MEDIA FOUNDATION, measured on this dongle on 2026-09-21 with
+            # test/tools/capture_bench.py, twelve seconds per mode:
+            #
+            #     (default, DSHOW)   23.6 fps   YUY2
+            #     mjpg               23.6 fps   YUY2   <- request ignored
+            #     buffer1            23.6 fps   YUY2
+            #     mjpg,buffer1       23.6 fps   YUY2
+            #     msmf               30.0 fps
+            #     msmf,mjpg          30.0 fps
+            #
+            # DirectShow could not be moved off uncompressed YUY2 -- it accepted
+            # the FOURCC and kept the format -- and 1280x720 of it is about
+            # 27 MB/s, which this device sustains at 23.6 fps and no more. Media
+            # Foundation delivers the full 30.0, opens in 1.2 s, and hands back
+            # the same 1280x720 frames.
+            #
+            # That is a quarter more samples per second for every speed estimate,
+            # and it is the frames the tracker was missing: a session delivered
+            # 22.1 fps on 2026-09-20, tracks died mid-fall, and the square kept
+            # losing droplets the operator could see perfectly well.
+            backend = cv2.CAP_DSHOW if "dshow" in want else cv2.CAP_MSMF
         cap = cv2.VideoCapture(index, backend) if backend else cv2.VideoCapture(index)
         if not cap.isOpened():
             raise IOError("no camera at index %s. Run cv/UVC_check.py to see what is "
                           "connected." % index)
+        # BEFORE the size: several drivers apply a pixel format only while the mode
+        # is being negotiated and ignore it afterwards.
+        if "mjpg" in want:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        if "buffer1" in want:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         if width:
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         if height:
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        if want:
+            # Say what the device actually agreed to.  A request that was ignored
+            # and one that worked look identical from here otherwise, which is the
+            # whole point on a bench where the switch is chosen by trial.
+            code = int(cap.get(cv2.CAP_PROP_FOURCC)) or 0
+            fourcc = "".join(chr((code >> (8 * k)) & 0xFF) for k in range(4)).strip()
+            print("  capture switches %s -> backend %s, format %s"
+                  % (",".join(sorted(want)),
+                     "MSMF" if backend == cv2.CAP_MSMF else "DSHOW",
+                     fourcc or "?"), flush = True)
         if fps:
             cap.set(cv2.CAP_PROP_FPS, fps)
         self.index = index
@@ -214,10 +277,13 @@ class LiveSource(FrameSource):
             # grab() is the capture; retrieve() is the decode.  Stamping between them
             # is as close to the shutter as OpenCV will let us get -- anything later
             # measures our own processing lag instead of the experiment.
+            _t1 = time.perf_counter()
             if not cap.grab():
                 break
             t = self._stamp()
             ok, frame = cap.retrieve()
+            _t2 = time.perf_counter()
+            self.grabS += _t2 - _t1
             if not ok:
                 continue
             n += 1
@@ -229,6 +295,7 @@ class LiveSource(FrameSource):
             if last is not None and n > last:
                 break
             yield frame, t
+            self.workS += time.perf_counter() - _t2
 
     def learnBackground(self, samples = 61, seconds = 30.0, first = 0, last = None):
         """Spread `samples` grabs over `seconds` and take the median.
