@@ -42,10 +42,10 @@ except ImportError:                     # greedy fallback, same gates
     HAVE_SCIPY = False
 
 try:
-    from .source import openSource, isCameraSpec, FRAMES_PREFIX
+    from .source import openSource, isCameraSpec, FRAMES_PREFIX, LiveSource
     from . import charge as chargeMath
 except ImportError:                     # run as a loose script rather than a package
-    from source import openSource, isCameraSpec, FRAMES_PREFIX
+    from source import openSource, isCameraSpec, FRAMES_PREFIX, LiveSource
     import charge as chargeMath
 
 # No machine-specific defaults.  Point these at your own footage with an argument
@@ -4117,6 +4117,11 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     # open a file in a folder that is not there and says nothing about it.
     os.makedirs(outDir, exist_ok = True)
     fallLog = FallLog(outDir, path)
+    # Which camera is the dongle is decided by the picture, not by its index:
+    # the two Windows backends enumerate the same devices in opposite orders.
+    # autoROI IS the test -- it is what fails, loudly and thirty seconds late,
+    # when the wrong device is opened.
+    LiveSource.accept = lambda gray: autoROI(gray) is not None
     src = openSource(path)
     fps = src.nominalFps            # advisory: naming, pacing and progress only
     total = src.frameCount
