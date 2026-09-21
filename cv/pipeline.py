@@ -6943,6 +6943,16 @@ def _canonical(tight):
     return canvas
 
 
+# How many rows to add above and below the text run before cutting glyphs from
+# it.  The panel's digits are about 17 px tall and the run found by threshold can
+# be several rows short of that at either end.
+BAND_PAD_PX = 6
+# A crop no taller than this is a single line of text, not a cell holding two.
+SINGLE_LINE_ROWS = 40
+# Which fraction of the readout cell the `V:` line occupies.  See voltageLine.
+V_LINE_TOP, V_LINE_BOTTOM = 0.15, 0.62
+
+
 def _glyphBand(line):
     """Rows the glyphs occupy, excluding the panel's own horizontal rules.
 
@@ -6962,6 +6972,15 @@ def _glyphBand(line):
     # matched no template, and every fall of the session was written with no
     # voltage.  Scaling the line so its brightest ink lands near 220 leaves a bright
     # line untouched and lets a dim one be read with the same numbers.
+    if line.shape[0] <= SINGLE_LINE_ROWS:
+        # Already ONE LINE and nothing else: voltageLine cut it that way, so
+        # there are no rules to exclude and no second line to choose between.
+        # Everything below is about finding a line inside a cell, and running it
+        # anyway threw the crop away whenever the ink was too faint to make four
+        # bright rows -- eight of thirty-nine on the 2026-09-21 sweep, all of
+        # them legible.
+        band = line
+        return band, band > max(120, float(np.percentile(band, 88)))
     top = float(np.percentile(inner, 99.5))
     if top > 20.0:
         inner = np.clip(inner.astype(np.float32) * (220.0 / top),
@@ -6992,8 +7011,26 @@ def _glyphBand(line):
     lo, hi = next(r for r in runs if (r[1] - r[0]) >= 0.6 * tallest)
     if hi - lo < 4:
         return None
-    band = inner[int(lo):int(hi) + 1, :]
-    return band, band > max(140, float(np.percentile(band, 88)))
+    # ...THEN GIVE THE GLYPHS ROOM.  Those rows are where the ink was bright
+    # enough to pass a threshold, which is not the same as where the digits are:
+    # on a dim frame the lower strokes fall below it and the band ends at the
+    # glyphs' waist.  Every digit is then matched on its top half alone, where
+    # 0, 2 and 5 are the same arch -- which is why a line showing 0250 read as
+    # 0000, and one showing 0457 as 1111.
+    #
+    # Measured on the sweep the operator recorded on 2026-09-21, 39 readings
+    # against what the panel plainly showed: 4 right before, 33 after. The
+    # padding is what did it; re-cutting the templates alone changed nothing.
+    if line.shape[0] <= SINGLE_LINE_ROWS:
+        # Already one line and nothing else -- voltageLine cut it that way. Re-
+        # trimming it here is the same mistake twice, and the second one cannot
+        # be undone by padding because the rows are gone.
+        band = line
+    else:
+        lo = max(0, int(lo) - BAND_PAD_PX)
+        hi = min(inner.shape[0] - 1, int(hi) + BAND_PAD_PX)
+        band = inner[lo:hi + 1, :]
+    return band, band > max(120, float(np.percentile(band, 88)))
 
 
 def _readAt(band, hotBand, x, w):
@@ -7211,6 +7248,29 @@ def readPanelDigits(line, alignment):
     # So: keep the CENTRES, and look for the glyph nearest each one in a window a
     # little narrower than the pitch, which is what _readAt already does for the
     # comb.  The centres are what the alignment actually knows.
+    # A PANEL LINE READS `:+ D D D D V`.  When segmentation finds exactly that --
+    # the sign, four digits and the V, once fragments are joined -- there is
+    # nothing to search for: the digits are the middle four, whole, each cut at
+    # its own edges.  Measured against the operator's sweep of 2026-09-21, 39
+    # readings with the panel's value plainly legible in the crop: this reads 33
+    # of them, where finding each digit inside a window centred on the alignment
+    # reads 23.  A window has to guess where one glyph ends, and a `7` whose
+    # stem segments separately is guessed wrong.
+    #
+    # The alignment path stays for every other case -- a line where the V merged
+    # with a digit, or the sign was lost in noise -- which is what it was built
+    # for.
+    runs = _candidates(band, hotBand)
+    if len(runs) == 6:
+        text = ""
+        for a, b in runs[1:5]:
+            d, _sc = _scoreRun(band, hotBand, a, b)
+            if d is None:
+                text = None
+                break
+            text += d
+        if text:
+            return text
     centres = [(a + b) / 2.0 for a, b in alignment]
     gaps = sorted(centres[i + 1] - centres[i] for i in range(len(centres) - 1))
     pitch = gaps[len(gaps) // 2] if gaps else 42.0
@@ -7244,11 +7304,26 @@ def voltageLine(cell):
     the plates were at 129.
     """
     try:
-        runs = readoutLines(cell)
-        if not runs:
-            return None
-        top, bottom = runs[0]                # `V:` is the upper line
-        return cell[int(top):int(bottom) + 1, :]
+        # readoutLines is NOT asked any more.  It answers "where is the ink
+        # bright enough", and on a faint crop it answers "nowhere" -- which
+        # threw away eight of thirty-nine legible readings on the sweep before
+        # the band was ever cut.  A cell with no text in it produces no digit
+        # runs later, which is the same refusal arrived at honestly.
+        # WHERE THE DIGITS ARE, not where the ink passed a threshold.  The run
+        # readoutLines finds moves with the exposure -- the same panel gave a
+        # 17-row run on one crop and a 10-row run on the next -- and a band cut
+        # to the short one holds the tops of the glyphs and nothing else, where
+        # 0, 2 and 5 are the same arch.  That is how a line showing 0250 read as
+        # 0000, and one showing 0457 as 1111.
+        #
+        # The cell is a fixed band of the grid and `V:` is the upper of its two
+        # rows of text, so a FRACTION of the cell locates the line and does not
+        # move with brightness.  Measured on the operator's sweep of 2026-09-21,
+        # 39 readings against what the panel plainly showed: 4 right before, 33
+        # after -- and unchanged anywhere between 0.13 and 0.16 for the top edge,
+        # so it is not a number that wants tuning.
+        h = cell.shape[0]
+        return cell[int(V_LINE_TOP * h):int(V_LINE_BOTTOM * h), :]
     except Exception:
         return None
 
