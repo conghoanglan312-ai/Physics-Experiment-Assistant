@@ -61,54 +61,6 @@ from cv.pipeline import liveStatusPath                       # noqa: F401
 # started -- falls.csv and the rest -- rather than guessing at the newest
 # folder, which is a gate fixture's output as often as not.
 from cv.pipeline import outDirFor                            # noqa: F401
-from cv.pipeline import dropletGroups as _dropletGroups
-from cv.pipeline import SAME_DROPLET_X_PX as _SAME_X
-
-
-class _Row(object):
-    """A falls.csv row in the shape dropletGroups() reads."""
-
-    def __init__(self, d):
-        def num(k):
-            try:
-                return float(d.get(k))
-            except (TypeError, ValueError):
-                return None
-        self.legal = str(d.get("legal")).strip().lower() == "true"
-        self.kinematicLegal = str(d.get("kinematicLegal")).strip().lower() == "true"
-        self.fieldOff = ({"true": True, "false": False}
-                         .get(str(d.get("fieldOff")).strip().lower()))
-        self.xPx = num("xPx")
-        self.tTop = num("startTime")
-        self.seconds = num("seconds")
-        self.balanceVoltage = num("balanceVoltageV")
-        self.reacquired = num("reacquired") or 0
-
-
-def droplets_from_falls(rows):
-    """Group a session's falls.csv rows into droplets, and say which traverses
-    were the operator's at all.
-
-    A session's falls.csv holds every complete `0` -> `16` traverse the tracker
-    timed, and most of them are debris falling past: on a 9-minute bench session,
-    29 traverses, 5 of which were the operator's droplet. Reading the other 24 as
-    failed attempts describes a student who did nothing of the kind.
-
-    Returns (droplets, mine, background) where `droplets` are the grouped legal
-    falls, `mine` also includes traverses in a measured droplet's column -- those
-    ARE attempts, and the ones voided by a live field are the useful kind of
-    mistake to point out -- and `background` is everything left.
-    """
-    rows = [_Row(d) for d in rows]
-    groups = [g for g in _dropletGroups(rows)]
-    columns = [float(sum(f.xPx for f in g) / len(g)) for g in groups if g]
-    mine, background = [], []
-    for f in rows:
-        near = (f.xPx is not None
-                and any(abs(f.xPx - c) <= _SAME_X for c in columns))
-        (mine if (f.legal or near) else background).append(f)
-    return groups, mine, background
-
 CONTRACT_VERSION = 2
 
 

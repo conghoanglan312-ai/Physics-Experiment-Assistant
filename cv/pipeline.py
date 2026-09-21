@@ -171,9 +171,29 @@ CHOSEN_RELEASE_S = 150.0
 DROPLET_TIME_TOL = 0.10
 
 
-def isLegalFall(divisions, seconds):
+# How many times a fall may lose its droplet and take it back and still be a
+# measurement of ONE droplet.
+#
+# On 2026-09-21 the aid recorded two legal falls, 32.9 s and 37.4 s, both inside
+# the manual's band and both with the field confirmed off. The operator filmed the
+# screen at the moment each completed: at the first there was a ring that flashed
+# "38.3 s" on something invisible before and after, and at the second the chamber
+# was empty. They were stitched out of noise -- and they needed 8 and 13
+# re-acquisitions to do it.
+#
+# The five reference falls in the gate need 0 or 1. The fixture's own two junk
+# traverses need 14 and 17. The separation is not marginal, and nothing else in
+# the fall's numbers distinguishes them: duration, speed and field state all look
+# like a droplet, because a chain of blobs down one column is arithmetically
+# indistinguishable from a droplet unless you ask how it was assembled.
+REACQUIRE_MAX_FOR_LEGAL = 5
+
+
+def isLegalFall(divisions, seconds, reacquired = 0):
     if seconds <= 0:
         return False
+    if reacquired > REACQUIRE_MAX_FOR_LEGAL:
+        return False                    # see REACQUIRE_MAX_FOR_LEGAL
     return (divisions >= FALL_DIVISIONS
             and MIN_FALL_S <= seconds <= MAX_FALL_S
             and MIN_SPEED <= divisions / seconds <= MAX_SPEED)
@@ -3276,7 +3296,8 @@ def heldLongEnough(t, now):
 
 
 def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
-                  sinceChange = None, lifting = False, measured = False):
+                  sinceChange = None, lifting = False, measured = False,
+                  lastWorkingVolts = None):
     """What to tell the operator about the droplet THEY chose.  (text, colour, ok)
 
     Reports on it whether or not it passes the candidate gates, because the operator
@@ -3297,6 +3318,17 @@ def pickedVerdict(t, spacing, now, volts, charged, vFree, ownCharge = None,
         # that is off and judged the droplet's speed against the falling band, which
         # is only the right test when the field really is off.
         return "picked id %d -- panel unreadable, cannot judge it" % t.id, (0, 220, 255), None
+    if (not volts) and lastWorkingVolts and abs(speed) <= STILL_GRID_S:
+        # The panel says 0 V, the droplet is not moving, and a working voltage was
+        # on the plates seconds ago. `volts` is OCR of a display that misreads --
+        # it voted 1759 V on a panel showing 0175 on 2026-09-21 -- and when it
+        # reads 0 by mistake, a BALANCED droplet looks like a lost square: the
+        # operator spent minutes being told "if you have cut to 0 V the square is
+        # probably not on your droplet" while they were balancing it. A droplet
+        # sitting still is evidence of a field, so judge it against the voltage
+        # they actually set.
+        volts = float(lastWorkingVolts)
+
     if not volts:
         # FIELD OFF, so the only question is whether it falls at a usable pace, and the
         # charge verdict is not merely unnecessary here -- it is meaningless.  With no
@@ -3583,6 +3615,7 @@ ADVISORY_MIN_V, ADVISORY_MAX_V = 150.0, 250.0
 # the operator had balanced to within 4% -- throws away a perfectly good
 # measurement over 2 V. Outside the band is said; outside the band by a MARGIN is
 # where the advice stops.
+PANEL_MAX_V = 600.0             # the supply's ceiling; anything above it is a misread
 ADVISORY_MARGIN_V = 20.0
 ADVISORY_FLOOR_V = 100.0        # below this nothing is worth balancing
 
@@ -3620,6 +3653,23 @@ IDLE_PICK_S = 30.0
 AUTO_PICK_SHOW_S = 6.0        # how long to say it happened
 
 PICK_RADIUS_PX = 40.0         # how near a click has to land to select a droplet
+# Nothing may be picked, auto-picked or handed the pick unless it has been on
+# screen this long. Detection still admits blobs that are not droplets -- ids ran
+# from 14467 to 19801 in forty seconds of an almost empty chamber on 2026-09-21,
+# and the square kept landing on them -- and while fixing that in the detector
+# failed the gate twice, the PICK is a different matter: a droplet the operator is
+# measuring has always been visible for seconds, and noise never is. This costs
+# nothing in the gate, which makes no picks at all.
+PICK_MIN_AGE_S = 2.0
+
+
+def oldEnoughToPick(t, now):
+    """Has this track been on screen long enough to be somebody's droplet?"""
+    pts = getattr(t, "points", None)
+    return bool(pts) and (now - pts[0][0]) >= PICK_MIN_AGE_S \
+        and len(pts) >= CONFIRM_POINTS
+
+
 PICK_FOLLOW_PX = 30.0         # how far from where it was predicted a droplet may be
                               # and still be the same one.  SMALLER than it looks: the
                               # search starts from the PREDICTED position, not the last
@@ -3831,7 +3881,8 @@ def updateCrossings(t, yTop, yBottom, spacing, crossings = None):
                 got["claimed"] = True
                 t.tTop, t.tBottom = got["t"], when
                 t.seconds = t.tBottom - t.tTop
-                t.legal = isLegalFall(FALL_DIVISIONS, t.seconds)
+                t.legal = isLegalFall(FALL_DIVISIONS, t.seconds,
+                              getattr(t, "reacquired", 0))
                 t.adopted = True
                 return t
         return None
@@ -3883,7 +3934,8 @@ def updateCrossings(t, yTop, yBottom, spacing, crossings = None):
     if t.tBottom is None and y0 < yBottom <= y1:
         t.tBottom = t0 + (yBottom - y0) / (y1 - y0) * (t1 - t0)
         t.seconds = t.tBottom - t.tTop
-        t.legal = isLegalFall(FALL_DIVISIONS, t.seconds)
+        t.legal = isLegalFall(FALL_DIVISIONS, t.seconds,
+                              getattr(t, "reacquired", 0))
         _claim(crossings, t.tTop)
         return t
     return None
@@ -4107,6 +4159,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     pickedLevel = None              # the field state when the pick was last SEEN
     lastPickedId = None             # ...and which track it was, to drop stale banners
     committedAt = None              # when the operator took charge of this droplet
+    lastPickSpot = None             # where the last pick was, and when
     pickSerial = 0                  # ...and which droplet of the session that is.  A
                                     # track id changes every time the tracker loses
                                     # the droplet for a moment, and the app announced
@@ -4458,6 +4511,20 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                              if t.tTop <= ct <= t.tBottom],
                             report = panelReport) \
                             if src.isLive else None
+                        # A reading the apparatus cannot produce is a MISREAD, not
+                        # a measurement. On 2026-09-21 the digit alignment slipped one
+                        # place on a panel showing 0175 and voted 1759 V; the lift
+                        # guard below then binned it, and both legal falls of the
+                        # session came out with no voltage at all -- so no charge, and
+                        # charges.csv could never say 5 of 5. Discarding the READING
+                        # is right; discarding the FALL's voltage with it is not, when
+                        # the V: line still knows what the knob was set to.
+                        if (t.balanceVoltage is not None
+                                and float(t.balanceVoltage) > PANEL_MAX_V):
+                            panelReport["why"] = ("latched vote %.0f V is impossible; "
+                                                  "used the V: line instead"
+                                                  % float(t.balanceVoltage))
+                            t.balanceVoltage = None
                         t.voltageFrom = "latched" if t.balanceVoltage else None
                         if src.isLive and not t.balanceVoltage:
                             # The latch did not hold.  Use the last steady non-zero
@@ -4774,7 +4841,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         mx, my = clicks.pop()
                         rx, ry = mx - X, my - Y
                         near = [t for t in live
-                                if not t.miss and len(t.points) >= CONFIRM_POINTS
+                                if not t.miss and oldEnoughToPick(t, now)
                                 and np.hypot(t.pos[0] - rx, t.pos[1] - ry)
                                 <= PICK_RADIUS_PX]
                         was = picked
@@ -4804,12 +4871,27 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         mineNow = dropletFalls(falls, float(picked.pos[0]),
                                                committedAt) if picked is not None else []
                         nearOwnFalls = bool(mineNow)
-                        if picked is not None and not nearOwnFalls and (
+                        # ...and against the droplet that was picked a moment ago.
+                        # Nothing is pinned until a measurement starts, so with only
+                        # the pin and the falls to go on, every re-click of the same
+                        # droplet counted as a new one: an operator clicking theirs a
+                        # few times between 3:49 and 3:55 on 2026-09-21 watched it go
+                        # from DROPLET 4 to DROPLET 8. Losing the track is the reason
+                        # they are clicking again; it does not make the droplet new.
+                        samePlace = (lastPickSpot is not None
+                                     and now - lastPickSpot[2] <= SAME_DROPLET_GAP_S
+                                     and abs(float(picked.pos[0]) - lastPickSpot[0])
+                                     <= SAME_DROPLET_X_PX
+                                     and abs(float(picked.pos[1]) - lastPickSpot[1])
+                                     <= PICK_RADIUS_PX * 2) if picked is not None else False
+                        if picked is not None and not nearOwnFalls and not samePlace and (
                                 chosenX is None
                                 or abs(float(picked.pos[0]) - chosenX)
                                 > SAME_DROPLET_X_PX):
                             committedAt = now
                             pickSerial += 1
+                        if picked is not None:
+                            lastPickSpot = (float(picked.pos[0]), float(picked.pos[1]), now)
                         pickedSeen = now
                         pickedLevel = fieldLevel(steadyVolts)
                         lastClickAt = now
@@ -4826,7 +4908,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             and not any(t.tTop is not None and t.tBottom is None
                                         for t in live)):
                         room = [t for t in live
-                                if not t.miss and len(t.points) >= CONFIRM_POINTS
+                                if not t.miss and oldEnoughToPick(t, now)
                                 and columnChargeState(columnVolts, t.pos[0], now,
                                                       columnVerdicts) is not False]
                         if 0 < len(room) <= CALM_TRACKS:
@@ -4836,6 +4918,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             pickedAt = (float(picked.pos[0]), float(picked.pos[1]))
                             committedAt = now      # a new droplet, a new measurement
                             pickSerial += 1
+                            lastPickSpot = (float(picked.pos[0]), float(picked.pos[1]), now)
                     # HOLD the track while it lives.  Re-selecting the nearest track
                     # every frame is not following a droplet, it is following a
                     # neighbourhood, and in a crowded frame it changes its mind: two
@@ -4879,7 +4962,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                 return abs(v - was) <= STEAL_SPEED_GAP * 2.0
                             near = [q for q in live
                                     if q is not picked and not q.miss
-                                    and len(q.points) >= CONFIRM_POINTS
+                                    and oldEnoughToPick(q, now)
                                     and abs(q.pos[0] - aim[0]) <= s["reidX"]
                                     and np.hypot(q.pos[0] - aim[0],
                                                  q.pos[1] - aim[1]) <= reach
@@ -4919,7 +5002,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             reach = (PICK_LIFT_PX if liftWatch.lifting
                                      else PICK_FOLLOW_PX)
                             reach = min(PICK_REACH_MAX_PX, reach + PICK_REACH_GROW * gap)
-                            near = [t for t in live if not t.miss
+                            near = [t for t in live
+                                    if not t.miss and oldEnoughToPick(t, now)
                                     and np.hypot(t.pos[0] - aim[0], t.pos[1] - aim[1])
                                     <= reach]
                             # A droplet falls and rises; it does not travel sideways.
@@ -5295,7 +5379,9 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             freeFallSpeed(columnVolts, picked.pos[0]), own,
                             now - voltsChangedAt if voltsChangedAt else None,
                             liftWatch.lifting,
-                            bool(dropletFalls(falls, float(picked.pos[0]))))
+                            bool(dropletFalls(falls, float(picked.pos[0]))),
+                            next((v for ts, v in reversed(workingVolts)
+                                  if now - ts <= WORKING_VOLTS_MEMORY_S), None))
                         banner, bannerColour = keepInstruction(
                             int(picked.id), banner, bannerColour, now)
                         banner, bannerColour = holdText("picked", now, banner,
