@@ -37,6 +37,10 @@ const dropletFallTime = document.getElementById("dropletFallTime");
 const dropletVelocity = document.getElementById("dropletVelocity");
 const dropletField = document.getElementById("dropletField");
 const guidanceLine = document.getElementById("guidanceLine");
+const whyButton = document.getElementById("whyButton");
+const whyAnswer = document.getElementById("whyAnswer");
+const whyText = document.getElementById("whyText");
+const whyMore = document.getElementById("whyMore");
 
 const feedLoadingTitle = document.getElementById("feedLoadingTitle");
 const feedProgress = document.getElementById("feedProgress");
@@ -72,7 +76,9 @@ const state = {
   // panel gets one note per real event rather than one per poll.
   lastDropletLabel: null,
   lastBannerText: null,       // the aid's line as it currently reads
+  lastWhy: null,              // ...and the explanation showing for it, if any
   lastSuitable: null,
+  lastStage: null,            // which half of the test it has met
   // The last free-fall speed seen while fieldState was "off". Held like the
   // voltage and fall time: while the field is working or lifting the droplet is
   // held or rising, so its live speed says nothing about the droplet.
@@ -89,6 +95,7 @@ const state = {
   streamRetryTimer: null,
   streamRetryAt: 0,
   streamProbing: false,
+
 };
 
 function pythonLen(text) {
@@ -603,6 +610,10 @@ async function sendQuery() {
     assistantBubble.textContent = error?.message || "Unable to get a response from the AI assistant.";
   } finally {
     if (stopThinking) stopThinking(); // safety net -- should already be null by now
+    if (!assistantText && assistantBubble.querySelector(".thinking-status")) {
+      assistantBubble.classList.add("error-bubble");
+      assistantBubble.textContent = "Unable to get a response from the AI assistant.";
+    }
     if (assistantText) state.messages.push({ role: "assistant", content: assistantText });
     state.generating = false;
     sendButton.classList.remove("locked");
@@ -942,13 +953,8 @@ function showLiveFeed(url, device, source) {
   videoPlaceholder.classList.add("hidden");
   liveFeed.src = `${url}?t=${Date.now()}`;
   liveFeed.classList.remove("hidden");
-  if (state.isDemo) {
-    feedStatus.textContent = `🖱️ Click a droplet in the feed to select it`;
-    feedStatus.className = "feed-status demo";
-  } else {
-    feedStatus.textContent = `🖱️ Click a droplet in the feed to select it`;
-    feedStatus.className = "feed-status live";
-  }
+  feedStatus.textContent = "🖱️ Click a droplet in the feed to select it";
+  feedStatus.className = `feed-status ${state.isDemo ? "demo" : "live"}`;
   setFeedState(state.isDemo ? "demo" : "live");
   feedHint.classList.remove("hidden");
   liveSourceInput.disabled = true;
@@ -1027,16 +1033,58 @@ function fitFeedBox(w, h) {
 // Idle, the box keeps the apparatus's shape rather than a tall placeholder: an
 // empty panel far taller than any frame it will ever show is dead space before
 // the session has even started. Real numbers replace these on the first frame.
-const FEED_ASPECT_W = 909, FEED_ASPECT_H = 645;
+// The DONGLE's frame, not the ROI's. These were the ROI's proportions, 909x645,
+// which is a taller box than any frame the feed will ever put in it -- so the
+// panel shrank the moment a session started and the whole column jumped with it.
+// What the pipeline publishes is the app view, and that is the 1280x720 the
+// capture delivers.
+const FEED_ASPECT_W = 1280, FEED_ASPECT_H = 720;
 
 function unfitFeedBox() {
   fitFeedBox(FEED_ASPECT_W, FEED_ASPECT_H);
 }
 
+async function askWhy() {
+  if (whyButton.disabled) return;
+  const asked = state.lastBannerText;
+  whyButton.disabled = true;
+  whyAnswer.classList.remove("hidden");
+  whyAnswer.classList.add("thinking");
+  whyText.textContent = "Working it out…";
+  try {
+    const response = await fetch("/api/ai/why", { method: "POST" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "The assistant could not answer.");
+    whyAnswer.classList.remove("thinking");
+    whyText.textContent = payload.text;
+    state.lastWhy = { asked, answer: payload.text };
+  } catch (error) {
+    whyAnswer.classList.remove("thinking");
+    whyText.textContent = error.message;
+    state.lastWhy = null;
+  } finally {
+    whyButton.disabled = false;
+  }
+}
+
+// The chat keeps the conversation; the panel keeps the answer. Following up puts
+// both halves in the chat so the model has the context the student is replying to.
+function whyIntoChat() {
+  if (!state.lastWhy) return;
+  addMessage("user", `Why is the aid saying: "${state.lastWhy.asked}"?`);
+  addMessage("assistant", state.lastWhy.answer);
+  openAi();
+  aiInput.focus();
+}
+
+whyButton.addEventListener("click", askWhy);
+whyMore.addEventListener("click", whyIntoChat);
+
 liveFeed.addEventListener("load", () => {
   fitFeedBox(liveFeed.naturalWidth, liveFeed.naturalHeight);
   if (state.streamLost) clearStreamTrouble();
 });
+
 
 liveFeed.addEventListener("click", (event) => {
   if (!state.live || !liveFeed.naturalWidth || !liveFeed.naturalHeight) return;
@@ -1102,6 +1150,14 @@ async function stopLive() {
 // ---------------------------------------------------------------------------
 const MISSING = "—";
 
+// IV.2 asks two things of a droplet and they are met at different moments: a
+// usable free-fall speed, and a balance voltage in the working band. The card
+// says which one it has, because "Not suitable" on a droplet that has already
+// passed half the test reads as a rejection of the operator's own work.
+const STAGE = {
+  speed: { text: "Speed suitable", ring: "partial" },
+  balance: { text: "Balanceable", ring: "partial" },
+};
 const SUITABILITY = {
   yes: { text: "Suitable", ring: "suitable" },
   no: { text: "Not suitable", ring: "unsuitable" },
@@ -1203,6 +1259,7 @@ function bannerClass(text) {
 function showBanner(status, selected) {
   const raw = (status && status.message) || "";
   if (!raw) {
+    state.lastBannerText = null;   // so the same line returning later is repainted
     guidanceLine.textContent = "Waiting for the aid…";
     guidanceLine.className = "guidance-line idle";
     return;
@@ -1212,31 +1269,61 @@ function showBanner(status, selected) {
   const text = label ? raw.replace(/picked id \d+/g, label) : raw;
   if (text === state.lastBannerText) return;      // same words, no repaint
   state.lastBannerText = text;
+  whyButton.disabled = false;
+  if (state.lastWhy && state.lastWhy.asked !== text) {
+    whyAnswer.classList.add("hidden");       // it explained a line that has moved on
+    state.lastWhy = null;
+  }
   guidanceLine.textContent = text;
   guidanceLine.className = `guidance-line ${bannerClass(text)}`;
 }
 
 function clearBanner() {
   state.lastBannerText = null;
+  state.lastWhy = null;
+  whyAnswer.classList.add("hidden");
+  whyButton.disabled = true;
   guidanceLine.textContent = "Start a session to see the aid's guidance here.";
   guidanceLine.className = "guidance-line idle";
 }
 
+// The tutor speaks rarely and only when our own rules say the student is stuck
+// (app_js/tutor.py), so each message is worth a place in the conversation rather
+// than a toast that scrolls away. It lands in the same chat the student types in,
+// so "why?" can be asked straight back.
+function showTutor(messages) {
+  if (!Array.isArray(messages) || !messages.length) return;
+  for (const m of messages) {
+    if (!m || !m.text) continue;
+    addMessage("assistant", m.text);
+  }
+  if (!aiPanel.classList.contains("open")) {
+    aiFab.classList.add("has-unread");
+    aiPromptBubble.textContent = "";
+    const spark = document.createElement("span");
+    spark.className = "ai-sparkle";
+    spark.textContent = "✨";
+    aiPromptBubble.append(spark, document.createTextNode("The tutor has a suggestion"));
+    aiPromptBubble.style.display = "";
+  }
+}
+
 function renderSelectedDroplet(selected) {
   const data = selected || {};
-  const verdict = SUITABILITY[data.suitable] || SUITABILITY.unknown;
+  const verdict = (data.suitable !== "yes" && STAGE[data.stage])
+    || SUITABILITY[data.suitable] || SUITABILITY.unknown;
 
   // A genuinely new pick (not just the same droplet polled again) gets a
   // one-time guidance note; a suitability change (confirmed suitable, or
   // dropping back out after being suitable) gets its own note. Both reuse
   // the server's own note text -- nothing here is invented client-side.
   if (data.label && data.label !== state.lastDropletLabel) {
-    if (data.note) pushSystemMessage("info", `${data.label} selected — ${data.note}`);
     // A different droplet: drop the previous one's held voltage / fall time now,
     // instead of waiting for fieldState to overwrite them.
     resetHeldMeasurements();
     state.lastDropletLabel = data.label;
     state.lastSuitable = null;
+    state.lastStage = null;
   }
   // The verdict comes from web_server.py, which already does the field-aware
   // check: a fall speed only counts while the field is "off", the balance
@@ -1256,10 +1343,25 @@ function renderSelectedDroplet(selected) {
     }
     state.lastSuitable = data.suitable;
   }
+
+  // One card as each half of the test is met, and none for losing it: the
+  // server no longer demotes a droplet that has passed, so the pair of
+  // contradicting cards that appeared seconds apart cannot happen again.
+  if (data.stage && data.stage !== state.lastStage) {
+    // "suitable" is announced by the suitability block above, so it is not repeated here.
+    if (data.stage === "speed") {
+      pushSystemMessage("success", `${data.label || "The droplet"} has a usable falling speed.${data.note ? ` ${data.note}` : ""}`);
+    } else if (data.stage === "balance") {
+      pushSystemMessage("success", `${data.label || "The droplet"} balances in range.${data.note ? ` ${data.note}` : ""}`);
+    }
+    state.lastStage = data.stage;
+  }
+
   if (!data.label) {
     resetHeldMeasurements();
     state.lastDropletLabel = null;
     state.lastSuitable = null;
+    state.lastStage = null;
   }
 
   dropletLabel.textContent = data.label || MISSING;
@@ -1366,6 +1468,7 @@ async function pollLiveState() {
   }
 
   if (payload.running && !state.live && !state.starting) attachToRunningSession(payload);
+  showTutor(payload.tutor);
 
   renderSelectedDroplet(payload.selected);
   if (payload.running && payload.status) {

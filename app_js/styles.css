@@ -323,7 +323,39 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 .guidance-line.warn { color: var(--warning-text, var(--warning)); }
 .guidance-line.bad { color: var(--danger); }
 /* Placeholder / waiting text: still semibold, but softer than real guidance. */
-.guidance-line.idle { font-weight: 600; font-style: italic; color: rgba(var(--text-rgb), 0.55); }
+.guidance-line.idle {
+  font-weight: 600;
+  font-style: italic;
+  color: rgba(var(--text-rgb), 0.55);
+}
+
+/* Asked for, never volunteered: "Why?" explains the line above it. No polling.
+   The answer appears HERE rather than in the chat: the student is mid-measurement
+   with one hand on the knob, and making them open a panel to read two sentences
+   is a click they cannot spare. The chat still gets it, for following up. */
+.why-answer {
+  margin: 2px 0 8px; padding: 12px 14px;
+  border-radius: 12px; background: var(--accent-soft);
+  border: 1px solid var(--panel-border);
+  font-size: 13.5px; line-height: 1.45;
+}
+.why-text { color: rgba(var(--text-rgb), .92); }
+.why-answer.thinking .why-text { opacity: .6; font-style: italic; }
+.why-more {
+  margin-top: 8px; padding: 0; border: none; background: none;
+  color: var(--accent); font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.why-more:hover { text-decoration: underline; }
+.guidance-actions { display: flex; gap: 8px; justify-content: center; margin-bottom: 6px; }
+.ghost-button {
+  border: 1px solid var(--panel-border); background: transparent;
+  color: rgba(var(--text-rgb), .8); border-radius: 999px;
+  padding: 5px 14px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+  transition: background .15s ease, color .15s ease, opacity .15s ease;
+}
+.ghost-button:hover:not(:disabled) { background: rgba(var(--text-rgb), .08); }
+.ghost-button:disabled { opacity: .4; cursor: not-allowed; }
+
 .feed-title { text-align: center; margin-top: 10px; font-size: 18px; font-weight: 600; letter-spacing: 4px; opacity: 0.7; transition: color .15s ease; }
 .feed-title.live { color: var(--success); opacity: .95; }
 .feed-title.demo { color: var(--warning-text); opacity: 1; }
@@ -390,6 +422,9 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 /* Suitability has three answers, not two: the third is "not enough data yet",
    which must not be shown as either a pass or a fail. */
 .droplet-ring.unknown { border-color:var(--warning); box-shadow:0 0 15px var(--warning-glow); }
+/* Half of IV.2's test passed: a usable falling speed, or a balance in the
+   working band. Not a warning and not yet a pass. */
+.droplet-ring.partial { border-color:var(--accent, #6668FA); box-shadow:0 0 15px rgba(102,104,250,.55); }
 .droplet-id-text { min-width:0; }
 .droplet-id { font-size:24px; font-weight:700; color: var(--droplet-text-color); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; opacity: 1;}
 .droplet-status-word { font-size:14px; margin-top:2px; opacity:.85; color: var(--droplet-text-color);}

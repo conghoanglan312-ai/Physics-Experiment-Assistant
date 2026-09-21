@@ -93,3 +93,66 @@ the room temperature and humidity.
 | banner says a droplet does not answer the field | it is uncharged; it can never be balanced, so spray again |
 | a droplet's ring disappears while it sits still | it is parked on a grid line, where nothing is detected. Nudge it off the line |
 | `mid-fall track ... died` in the terminal | a fall was lost. The line says whether the droplet was invisible or whether the track refused a blob beside it |
+
+## The tutor in the browser app
+
+The banner in the `Droplets` window is the instruction: it is measured, it is
+immediate, and it is what to follow. The tutor is not a second opinion on it. It
+watches for the one thing the banner cannot see -- a stretch of time going nowhere --
+and then explains what is probably happening.
+
+It speaks when, and only when:
+
+| it says something after | because |
+|---|---|
+| 90 s tuning one droplet, never balanced | the droplet may not be worth the time |
+| the pick is lost 3 times in a minute | the aid is not holding on to it |
+| USABLE/DISCARD flips 3 times in a minute | the reading is not settling |
+| 3 minutes on one droplet, no legal fall | something in the procedure is not landing |
+
+At most one message every two minutes, twice per complaint, six per session, and
+never while a fall clock is running. Messages arrive in the chat panel (the 🛸
+button shows a red dot), and you can reply to them there -- it is one conversation.
+
+It never sees the plate voltage: not the reading, not the banner text that names
+it. If a reply states a voltage or a charge anyway, it is withheld and logged
+rather than shown.
+
+**To switch it off for a session:** start the app with `MILLIKAN_TUTOR=0`.
+
+**Afterwards:** every trigger, the prompt it was given and what it said are in
+`test/output/tutor_log.jsonl`, including anything withheld.
+
+## If the picture stutters and the square keeps losing droplets
+
+Every session ends with a line like:
+
+    capture: 30.0 fps delivered of 30 nominal, 0 dropped; 33.3 ms in the
+    camera, 8.1 ms in the pipeline, per frame
+
+Those two milliseconds figures are the diagnosis. **Camera** is time spent
+waiting for the device to hand a frame over; **pipeline** is everything this code
+does before asking for the next one. Whichever is larger is what costs you
+frames.
+
+The camera is opened through Media Foundation, measured on 2026-09-21 as the
+faster path on this dongle: 30.0 fps against DirectShow's 23.6, which could not
+be moved off uncompressed YUY2. If a different device behaves differently, these
+can be set without a rebuild:
+
+| Start it with | What it changes |
+|---|---|
+| `MILLIKAN_CAPTURE=dshow` | DirectShow instead of Media Foundation |
+| `MILLIKAN_CAPTURE=mjpg` | asks the device for compressed frames |
+| `MILLIKAN_CAPTURE=buffer1` | keeps one frame queued, so what arrives is the newest |
+| `MILLIKAN_CAPTURE=dshow,mjpg` | any combination, comma separated |
+
+To measure them all on a new device, with the chamber empty and nothing else
+running:
+
+    python test/tools/capture_bench.py
+
+It prints the delivered rate for each setting and takes about a minute. The
+session also prints which switches it applied and what the device agreed to, so
+a request the dongle ignored is visible rather than assumed. Nothing about the
+measurement changes either way: the fall clock runs on capture timestamps.
