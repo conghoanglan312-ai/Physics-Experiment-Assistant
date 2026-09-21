@@ -556,7 +556,7 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
    ------------------------------------------------------------ */
 :root[data-theme="light"] {
   --float-panel-bg: rgba(230, 230, 230, 0.35);
-  --float-shadow: 0 16px 51px 6px rgba(49, 51, 63, 0.21);
+  --float-shadow: 0 0px 20px 5px rgba(49, 51, 63, 0.10);
 }
 :root[data-theme="light"] .title-box,
 :root[data-theme="light"] .video-container,
