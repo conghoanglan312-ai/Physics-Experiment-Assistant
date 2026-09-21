@@ -219,6 +219,7 @@ BALANCE_VOLTS_MIN, BALANCE_VOLTS_MAX = 150.0, 250.0
 # has stopped, not merely slowed.
 BALANCED_GRID_S = 0.05
 BALANCED_HOLD_S = 2.0       # ...and for this long, not for one poll
+BALANCED_MIN_AGE_S = 6.0    # ...on a track that has been there long enough to be real
 # A reading has to hold on the same side of the two bands above for this long,
 # continuously, before the verdict actually changes. A single noisy sample --
 # a hand still settling the knob, a momentary tracker glitch -- must not flip
@@ -393,8 +394,14 @@ def selection_view(status, running):
         if field == "off" and speed is not None:
             # Field off, so this speed IS the free-fall speed Ⅳ.2 judges.
             _selection["speed"] = speed
+        # ...and it has to be a DROPLET.  A track two seconds old that happens to
+        # sit still is detection noise, and on 2026-09-21 the square held one for
+        # thirteen seconds while the panel announced "Balanceable at 250 V" --
+        # the aid vouching for something that was never there.
+        age = _number(picked.get("trackAgeS")) if picked else None
         still = (field == "work" and voltage is not None and speed is not None
-                 and abs(speed) <= BALANCED_GRID_S)
+                 and abs(speed) <= BALANCED_GRID_S
+                 and (age is None or age >= BALANCED_MIN_AGE_S))
         if not still:
             _selection["stillSince"] = None
         elif _selection["stillSince"] is None:

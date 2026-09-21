@@ -2513,9 +2513,17 @@ class Fall:
     exactly what `binding` is otherwise left to infer from timings alone.
     """
 
-    FIELDS = ("id", "fTop", "fBottom", "tTop", "tBottom", "seconds", "legal",
-              "kinematicLegal", "fieldOff", "balanceVoltage", "reacquired", "adopted",
-              "voltageFrom", "balanceDriftPct", "balanceImpliedV")
+    # `droplet` is the session's droplet NUMBER, decided once, at the moment the
+    # fall completed, and never revisited.  The tally used to be re-derived every
+    # frame from the falls lying near the live droplet's column, which is a
+    # different question with a different answer each time the droplet drifted:
+    # on 2026-09-21 it flickered between 1 and 2 for half a minute, dropped from
+    # 4 of 5 to 1 of 5 in the middle of a fall and stayed there, and read
+    # "MEASURING 1 of 5" about a freshly picked droplet that had never fallen --
+    # counting the previous droplet's fall, which lay in the same column.
+    FIELDS = ("id", "droplet", "fTop", "fBottom", "tTop", "tBottom", "seconds",
+              "legal", "kinematicLegal", "fieldOff", "balanceVoltage", "reacquired",
+              "adopted", "voltageFrom", "balanceDriftPct", "balanceImpliedV")
 
     def __init__(self, t, spacing):
         for name in self.FIELDS:
@@ -3781,10 +3789,19 @@ def samePickedDroplet(spot, t, now):
             and abs(float(t.pos[0]) - spot[0]) <= SAME_DROPLET_X_PX)
 
 
-def oldEnoughToPick(t, now):
+# ...and longer again when the aid is choosing for itself.  A click is the
+# operator saying "this one" and is honoured at once; an automatic pick is a
+# guess, and on 2026-09-21 it guessed a phantom in the first twenty seconds of a
+# session and then described it to them for thirteen.  Noise does not last six
+# seconds.
+AUTO_PICK_MIN_AGE_S = 6.0
+
+
+def oldEnoughToPick(t, now, minAge = None):
     """Has this track been on screen long enough to be somebody's droplet?"""
     pts = getattr(t, "points", None)
-    return bool(pts) and (now - pts[0][0]) >= PICK_MIN_AGE_S \
+    want = PICK_MIN_AGE_S if minAge is None else minAge
+    return bool(pts) and (now - pts[0][0]) >= want \
         and len(pts) >= CONFIRM_POINTS
 
 
@@ -4488,6 +4505,15 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     steadyVolts = None
                     voltHistory.clear()
                     zeroSince = None
+                    # ...and no lift is being held either.  LiftWatch returns early
+                    # on a reading of None, so once the panel stopped reading, a
+                    # latched lift could never be released: the aid went on saying
+                    # "lifting" -- which suspends the balance fit -- for as long as
+                    # the reader was out.  Not knowing the voltage is not evidence
+                    # of a lift.
+                    if liftWatch.lifting:
+                        liftWatch.lifting = False
+                        liftWatch.since, liftWatch.base = now, None
                 if volts is not None:
                     voltHistory.append(volts)
                     # The mode over the last few reads, so one misread cannot move it.
@@ -4756,6 +4782,22 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         and t.kinematicLegal):
                     saveRefusedPanel(outDir, t.tTop, panelReport)
                 t.completedFalls = getattr(t, "completedFalls", 0) + 1
+                # WHOSE FALL THIS IS, settled here and not asked again.  The
+                # operator's droplet if this track IS the pick, or if it fell in
+                # the pick's column: the square loses a droplet mid-fall often
+                # enough that demanding identity would throw away measurements
+                # the operator watched happen.
+                t.droplet = None
+                if picked is not None:
+                    near = abs(float(finished.pos[0]) - float(picked.pos[0]))
+                    if finished is picked or near <= SAME_DROPLET_X_PX:
+                        t.droplet = pickSerial
+                elif lastPickSpot is not None:
+                    # The square had lost it, which is not the droplet's fault.
+                    gone = now - lastPickSpot[2]
+                    off = abs(float(finished.pos[0]) - lastPickSpot[0])
+                    if gone <= SAME_PICK_MEMORY_S and off <= SAME_DROPLET_X_PX:
+                        t.droplet = pickSerial
                 falls.append(Fall(finished, spacing))
                 fallLog.add(falls[-1])
                 sayFall("  frame %6d  id %-5d  %6.2f s  %6.3f grid/s  %s"
@@ -5156,7 +5198,8 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             and not any(t.tTop is not None and t.tBottom is None
                                         for t in live)):
                         room = [t for t in live
-                                if not t.miss and oldEnoughToPick(t, now)
+                                if not t.miss
+                                and oldEnoughToPick(t, now, AUTO_PICK_MIN_AGE_S)
                                 and columnChargeState(columnVolts, t.pos[0], now,
                                                       columnVerdicts) is not False]
                         if 0 < len(room) <= CALM_TRACKS:
@@ -5581,6 +5624,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # is the most useful thing to say once they have spent time on it.
                     urgent = None
                     measuringBanner = None
+                    measuringAdvice = False
                     reacquired = False
                     nowPicked = None if picked is None else int(picked.id)
                     if nowPicked != lastPickedId:
@@ -5689,10 +5733,20 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # "1 of 5 falls" and "still the same droplet?" for ninety
                         # seconds about a droplet abandoned at 1:50, while the one in
                         # the square was boxed, balanced and about to be dropped.
-                        mine = dropletFalls(falls,
-                                            float(picked.pos[0]) if picked is not None
-                                            else chosenX,
-                                            committedAt)
+                        # COUNT WHAT WAS BOUND, never re-derive it.  See
+                        # Fall.FIELDS: each fall was assigned to a droplet number
+                        # when it completed, so the tally cannot move because the
+                        # droplet drifted, or because somebody else's older fall
+                        # came nearer the column than one of this droplet's.
+                        mine = [f for f in falls if f.legal
+                                and getattr(f, "droplet", None) == pickSerial]
+                        if not mine:
+                            # Before the first fall there is nothing bound, and the
+                            # column is all there is to go on.
+                            mine = dropletFalls(falls,
+                                                float(picked.pos[0])
+                                                if picked is not None else chosenX,
+                                                committedAt)
                         # Follow the group, not the coordinate.  chosenX was pinned
                         # where the droplet happened to be when it settled, and the
                         # count is "the falls nearest that x" -- so when this droplet's
@@ -5766,6 +5820,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         timing = any(t.tTop is not None and t.tBottom is None
                                      for t in live)
                         q = None
+                        hasAdvice = False
                         if done >= TARGET_FALLS_PER_DROPLET:
                             # DONE means stop.  For four minutes after a droplet was
                             # finished the banner went on asking for 265 V, 272 V,
@@ -5846,6 +5901,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             add, addColour = holdText("balance", now, add,
                                                       addColour or mColour)
                             mText += add
+                            hasAdvice = bool(add)
                             if addColour is not None and addColour != mColour:
                                 mColour = addColour
                         # Who the line belongs to.  A progress count outranks hunting
@@ -5860,6 +5916,7 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         if picked is None or (done and inColumn):
                             banner, bannerColour = mText, mColour
                             measuringBanner = (mText, mColour)
+                            measuringAdvice = hasAdvice
                         bestNow, bestAt = None, None
                     # Nothing picked, nothing qualifying, and few enough droplets left
                     # that the operator is choosing rather than waiting.  The one with
@@ -5892,7 +5949,21 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                     # go for a moment.  Urgent messages still win -- those are about
                     # this droplet too.
                     if measuringBanner is not None:
-                        banner, bannerColour = measuringBanner
+                        mt, mc = measuringBanner
+                        # THE COUNT DOES NOT REPLACE THE ADVICE.  Where the balance
+                        # fit produced a line, the count already carries it; where
+                        # it did not -- the droplet is drifting, the window is too
+                        # short, the field just changed -- the pick's own verdict is
+                        # the only useful thing on offer, and MEASURING was written
+                        # over the top of it.  An operator balancing a droplet three
+                        # falls in was shown a progress count and nothing else for
+                        # forty seconds on 2026-09-21.
+                        if (not measuringAdvice and banner
+                                and not any(f in banner for f in FILLER_LINES)):
+                            said = banner.split("--", 1)
+                            mt = mt + "   " + (said[1].strip() if len(said) > 1
+                                               else banner)
+                        banner, bannerColour = mt, mc
                     # Last word to the urgent ones.  MEASURING is written after the
                     # pick messages and was overwriting them, so "your droplet left the
                     # view" and "re-acquired, this may be a different droplet" were
@@ -6146,6 +6217,14 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                                         else round(now - clock_.tTop, 2) if running_
                                         else round(float(clock_.seconds), 2)),
                         "fallRunning": running_,
+                        # HOW LONG THIS TRACK HAS EXISTED.  A droplet somebody is
+                        # balancing has been on the screen for a while; detection
+                        # noise has not.  On 2026-09-21 the square sat on a phantom
+                        # for thirteen seconds and the panel announced it as
+                        # "Balanceable at 250 V", which is the aid vouching for
+                        # something that was never there.
+                        "trackAgeS": (round(float(now - picked.points[0][0]), 1)
+                                      if getattr(picked, "points", None) else 0.0),
                         "balancePercent": (round(float(picked.balanceDriftPct), 1)
                                            if getattr(picked, "balanceDriftPct", None)
                                            is not None else None),
