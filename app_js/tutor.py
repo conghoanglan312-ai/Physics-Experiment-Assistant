@@ -67,6 +67,37 @@ FORBIDDEN = re.compile(
     r"\b\d+(?:\.\d+)?\s*(?:V\b|volts?\b)"          # "250 V", "190 volts"
     r"|\d\s*(?:e|x\s*10|\u00d7\s*10)\s*-?\s*19",   # "1.6e-19", "1.6 x 10-19"
     re.IGNORECASE)
+# The same defence, for physics instead of numbers. Told the aid kept losing a
+# balanced droplet, the model answered: "The software struggles to track droplets
+# when they are perfectly stationary. Try slightly adjusting the field to keep the
+# droplet in slow motion rather than holding it completely still, which will help
+# the tracker maintain a consistent lock."
+#
+# That is the experiment backwards. A motionless droplet IS the measurement -- IV.4
+# asks for exactly that -- and unbalancing one to suit the software would cost the
+# student the reading they are there to take. A model cannot be argued out of this
+# reliably, so a reply that says it is not shown.
+BAD_ADVICE = re.compile(
+    r"slow motion"
+    r"|keep (?:it|the drop(?:let)?) (?:slightly |gently )?(?:moving|drifting)"
+    r"|rather than holding it (?:completely |perfectly )?still"
+    r"|(?:maintain|keep) (?:a )?(?:consistent )?lock"
+    r"|help the (?:tracker|software|aid)"
+    r"|(?:un|off[- ])balanc\w* (?:it|the drop(?:let)?)",
+    re.IGNORECASE)
+
+
+def withhold(text):
+    """Why this reply must not be shown, or None if it may be."""
+    if not text:
+        return None
+    if FORBIDDEN.search(text):
+        return "it stated a voltage or a charge"
+    if BAD_ADVICE.search(text):
+        return "it advised against balancing the droplet"
+    return None
+
+
 TUTOR_LOG = "tutor_log.jsonl"   # every trigger, prompt and reply, for review after
 
 
@@ -227,12 +258,13 @@ class Tutor:
                     "text": "The tutor cannot reach the AI service, so it will stay "
                             "quiet this session. The measurement aid is unaffected.",
                     "at": time.time(), "offline": True})
-        if text and FORBIDDEN.search(text):
-            # See FORBIDDEN. The student reads a voltage off the apparatus, never
-            # off a model that guessed one.
+        why = withhold(text)
+        if why:
+            # See FORBIDDEN and BAD_ADVICE. The student reads a voltage off the
+            # apparatus, never off a model that guessed one -- and they balance the
+            # droplet because the experiment says to, not because the tracker copes.
             dropped, text = text, None
-            print("live tutor: reply withheld, it stated a voltage or a charge",
-                  flush = True)
+            print("live tutor: reply withheld, %s" % why, flush = True)
         self._log(stall, prompt, text, dropped)
         if text:
             with self._lock:
@@ -262,6 +294,10 @@ class Tutor:
             "watching their live session. They appear to be stuck: %s.\n\n"
             "Session state (times in seconds, speeds in grid divisions per second; "
             "plate voltages are deliberately withheld):\n%s\n\n"
+            "Their goal is a droplet balanced motionless between the plates: that "
+            "stillness IS the measurement, and the aid exists to serve it. Never "
+            "suggest keeping the droplet moving, leaving it off balance, or "
+            "changing the field to help the software follow it.\n\n"
             "Reply in ENGLISH, at most two sentences, addressed to the student. Say "
             "what is most likely going wrong and the one thing to try next. Do not "
             "compute or state any charge, electron count or voltage. Do not repeat "
@@ -326,7 +362,11 @@ def whyPrompt(status):
         "A student is doing the Millikan oil-drop experiment. Their measurement "
         "aid is telling them: %s.\n\nSession state (times in seconds, speeds in "
         "grid divisions per second; plate voltages are deliberately withheld):\n"
-        "%s\n\nThey asked WHY. Reply in ENGLISH, at most three sentences: explain "
+        "%s\n\nTheir goal is a droplet balanced motionless between the plates: "
+        "that stillness IS the measurement, and the aid exists to serve it. Never "
+        "suggest keeping the droplet moving or off balance to help the software "
+        "follow it.\n\n"
+        "They asked WHY. Reply in ENGLISH, at most three sentences: explain "
         "the physics behind what the aid is telling them, and what it means for "
         "their measurement. Do not compute or state any charge, electron count or "
         "voltage."

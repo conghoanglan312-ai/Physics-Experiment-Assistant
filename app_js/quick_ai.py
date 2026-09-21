@@ -29,7 +29,8 @@ SYSTEM = (
     "apparatus. Answer in ENGLISH, in at most two sentences and 45 words, with no "
     "preamble and no pleasantries -- they are mid-measurement and reading this on a "
     "small panel. Explain the physics; never state a charge, an electron count or a "
-    "voltage."
+    "voltage. A droplet balanced motionless is what they are trying to achieve -- "
+    "never advise keeping it moving or off balance to suit the software."
 )
 
 # The lab's own manual, read ONCE per process and carried on every call.

@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlparse
 from llm.main import getResponseFromGemini
 from app_js.wrapper import start_live, stop_live, send_click
 from app_js.quick_ai import ask as quick_ask, available as quick_available
-from app_js.tutor import Tutor, whyPrompt
+from app_js.tutor import Tutor, whyPrompt, withhold
 from cv.api import live_status
 
 ROOT = Path(__file__).resolve().parent
@@ -616,6 +616,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "Nothing is running to explain."}, status=409)
             return
         text = _ask_model(whyPrompt(status))
+        # The same filter the volunteered messages go through. A Why? answer is
+        # read by the same student, on the same panel, and a model that invents a
+        # voltage or tells them to stop balancing is no safer for having been asked.
+        refuse = withhold(text)
+        if refuse:
+            print("why: reply withheld, %s" % refuse, flush=True)
+            text = None
         if not text:
             self._json({"error": "The assistant is busy; try again in a moment."},
                        status=503)
