@@ -218,6 +218,7 @@ BALANCE_VOLTS_MIN, BALANCE_VOLTS_MAX = 150.0, 250.0
 # balance voltage. Free fall is 0.2-0.5 grid/s, so this is a droplet the field
 # has stopped, not merely slowed.
 BALANCED_GRID_S = 0.05
+BALANCED_HOLD_S = 2.0       # ...and for this long, not for one poll
 # A reading has to hold on the same side of the two bands above for this long,
 # continuously, before the verdict actually changes. A single noisy sample --
 # a hand still settling the knob, a momentary tracker glitch -- must not flip
@@ -238,6 +239,8 @@ _selection = {
     # Each half of IV.2's test, remembered once met.  See the latch in the view.
     "speedEver": False,   # it has fallen at a usable free-fall speed
     "voltsEver": False,   # it has balanced at a voltage in the working band
+    "trackId": None,      # the track the evidence above belongs to
+    "stillSince": None,   # when it last started holding still on live plates
 }
 
 
@@ -268,7 +271,8 @@ def reset_selection():
         _selection.update(id=None, label=None, picks=0,
                            speed=None, volts=None,
                            rangeState=None, rangeSince=None, suitable="unknown",
-                           speedEver=False, voltsEver=False)
+                           speedEver=False, voltsEver=False, trackId=None,
+                           stillSince=None)
 
 
 def _number(value):
@@ -335,6 +339,7 @@ def selection_view(status, running):
         speed = _number(picked.get("speedGridPerSec"))
         fall = _number(picked.get("fallSeconds"))
         balance = _number(picked.get("balancePercent"))
+        track = picked.get("trackId")
     else:
         # picked can go missing for a poll or several without the operator
         # having picked anything new -- cv/api.py's own docstring notes the
@@ -342,7 +347,7 @@ def selection_view(status, running):
         # is exactly when the balance voltage is being read. Treating that
         # as "nothing picked" would throw away the readings right when they
         # matter most, so it must NOT be confused with a fresh pick below.
-        droplet_id, speed, fall, balance = None, None, None, None
+        droplet_id, speed, fall, balance, track = None, None, None, None, None
 
     with _selection_lock:
         if droplet_id is not None and droplet_id != _selection["id"]:
@@ -351,9 +356,28 @@ def selection_view(status, running):
                 picks=_selection["picks"] + 1,
                 speed=None, volts=None,
                 rangeState=None, rangeSince=None, suitable="unknown",
-                speedEver=False, voltsEver=False,
+                speedEver=False, voltsEver=False, trackId=None,
+                stillSince=None,
             )
             _selection["label"] = "DROPLET %d" % _selection["picks"]
+
+        # WHAT IT IS CALLED AND WHAT IS KNOWN ABOUT IT ARE DIFFERENT QUESTIONS.
+        # The pipeline keeps a droplet's number across a lost-and-refound square,
+        # deliberately: losing the track is why the operator is clicking again.
+        # But it cannot tell that from a NEW droplet arriving in the same column
+        # after a spray -- and the burst detector is documented as unable to mark
+        # droplet boundaries, because the operator re-focuses mid-fall.
+        #
+        # So the evidence is tied to the TRACK. On 2026-09-21 an operator sprayed
+        # repeatedly while the aid auto-picked one droplet after another, and every
+        # one of them inherited "Suitable" from the first, which had earned it.
+        # A new track re-earns it; that costs a few seconds and says only what has
+        # actually been seen.
+        if track is not None and track != _selection.get("trackId"):
+            _selection.update(trackId=track, speed=None, volts=None,
+                              rangeState=None, rangeSince=None,
+                              speedEver=False, voltsEver=False,
+                              stillSince=None, suitable="unknown")
 
         if _selection["id"] is None:
             # Nothing has actually been picked yet (as opposed to picked-but-
@@ -369,12 +393,19 @@ def selection_view(status, running):
         if field == "off" and speed is not None:
             # Field off, so this speed IS the free-fall speed Ⅳ.2 judges.
             _selection["speed"] = speed
-        if (field == "work" and voltage is not None
-                and speed is not None and abs(speed) <= BALANCED_GRID_S):
+        still = (field == "work" and voltage is not None and speed is not None
+                 and abs(speed) <= BALANCED_GRID_S)
+        if not still:
+            _selection["stillSince"] = None
+        elif _selection["stillSince"] is None:
+            _selection["stillSince"] = now
+        # ...AND IT HAS TO STAY STILL.  A droplet on its way up passes through
+        # zero, and a single poll caught in that instant was enough to announce
+        # "balances in range. Balanced at 250 V" -- about a droplet climbing out
+        # of frame at 249 V, twice in one session. Being momentarily slow is not
+        # being held; staying slow is.
+        if (still and now - _selection["stillSince"] >= BALANCED_HOLD_S):
             # Held STILL against a live field: this voltage IS its balance voltage.
-            # Being on live plates is not enough -- a droplet picked while 250 V
-            # happened to be set was announced as "balances in range. Balanced at
-            # 250 V" the instant it was clicked, while it climbed out of frame.
             _selection["volts"] = voltage
 
         label = _selection["label"]
