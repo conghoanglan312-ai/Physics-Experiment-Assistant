@@ -693,7 +693,7 @@ function stopSessionTimer() {
 //  estimate: it eases toward ~90% over the expected time, never reaches 100%
 //  by itself, and snaps to 100% the moment /api/live/start answers.
 // ---------------------------------------------------------------------------
-const START_ESTIMATE_SECONDS = { camera: 45, source: 6 };   // camera: bench check + background learning
+const START_ESTIMATE_SECONDS = { camera: 45, source: 30 };   // camera: bench check + background learning
 let progressTimer = null;
 
 function setProgress(pct) {

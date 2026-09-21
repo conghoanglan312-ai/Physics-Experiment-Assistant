@@ -258,7 +258,7 @@ feed:
   start runs past the estimate it reads "Taking a little longer than usual…". The
   camera start text also tells the operator not to spray yet, because the
   pipeline is learning the background.
-- The bundled demo clip uses a 6-second estimate (`START_ESTIMATE_SECONDS.source`).
+- The bundled demo clip uses a 30-second estimate (`START_ESTIMATE_SECONDS.source`).
 - Coming from the idle feed box, the darker inner box first expands out to the
   edges of the feed (about 0.35 s); the spinner, text and bar then fade in. With
   the operating system's "reduce motion" setting on, this is effectively instant.
@@ -1097,7 +1097,7 @@ connection; the page retries every three seconds.
 
 ### The progress bar does not match how long the start really takes
 
-It is an estimate (45 seconds for a camera, 6 seconds for the demo clip). It jumps
+It is an estimate (45 seconds for a camera, 30 seconds for the demo clip). It jumps
 to 100 % when the start actually finishes. Adjust `START_ESTIMATE_SECONDS` in
 `app.js` if your hardware is consistently faster or slower.
 
