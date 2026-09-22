@@ -219,7 +219,11 @@ BALANCE_VOLTS_MIN, BALANCE_VOLTS_MAX = 150.0, 250.0
 # has stopped, not merely slowed.
 BALANCED_GRID_S = 0.05
 BALANCED_HOLD_S = 2.0       # ...and for this long, not for one poll
-BALANCED_MIN_AGE_S = 6.0    # ...on a track that has been there long enough to be real
+# ...on a track that has been there long enough to be real. Six seconds was not
+# enough: a phantom held for that long on 2026-09-22 and was announced as
+# "Balanced at 250 V". A droplet somebody is balancing has been watched for far
+# longer than this; noise that survives ten seconds as ONE track is rare.
+BALANCED_MIN_AGE_S = 10.0
 # A reading has to hold on the same side of the two bands above for this long,
 # continuously, before the verdict actually changes. A single noisy sample --
 # a hand still settling the knob, a momentary tracker glitch -- must not flip
@@ -401,7 +405,7 @@ def selection_view(status, running):
         age = _number(picked.get("trackAgeS")) if picked else None
         still = (field == "work" and voltage is not None and speed is not None
                  and abs(speed) <= BALANCED_GRID_S
-                 and (age is None or age >= BALANCED_MIN_AGE_S))
+                 and age is not None and age >= BALANCED_MIN_AGE_S)
         if not still:
             _selection["stillSince"] = None
         elif _selection["stillSince"] is None:

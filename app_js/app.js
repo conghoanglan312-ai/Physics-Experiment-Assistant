@@ -986,7 +986,13 @@ function showBanner(status, selected) {
   if (text === state.lastBannerText) return;      // same words, no repaint
   state.lastBannerText = text;
   whyButton.disabled = false;
-  if (state.lastWhy && state.lastWhy.asked !== text) {
+  // The line it explained, IGNORING THE NUMBERS. The banner carries live values
+  // -- "falls 0.32 gr/s", "balance 1.4%" -- so an exact comparison threw the
+  // answer away about a second after it arrived, while the square was still on
+  // the same droplet saying the same thing. What the explanation is about is the
+  // shape of the sentence, not the digits in it.
+  const shapeOf = t => String(t).replace(/[-+]?\d[\d.]*/g, "#");
+  if (state.lastWhy && shapeOf(state.lastWhy.asked) !== shapeOf(text)) {
     whyAnswer.classList.add("hidden");       // it explained a line that has moved on
     state.lastWhy = null;
   }

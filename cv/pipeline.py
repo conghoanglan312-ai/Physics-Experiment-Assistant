@@ -3795,6 +3795,9 @@ def samePickedDroplet(spot, t, now):
 # session and then described it to them for thirteen.  Noise does not last six
 # seconds.
 AUTO_PICK_MIN_AGE_S = 6.0
+# How long the square may be blind before handing the pick over stops counting as
+# re-acquiring the same droplet.  See the use site.
+PICK_STALE_GAP_S = 2.0
 
 
 def oldEnoughToPick(t, now, minAge = None):
@@ -5318,8 +5321,18 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                             reach = min(PICK_REACH_MAX_PX, reach + PICK_REACH_GROW * gap)
                             # ...and the same here: this is the pick being handed
                             # back to where its droplet was predicted to be.
+                            #
+                            # Unless the square has been blind for a while. After a
+                            # lag spike the prediction is stale and the reach has
+                            # grown, so "nearest the aim" stops meaning much: on
+                            # 2026-09-22 a spike handed the square a droplet that
+                            # was not even in focus. A gap that long is not a
+                            # re-acquisition any more, so ask for a track with some
+                            # history behind it.
+                            stale = gap > PICK_STALE_GAP_S
                             near = [t for t in live
                                     if not t.miss
+                                    and (not stale or oldEnoughToPick(t, now))
                                     and np.hypot(t.pos[0] - aim[0], t.pos[1] - aim[1])
                                     <= reach]
                             # A droplet falls and rises; it does not travel sideways.
