@@ -1,8 +1,7 @@
 # The live tutor — for the report
 
 What it is, why it is built the way it is, and what can be claimed about it.
-Written 2026-09-20. Everything here is implemented and tested off recorded
-sessions; nothing has been through a live apparatus run yet.
+Written 2026-09-20, revised 2026-09-22 after four live apparatus sessions.
 
 ## The claim
 
@@ -18,30 +17,45 @@ sees one frame, and **being stuck is a shape in time**.
 ## How it decides to speak
 
 The decision is ordinary code (`app_js/tutor.py`), not the model. It watches the
-same live status the side panel reads, and recognises four stalls:
+same live status the side panel reads, and recognises five stalls:
 
 | it speaks after | what that means |
 | :-- | :-- |
 | 90 s tuning one droplet without reaching balance | the droplet may not be worth the time |
+| 3 minutes on one droplet with no legal fall | something in the procedure is not landing |
+| 2 minutes of session with no legal fall at all | the hunt itself is not converging |
 | the pick lost 3 times in a minute | the aid is not holding on to it |
 | the verdict flipping USABLE/DISCARD 3 times in a minute | the reading is not settling |
-| 3 minutes on one droplet with no legal fall | something in the procedure is not landing |
 
 Only then is the model asked anything, and only to explain the situation the
 rules have already found. This keeps the triggering deterministic and reviewable:
 the same session replays to the same triggers.
 
-**Restraint is the design.** At most one message every 2 minutes, at most twice
-for the same complaint, six per session, never while a fall clock is running.
-Replaying two real 40-minute sessions, an unrestrained version spent all six of
-its messages on one complaint inside the first quarter of an hour; with the caps
-it speaks twice in forty minutes.
+**Restraint is the design.** Nothing in the first 45 s, then at most one message
+every 2 minutes, 7 minutes before the same complaint may repeat, at most twice
+for one complaint, six per session, never while a fall clock is running.
+Replaying two 40-minute sessions, an unrestrained version spent all six of its
+messages on one complaint inside the first quarter of an hour; with the caps it
+speaks twice in forty minutes.
 
 ## The second half: "Why?"
 
 Next to the aid's guidance line is a **Why?** button. It explains the instruction
 the student is looking at — the physics behind it and what it means for the
-measurement. It answers a button, so it cannot interrupt anything.
+measurement — and the answer appears in the same panel, directly under the
+button. The student never has to open a chat window mid-measurement.
+
+Speed is the requirement, so it does not go through the chat path at all.
+`app_js/quick_ai.py` makes **one** model call: no retrieval round trip, no
+session lock, the manual read once when the process starts and the relevant
+passage selected by scoring it against the question. Measured against a running
+session: **2.2 s**, at most two sentences.
+
+The instruction is passed as a *kind*, never as its words — the aid's banner
+names the plate voltage in plain text, and that must not cross (see the seal).
+Every line the aid can display has a kind, including the tallies (`MEASURING
+n of 5`, `DONE`), a held lift, an unreadable panel, a running fall clock, and
+the advisory-band warning.
 
 Example, on a balanced droplet:
 
@@ -67,31 +81,24 @@ and not the aid's own banner text, which names it in plain words ("BALANCED to
 0.0% at 153 V"). What the tutor sees is times, speeds, counts, field state, and a
 boolean saying whether the working voltage is inside the manual's band.
 
-Two further layers, because a seal that is only as good as its author's care is
+Three further layers, because a seal that is only as good as its author's care is
 not a seal:
 
 - a reply that states a voltage or a charge anyway — a model can invent one — is
   **withheld, not shown**;
+- so is a reply that argues against balancing the droplet. Asked why the aid
+  kept losing a balanced droplet, the model once answered that the software
+  struggles to track stationary droplets and suggested keeping it in slow motion
+  instead. That is the experiment backwards: the stillness *is* the measurement.
+  Both prompts now say so, and the pattern is refused whatever the prompt does;
 - every trigger, the prompt it was given and what it said, including anything
   withheld, is written to `test/output/tutor_log.jsonl` for review after a run.
 
-## What was tried and dropped
+Both filters guard the volunteered messages and the **Why?** answers alike — the
+same student reads both, on the same panel.
 
-An end-of-session **debrief** was built and removed. On a finished session there
-are about four facts worth stating — droplets measured against the target of 3,
-falls against 5, the scatter of the repeats, and anything genuinely wasted — and
-code states all four correctly, instantly, every time. The model added only
-variance: it padded, it mis-ranked which fact mattered, and on one session it
-read 19 traverses of debris as the student's failed attempts. It was dropped
-rather than kept as decoration.
+## Switching it off
 
-This is worth saying in the report as a design decision, not an omission: the
-model is used where it explains, and not where arithmetic is already correct.
-
-## Honest limits
-
-- Not yet validated at the apparatus. The triggers fire correctly on recorded
-  sessions; whether they fire *at the moments a student wants help* is unknown.
-- One active model call per chat session: if the student is typing a question
-  when a stall fires, the tutor stays silent rather than queueing.
-- English only. Matching the student's language is future work.
+`MILLIKAN_TUTOR=0` starts the app with the tutor silent. The measurement aid is
+unaffected: nothing it does depends on the model being reachable, and a session
+with no network produces the same falls, the same voltages and the same charges.
