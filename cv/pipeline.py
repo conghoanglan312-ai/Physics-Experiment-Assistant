@@ -4329,7 +4329,14 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
     # last few samples and the mode over the last second, so a long window shows a
     # voltage the operator has already turned away from.  At 10 panel reads a second
     # this settles in well under a second while still outvoting a stray misread.
-    voltHistory = collections.deque(maxlen = 5)
+    # A SECOND OF READINGS, not half of one.  The panel is read ten times a
+    # second and the mode of five spans 0.5 s, which is too short a vote when
+    # single-frame reads are wrong a tenth of the time and wrong in scattered
+    # ways: on 2026-09-22 the display alternated 104 and 184 while the knob sat
+    # at 184, because five samples can split 3-2 on a bad digit.  Eleven cannot
+    # split that way without most of them agreeing, and the knob takes longer
+    # than a second to move anywhere the aid would act on differently.
+    voltHistory = collections.deque(maxlen = 11)
     bestNow = None                  # the candidate the operator is being told about
     bestAt, bestSeen, bannerAt = None, 0.0, 0.0   # bestAt: WHERE, not which id
     ranked = []                     # last computed candidate list, reused between frames
@@ -5740,13 +5747,12 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # came nearer the column than one of this droplet's.
                         mine = [f for f in falls if f.legal
                                 and getattr(f, "droplet", None) == pickSerial]
-                        if not mine:
-                            # Before the first fall there is nothing bound, and the
-                            # column is all there is to go on.
-                            mine = dropletFalls(falls,
-                                                float(picked.pos[0])
-                                                if picked is not None else chosenX,
-                                                committedAt)
+                        # NO FALLBACK.  A column count was what this replaced, and
+                        # leaving it in for "before the first fall" let it back in by
+                        # the side door: on 2026-09-22 an auto-picked droplet opened
+                        # at 3 of 5, counting falls from earlier sprays that happened
+                        # to land in its column.  A droplet with nothing bound to it
+                        # has had no falls, and saying 0 is the truth.
                         # Follow the group, not the coordinate.  chosenX was pinned
                         # where the droplet happened to be when it settled, and the
                         # count is "the falls nearest that x" -- so when this droplet's
@@ -5958,7 +5964,14 @@ def trackAll(path = VIDEO, show = True, saveVideo = True, outDir = None, health 
                         # over the top of it.  An operator balancing a droplet three
                         # falls in was shown a progress count and nothing else for
                         # forty seconds on 2026-09-21.
+                        # ...and not when it would say the same thing twice.  The
+                        # count carries its own balance line, and pickedVerdict
+                        # computes one of its own from the same numbers: appending
+                        # that put "BALANCED to 1.4% at 180 V" on the screen
+                        # directly after "balance 1.4%", which reads as a fault in
+                        # the aid rather than agreement.
                         if (not measuringAdvice and banner
+                                and "balance" not in banner.lower()
                                 and not any(f in banner for f in FILLER_LINES)):
                             said = banner.split("--", 1)
                             mt = mt + "   " + (said[1].strip() if len(said) > 1

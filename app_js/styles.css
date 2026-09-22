@@ -166,10 +166,6 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 .subtitle { text-align: center; opacity: 0.7; font-size: 22px; margin-top: 0; }
 
 .main-grid {
-  /* The microscopic view is a 16:9 frame: 1280x720 at full size, scaled down
-     proportionally (never cropped or stretched) when the screen can't fit it.
-     --microscopic-height is the tallest the frame may be; its width follows
-     from the 16:9 ratio (720px tall == 1280px wide). */
   --microscopic-height: max(520px, min(68vh, 720px));
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(300px, 330px);
@@ -181,13 +177,9 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 
 .video-container {
   position: relative;
-  /* Fill the column, but never exceed a 16:9 frame at the height cap above
-     (1280px wide max). aspect-ratio derives the height from the width, so the
-     box shrinks proportionally on smaller screens instead of letterboxing. */
-  width: min(100%, calc(var(--microscopic-height) * 16 / 9));
-  max-width: 1280px;
-  aspect-ratio: 16 / 9;
-  margin-inline: auto;
+  width: 100%;
+  height: var(--microscopic-height);
+  min-height: var(--microscopic-height);
   background: var(--panel-bg);
   backdrop-filter: blur(15px);
   -webkit-backdrop-filter: blur(15px);
@@ -216,21 +208,6 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 @keyframes feedSpin { to { transform: rotate(360deg); } }
 .feed-loading-title { font-size: 19px; font-weight: 700; letter-spacing: .5px; }
 .feed-loading-body { font-size: 14px; opacity: .7; max-width: 340px; line-height: 1.5; }
-
-/* On start, the darker inner box of the empty state grows out to the edges of the
-   feed box first (same size/position as .video-placeholder at frame 0), then the
-   spinner and text fade in. */
-.feed-loading.expanding { animation: feedExpand .35s cubic-bezier(.22, .8, .3, 1) both; }
-.feed-loading.expanding > * { opacity: 0; animation: feedContentIn .25s ease .3s forwards; }
-.feed-loading.expanding > .feed-spinner { animation: feedSpin .9s linear infinite, feedContentIn .25s ease .3s forwards; }
-@keyframes feedExpand {
-  from { top: 5%; bottom: 5%; left: 2.5%; right: 2.5%; }
-  to   { top: 0;  bottom: 0;  left: 0;    right: 0; }
-}
-@keyframes feedContentIn { from { opacity: 0; } to { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) {
-  .feed-loading.expanding, .feed-loading.expanding > * { animation-duration: .01s; animation-delay: 0s; }
-}
 
 .video-placeholder {
   width: 95%; height: 90%;
@@ -308,26 +285,17 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
    its own window. ONE line that is replaced in place: what it says now is the
    instruction, and a line that has been superseded is not worth reading. */
 .guidance-line {
-  margin: 8px 0 4px; padding: 14px 12px; min-height: 48px;
+  margin: 8px 0 4px; padding: 12px 14px; min-height: 48px;
   display: flex; align-items: center; justify-content: center; text-align: center;
-  border-radius: 12px;
+  border-radius: 12px; background: var(--inset-bg);
   border: 1px solid var(--panel-border);
-  font-size: 13px; line-height: 1.5; font-weight: 600; color: rgba(var(--text-rgb), 0.92);
-  /* Same glass as the title box / feed / info panel / notifications. */
-  background: var(--panel-bg);
-  backdrop-filter: blur(15px);
-  -webkit-backdrop-filter: blur(15px);
-  box-shadow: var(--card-shadow);
+  font-size: 14px; line-height: 1.4; font-weight: 600;
+  color: rgba(var(--text-rgb), .75);
 }
 .guidance-line.good { color: var(--success); }
 .guidance-line.warn { color: var(--warning-text, var(--warning)); }
 .guidance-line.bad { color: var(--danger); }
-/* Placeholder / waiting text: still semibold, but softer than real guidance. */
-.guidance-line.idle {
-  font-weight: 600;
-  font-style: italic;
-  color: rgba(var(--text-rgb), 0.55);
-}
+.guidance-line.idle { font-weight: 500; opacity: .6; font-style: italic; }
 
 /* Asked for, never volunteered: "Why?" explains the line above it. No polling.
    The answer appears HERE rather than in the chat: the student is mid-measurement
@@ -355,7 +323,6 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 }
 .ghost-button:hover:not(:disabled) { background: rgba(var(--text-rgb), .08); }
 .ghost-button:disabled { opacity: .4; cursor: not-allowed; }
-
 .feed-title { text-align: center; margin-top: 10px; font-size: 18px; font-weight: 600; letter-spacing: 4px; opacity: 0.7; transition: color .15s ease; }
 .feed-title.live { color: var(--success); opacity: .95; }
 .feed-title.demo { color: var(--warning-text); opacity: 1; }
@@ -429,28 +396,10 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 .droplet-id { font-size:24px; font-weight:700; color: var(--droplet-text-color); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; opacity: 1;}
 .droplet-status-word { font-size:14px; margin-top:2px; opacity:.85; color: var(--droplet-text-color);}
 .info-stats { display:flex; flex-direction:column; gap:10px; padding-top:4px; border-top:1px solid var(--panel-border-soft); }
-.info-item { display:flex; justify-content:space-between; align-items:center; gap:10px; }
-.info-label-wrap { display:flex; flex-direction:column; gap:1px; min-width:0; }
+.info-item { display:flex; justify-content:space-between; align-items:baseline; gap:10px; }
+.info-item span:last-child { font-size:16px; font-weight:600; font-variant-numeric:tabular-nums; }
 .info-label { font-size:15px; font-weight:700; letter-spacing:1px; opacity:.7; }
-/* Target band printed under a label; kept readable (not faded) so it works as a legend. */
-.info-range { font-size:11.5px; font-weight:500; letter-spacing:.2px; color:rgba(var(--text-rgb), .52); font-variant-numeric:tabular-nums; }
-.info-value { display:inline-flex; align-items:baseline; justify-content:flex-end; gap:7px; flex-wrap:wrap; text-align:right; font-size:16px; font-weight:600; font-variant-numeric:tabular-nums; }
-.field-value { text-transform:none; }
-
-/* Each reading is tinted against its target band, so it is obvious WHY a droplet
-   is or isn't suitable. Dark-on-light / light-on-dark variants below. */
-.info-value .in-range { color:var(--range-ok); }
-.info-value .out-of-range { color:var(--range-bad); }
-
-/* A held reading is the last genuine one, kept while the field is in a state that
-   doesn't measure it: lighter and lighter-weight, with a small "held" tag. */
-.info-item.is-held .info-value > span:first-child { opacity:.72; font-weight:500; }
-.held-tag {
-  font-size:10px; font-weight:700; letter-spacing:.8px; text-transform:uppercase;
-  padding:1px 7px; border-radius:999px;
-  border:1px solid var(--panel-border); background:var(--inset-bg-soft);
-  color:rgba(var(--text-rgb), .72);
-}
+.field-value { text-transform: capitalize; }
 
 .guide-section { margin-top: 50px; }
 .guide-title { font-size:28px; font-weight:700; margin:0 0 18px; }
@@ -591,12 +540,11 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
    ------------------------------------------------------------ */
 :root[data-theme="light"] {
   --float-panel-bg: rgba(230, 230, 230, 0.35);
-  --float-shadow: 0 0px 20px 5px rgba(49, 51, 63, 0.10);
+  --float-shadow: 0 16px 51px 6px rgba(49, 51, 63, 0.21);
 }
 :root[data-theme="light"] .title-box,
 :root[data-theme="light"] .video-container,
 :root[data-theme="light"] .info-panel,
-:root[data-theme="light"] .guidance-line,
 :root[data-theme="light"] .notification-panel {
   background: var(--float-panel-bg);
   box-shadow: var(--float-shadow);
@@ -705,7 +653,7 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 
 @media (max-width: 900px) {
   .app { width:calc(100% - 30px); }
-  .main-grid { grid-template-columns:minmax(0, 1fr); } /* minmax(0,..) so the video box can't force the column wider than the screen */
+  .main-grid { grid-template-columns:1fr; }
   .info-panel { flex-direction:column; height:auto; min-height:unset; }
   .notification-panel { min-height:220px; }
 }
@@ -717,93 +665,9 @@ body { min-height: 100vh; overflow-x: hidden; background: var(--bg); isolation:i
 
   .title-box { padding:24px 22px; }
   .subtitle { font-size:16px; margin-top:0; }
-  .video-container { min-height:280px; }
+  .video-container { height:55vh; min-height:320px; }
   .ai-fab { right:15px; bottom:15px; }
   .ai-message { right:15px; bottom:90px; }
   .ai-panel { right:15px; bottom:15px; width:calc(100vw - 30px); height:70vh; }
   .chat-message.user .message-bubble,.chat-message.assistant .message-bubble { max-width:85%; }
 }
-
-/* ============================================================
-   Range tints (readable on both themes)
-   ============================================================ */
-:root, :root[data-theme="dark"] { --range-ok: #4ade80; --range-bad: #f87171; }
-:root[data-theme="light"] { --range-ok: #15803d; --range-bad: #b91c1c; }
-
-/* ============================================================
-   Start-up progress bar + cancel state
-   ============================================================ */
-/* Track and fill colours are per-theme: the dark values are the original ones; the light
-   values give the bar a lighter trough and a deeper fill so it reads on the light glass. */
-:root, :root[data-theme="dark"] {
-  --progress-track: rgba(var(--text-rgb), .16);
-  --progress-track-edge: transparent;
-  --progress-fill: linear-gradient(90deg, var(--accent), #38bdf8);
-  --progress-fill-glow: none;
-}
-:root[data-theme="light"] {
-  --progress-track: rgba(255, 255, 255, .62);
-  --progress-track-edge: rgba(49, 51, 63, .14);
-  --progress-fill: linear-gradient(90deg, #4338ca, #7c3aed);
-  --progress-fill-glow: 0 0 8px rgba(99, 102, 241, .45);
-}
-.feed-progress {
-  width: min(320px, 80%); height: 8px; border-radius: 999px; margin-top: 6px;
-  background: var(--progress-track); box-shadow: inset 0 0 0 1px var(--progress-track-edge);
-  overflow: hidden;
-}
-.feed-progress-bar {
-  height: 100%; width: 0; border-radius: inherit;
-  background: var(--progress-fill); box-shadow: var(--progress-fill-glow);
-  transition: width .3s linear;
-}
-.feed-progress.indeterminate .feed-progress-bar {
-  width: 35% !important; transition: none;
-  animation: feedIndeterminate 1.1s ease-in-out infinite;
-}
-@keyframes feedIndeterminate { from { transform: translateX(-110%); } to { transform: translateX(300%); } }
-.feed-progress-meta { min-height: 18px; font-size: 12.5px; opacity: .75; font-variant-numeric: tabular-nums; }
-
-/* While a feed is starting, the main button is Cancel: outlined, not filled. */
-.live-button.is-cancel {
-  background: transparent; color: inherit;
-  border: 1px solid var(--panel-border);
-  padding: 9px 16px;
-}
-.live-button.is-cancel:hover:not(:disabled) { background: var(--danger-bg); border-color: var(--danger-border); }
-.live-button.is-cancel:disabled { background: transparent; opacity: .55; }
-
-/* ============================================================
-   Connection-lost pill on the feed
-   ============================================================ */
-.conn-banner {
-  position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 4;
-  display: flex; align-items: center; gap: 8px;
-  padding: 7px 14px; border-radius: 999px;
-  background: rgba(185, 28, 28, .92); color: #fff;
-  font-size: 13px; font-weight: 600; letter-spacing: .2px; white-space: nowrap;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, .28);
-}
-.conn-dot { width: 8px; height: 8px; border-radius: 50%; background: #fff; animation: sessionPulse 1s ease-in-out infinite; }
-.session-timer.stalled { opacity: .6; }
-.session-timer.stalled .session-dot { animation: none; background: var(--warning); }
-
-/* ============================================================
-   Starter prompts in the AI chat
-   ============================================================ */
-.starter-prompts { display: flex; flex-direction: column; gap: 8px; padding: 4px 2px 10px; animation: chatFlowIn .35s ease-out; }
-.starter-title { font-size: 12px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: rgba(var(--text-rgb), .68); }
-.starter-chip {
-  text-align: left; font: inherit; font-size: 14px; line-height: 1.4; color: inherit;
-  background: var(--assistant-bubble-bg); border: 1px solid var(--assistant-bubble-border);
-  border-radius: 14px; padding: 10px 14px; cursor: pointer;
-  transition: background .15s ease, border-color .15s ease, transform .15s ease;
-}
-.starter-chip:hover { background: var(--accent-soft); border-color: var(--accent-hover); transform: translateY(-1px); }
-.starter-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-
-/* Camera-index validation */
-.live-source-input.invalid { border-color: var(--range-bad); }
-.live-source-input.invalid:focus { border-color: var(--range-bad); box-shadow: 0 0 0 2px rgba(239, 68, 68, .18); }
-.live-source-error { margin-top: 8px; font-size: 13px; font-weight: 600; line-height: 1.4; color: var(--range-bad); }

@@ -42,17 +42,6 @@ const whyAnswer = document.getElementById("whyAnswer");
 const whyText = document.getElementById("whyText");
 const whyMore = document.getElementById("whyMore");
 
-const feedLoadingTitle = document.getElementById("feedLoadingTitle");
-const feedProgress = document.getElementById("feedProgress");
-const feedProgressBar = document.getElementById("feedProgressBar");
-const feedProgressMeta = document.getElementById("feedProgressMeta");
-const connBanner = document.getElementById("connBanner");
-const connBannerText = document.getElementById("connBannerText");
-const dropletVoltageHeld = document.getElementById("dropletVoltageHeld");
-const dropletFallHeld = document.getElementById("dropletFallHeld");
-const dropletVelocityHeld = document.getElementById("dropletVelocityHeld");
-const starterPrompts = document.getElementById("starterPrompts");
-
 const state = {
   messages: [],
   generating: false,
@@ -78,24 +67,7 @@ const state = {
   lastBannerText: null,       // the aid's line as it currently reads
   lastWhy: null,              // ...and the explanation showing for it, if any
   lastSuitable: null,
-  lastStage: null,            // which half of the test it has met
-  // The last free-fall speed seen while fieldState was "off". Held like the
-  // voltage and fall time: while the field is working or lifting the droplet is
-  // held or rising, so its live speed says nothing about the droplet.
-  lastSpeed: null,
-  // Session start-up / re-attach bookkeeping.
-  starting: false,            // /api/live/start is in flight
-  cancelRequested: false,     // the operator pressed Cancel while it was
-  attaching: false,           // re-attaching to a session this page did not start
-  attachRetryAt: 0,
-  // Connection health (drives the "connection lost" pill on the feed).
-  pollFailures: 0,
-  connLost: false,            // the server stopped answering
-  streamLost: false,          // the video stream itself dropped
-  streamRetryTimer: null,
-  streamRetryAt: 0,
-  streamProbing: false,
-
+  lastStage: null,          // which half of the test it has met
 };
 
 function pythonLen(text) {
@@ -524,7 +496,6 @@ async function sendQuery() {
   aiInput.value = "";
   updateInputState();
 
-  if (starterPrompts) starterPrompts.remove();
   addMessage("user", query, true);
   const thinking = createThinking();
   chatHistory.appendChild(thinking);
@@ -610,10 +581,6 @@ async function sendQuery() {
     assistantBubble.textContent = error?.message || "Unable to get a response from the AI assistant.";
   } finally {
     if (stopThinking) stopThinking(); // safety net -- should already be null by now
-    if (!assistantText && assistantBubble.querySelector(".thinking-status")) {
-      assistantBubble.classList.add("error-bubble");
-      assistantBubble.textContent = "Unable to get a response from the AI assistant.";
-    }
     if (assistantText) state.messages.push({ role: "assistant", content: assistantText });
     state.generating = false;
     sendButton.classList.remove("locked");
@@ -657,166 +624,27 @@ function formatElapsed(totalSeconds) {
   return hh > 0 ? `${pad(hh)}:${pad(mm)}:${pad(ss)}` : `${pad(mm)}:${pad(ss)}`;
 }
 
-// The start time is remembered so a reloaded page (or a second tab) can carry
-// on counting from the real start instead of from zero.
-const SESSION_START_KEY = "millikanSessionStart";
-
-function rememberSessionStart(ts) {
-  try { localStorage.setItem(SESSION_START_KEY, String(ts)); } catch (_) {}
-}
-
-function forgetSessionStart() {
-  try { localStorage.removeItem(SESSION_START_KEY); } catch (_) {}
-}
-
-function resumeSessionTimer() {
-  let ts = NaN;
-  try { ts = Number(localStorage.getItem(SESSION_START_KEY)); } catch (_) {}
-  const age = Date.now() - ts;
-  // No trustworthy start time (session begun elsewhere): show no timer rather than a wrong one.
-  if (Number.isFinite(ts) && ts > 0 && age >= 0 && age < 12 * 3600 * 1000) startSessionTimer(ts);
-}
-
-function startSessionTimer(startTs = Date.now()) {
-  state.sessionStartTs = startTs;
-  sessionTimerText.textContent = formatElapsed((Date.now() - startTs) / 1000);
+function startSessionTimer() {
+  state.sessionStartTs = Date.now();
+  sessionTimerText.textContent = formatElapsed(0);
   sessionTimer.classList.remove("hidden");
   if (state.sessionTimerInterval) clearInterval(state.sessionTimerInterval);
   state.sessionTimerInterval = setInterval(() => {
-    // Frozen while the connection is down, so it doesn't keep counting under a stalled feed.
-    if (state.connLost || state.streamLost) return;
     sessionTimerText.textContent = formatElapsed((Date.now() - state.sessionStartTs) / 1000);
   }, 1000);
-  renderConnectionBanner();
 }
 
 function stopSessionTimer() {
   if (state.sessionTimerInterval) clearInterval(state.sessionTimerInterval);
   state.sessionTimerInterval = null;
   state.sessionStartTs = null;
-  forgetSessionStart();
   sessionTimer.classList.add("hidden");
-  sessionTimer.classList.remove("stalled");
 }
-
-// ---------------------------------------------------------------------------
-//  Start-up progress. The server does not report progress, so the bar is an
-//  estimate: it eases toward ~90% over the expected time, never reaches 100%
-//  by itself, and snaps to 100% the moment /api/live/start answers.
-// ---------------------------------------------------------------------------
-const START_ESTIMATE_SECONDS = { camera: 45, source: 30 };   // camera: bench check + background learning
-let progressTimer = null;
-
-function setProgress(pct) {
-  feedProgressBar.style.width = `${pct}%`;
-  feedProgress.setAttribute("aria-valuenow", String(Math.round(pct)));
-}
-
-function stopProgress() {
-  if (progressTimer) clearInterval(progressTimer);
-  progressTimer = null;
-}
-
-function startProgress(estimateSeconds) {
-  stopProgress();
-  feedProgress.classList.remove("indeterminate");
-  const t0 = Date.now();
-  const tick = () => {
-    const elapsed = (Date.now() - t0) / 1000;
-    setProgress(Math.max(3, 95 * (1 - Math.exp(-3 * elapsed / estimateSeconds))));
-    feedProgressMeta.textContent = elapsed < estimateSeconds
-      ? `About ${Math.max(1, Math.ceil(estimateSeconds - elapsed))} s left`
-      : "Taking a little longer than usual…";
-  };
-  tick();
-  progressTimer = setInterval(tick, 250);
-}
-
-function showIndeterminateProgress(text) {
-  stopProgress();
-  feedProgress.classList.add("indeterminate");
-  feedProgressMeta.textContent = text || "";
-}
-
-function finishProgress() {
-  stopProgress();
-  feedProgress.classList.remove("indeterminate");
-  setProgress(100);
-  feedProgressMeta.textContent = "Ready";
-  return new Promise(resolve => setTimeout(resolve, 260));
-}
-
-function resetLiveButton() {
-  liveButton.classList.remove("is-cancel");
-  liveButton.textContent = "▶ Start Live Feed";
-  liveButton.disabled = false;
-}
-
-async function stopSessionOnServer(token) {
-  try {
-    await fetch("/api/live/stop", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token }),
-    });
-  } catch (_) { /* nothing more to do from here */ }
-}
-
-// ---------------------------------------------------------------------------
-//  Camera-index input. It is a camera INDEX, so the only accepted values are
-//  empty (= default camera) or a whole number 0, 1, 2, ... Anything else --
-//  letters, decimals, signs, exponents, spaces inside, non-ASCII digits -- is
-//  rejected here, before any request is made.
-// ---------------------------------------------------------------------------
-const liveSourceError = document.getElementById("liveSourceError");
-const CAMERA_INDEX_ERROR = "Camera index must be a whole number (0, 1, 2…). Leave it empty to use the default camera.";
-
-// Returns { ok: true, value } with the index as a canonical string ("" = default),
-// or { ok: false }.
-function parseCameraIndex(raw) {
-  const text = String(raw ?? "").trim();
-  if (text === "") return { ok: true, value: "" };
-  if (!/^[0-9]+$/.test(text)) return { ok: false };      // ASCII digits only
-  const n = Number(text);
-  if (!Number.isSafeInteger(n)) return { ok: false };
-  return { ok: true, value: String(n) };                 // "007" -> "7"
-}
-
-function showCameraIndexError(message) {
-  liveSourceError.textContent = message || "";
-  liveSourceError.classList.toggle("hidden", !message);
-  liveSourceInput.classList.toggle("invalid", Boolean(message));
-  if (message) liveSourceInput.setAttribute("aria-invalid", "true");
-  else liveSourceInput.removeAttribute("aria-invalid");
-}
-
-liveSourceInput.addEventListener("input", () => showCameraIndexError(""));
 
 async function startLive(explicitSource) {
-  // explicitSource is only ever the bundled demo clip; what the operator typed
-  // is a camera index and is validated first.
-  let source;
-  if (explicitSource !== undefined) {
-    source = String(explicitSource).trim();
-    showCameraIndexError("");
-  } else {
-    const parsed = parseCameraIndex(liveSourceInput.value);
-    if (!parsed.ok) {
-      showCameraIndexError(CAMERA_INDEX_ERROR);
-      liveSourceInput.focus();
-      return;
-    }
-    showCameraIndexError("");
-    source = parsed.value;
-  }
-  const isClip = explicitSource !== undefined;
+  const source = (explicitSource ?? liveSourceInput.value).trim();
 
-  state.starting = true;
-  state.cancelRequested = false;
-  // While the session is starting the main button turns into Cancel.
-  liveButton.classList.add("is-cancel");
-  liveButton.textContent = "✕ Cancel";
-  liveButton.disabled = false;
+  liveButton.disabled = true;
   liveSourceInput.disabled = true;
   demoClipButton.disabled = true;
   feedStatus.className = "feed-status";
@@ -830,8 +658,7 @@ async function startLive(explicitSource) {
     ? "Opening the clip."
     : source
       ? `Opening "${source}".`
-      : "Running the bench check, then learning the background for about 45 seconds. Do not spray yet.",
-    isClip ? START_ESTIMATE_SECONDS.source : START_ESTIMATE_SECONDS.camera);
+      : "Running the bench check, then learning the background for about 30 seconds. Do not spray yet.");
 
   try {
     const response = await fetch("/api/live/start", {
@@ -842,27 +669,9 @@ async function startLive(explicitSource) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Failed to start live feed.");
 
-    if (state.cancelRequested) {
-      // The server can't abort a start half-way, so it was allowed to finish;
-      // now shut the session it just opened back down.
-      await stopSessionOnServer(payload.token);
-      state.live = null;
-      showFallback();
-      feedStatus.classList.add("hidden");
-      pushSystemMessage("info", "Start cancelled.");
-      resetLiveButton();
-      scheduleLivePoll(0);
-      return;
-    }
-
-    liveButton.disabled = true;            // no Cancel during the last flourish
-    await finishProgress();
     state.live = payload;
     showLiveFeed(payload.url, payload.device, payload.source);
-    const startedAt = Date.now();
-    rememberSessionStart(startedAt);
-    startSessionTimer(startedAt);
-    liveButton.classList.remove("is-cancel");
+    startSessionTimer();
     liveButton.textContent = "■ Stop Live Feed";
     liveButton.disabled = false;
     scheduleLivePoll(0);
@@ -870,79 +679,25 @@ async function startLive(explicitSource) {
     state.live = null;
     showFallback();
     feedStatus.classList.add("hidden");
-    if (state.cancelRequested) {
-      pushSystemMessage("info", "Start cancelled.");
-    } else {
-      pushSystemMessage("error", `Couldn't start the ${state.isDemo ? "demo video" : "live feed"} — ${
-        error?.message || "please plug in the dongle first."
-      }`);
-    }
-    resetLiveButton();
+    pushSystemMessage("error", `Couldn't start the ${state.isDemo ? "demo video" : "live feed"} — ${
+      error?.message || "please plug in the dongle first."
+    }`);
+    liveButton.textContent = "▶ Start Live Feed";
+    liveButton.disabled = false;
     liveSourceInput.disabled = false;
     demoClipButton.disabled = false;
-  } finally {
-    state.starting = false;
-    state.cancelRequested = false;
   }
 }
 
-function requestCancelStart() {
-  if (!state.starting || state.cancelRequested) return;
-  state.cancelRequested = true;
-  liveButton.disabled = true;
-  liveButton.textContent = "Cancelling…";
-  feedLoadingTitle.textContent = "Cancelling…";
-  feedLoadingBody.textContent = "Waiting for the camera to finish starting so it can be shut down cleanly.";
-  showIndeterminateProgress("");
-}
-
-// A session this page did not start (page reloaded mid-session, or a second
-// tab): /api/live/status carries no feed URL or click token, but
-// /api/live/start hands back the running session's own when there is one, so
-// ask it once and attach exactly as if this page had started it.
-async function attachToRunningSession(info) {
-  if (state.attaching || state.live || state.starting || Date.now() < state.attachRetryAt) return;
-  state.attaching = true;
-  state.isDemo = Boolean(info.source) && String(info.source) === DEMO_CLIP_SOURCE;
-  try {
-    const response = await fetch("/api/live/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(info.source ? { source: info.source } : {}),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "attach failed");
-    if (state.live || state.starting) return;      // something else got there first
-    state.live = payload;
-    showLiveFeed(payload.url, payload.device, payload.source);
-    resumeSessionTimer();
-    liveButton.classList.remove("is-cancel");
-    liveButton.textContent = "■ Stop Live Feed";
-    liveButton.disabled = false;
-    pushSystemMessage("info", "Reconnected to the session that is already running.");
-  } catch (_) {
-    state.attachRetryAt = Date.now() + 5000;       // don't hammer the server
-  } finally {
-    state.attaching = false;
-  }
-}
-
-function showLoading(text, estimateSeconds) {
+function showLoading(text) {
   if (text) feedLoadingBody.textContent = text;
-  feedLoadingTitle.textContent = state.isDemo ? "Starting the demo…" : "Starting the camera…";
-  // Play the expand-out from whatever the idle feed box is showing (the empty
-  // state or the idle footage).
-  const fromIdle = !videoPlaceholder.classList.contains("hidden") || !fallbackVideo.classList.contains("hidden");
   videoPlaceholder.classList.add("hidden");
   fallbackVideo.classList.add("hidden");
   liveFeed.classList.add("hidden");
-  feedLoading.classList.toggle("expanding", fromIdle);
   feedLoading.classList.remove("hidden");
-  startProgress(estimateSeconds || START_ESTIMATE_SECONDS.camera);
 }
 
 function hideLoading() {
-  stopProgress();
   feedLoading.classList.add("hidden");
 }
 
@@ -953,8 +708,13 @@ function showLiveFeed(url, device, source) {
   videoPlaceholder.classList.add("hidden");
   liveFeed.src = `${url}?t=${Date.now()}`;
   liveFeed.classList.remove("hidden");
-  feedStatus.textContent = "🖱️ Click a droplet in the feed to select it";
-  feedStatus.className = `feed-status ${state.isDemo ? "demo" : "live"}`;
+  if (state.isDemo) {
+    feedStatus.textContent = `🖱️ Click a droplet in the feed to select it`;
+    feedStatus.className = "feed-status demo";
+  } else {
+    feedStatus.textContent = `🖱️ Click a droplet in the feed to select it`;
+    feedStatus.className = "feed-status live";
+  }
   setFeedState(state.isDemo ? "demo" : "live");
   feedHint.classList.remove("hidden");
   liveSourceInput.disabled = true;
@@ -964,15 +724,11 @@ function showLiveFeed(url, device, source) {
 function showFallback() {
   hideLoading();
   unfitFeedBox();
-  clearStreamTrouble();
   liveFeed.removeAttribute("src");
   liveFeed.classList.add("hidden");
   if (fallbackVideo.readyState > 0) {
     fallbackVideo.classList.remove("hidden");
     videoPlaceholder.classList.add("hidden");
-    // showLiveFeed() paused it; without this it would sit on a frozen frame.
-    const playing = fallbackVideo.play();
-    if (playing && playing.catch) playing.catch(() => {});
   } else {
     fallbackVideo.classList.add("hidden");
     videoPlaceholder.classList.remove("hidden");
@@ -985,7 +741,7 @@ function showFallback() {
 }
 
 demoClipButton.addEventListener("click", () => {
-  if (state.live || state.starting) return;
+  if (state.live) return;
   state.isDemo = true;
   // The input stays untouched (no internal fixture path shown in it) --
   // the demo status text and the DEMO feed-title label are what tell the
@@ -1044,6 +800,10 @@ function unfitFeedBox() {
   fitFeedBox(FEED_ASPECT_W, FEED_ASPECT_H);
 }
 
+// "Why?" explains the line above it. The answer lands in the chat, so it stays
+// part of one conversation and can be argued with, and the button disables
+// itself while the model works -- one question at a time is all the LLM layer
+// allows.
 async function askWhy() {
   if (whyButton.disabled) return;
   const asked = state.lastBannerText;
@@ -1080,11 +840,7 @@ function whyIntoChat() {
 whyButton.addEventListener("click", askWhy);
 whyMore.addEventListener("click", whyIntoChat);
 
-liveFeed.addEventListener("load", () => {
-  fitFeedBox(liveFeed.naturalWidth, liveFeed.naturalHeight);
-  if (state.streamLost) clearStreamTrouble();
-});
-
+liveFeed.addEventListener("load", () => fitFeedBox(liveFeed.naturalWidth, liveFeed.naturalHeight));
 
 liveFeed.addEventListener("click", (event) => {
   if (!state.live || !liveFeed.naturalWidth || !liveFeed.naturalHeight) return;
@@ -1178,7 +934,6 @@ function showMeasurement(element, value, unit, digits) {
 function resetHeldMeasurements() {
   state.lastFieldOnVoltage = null;
   state.lastFallSeconds = null;
-  state.lastSpeed = null;
 }
 
 function voltageToDisplay(data) {
@@ -1203,44 +958,6 @@ function fallSecondsToDisplay(data) {
   return state.lastFallSeconds;
 }
 
-function speedToDisplay(data) {
-  // Same rule again: only a genuine "off" reading is a free-fall speed. The
-  // live speed while working/lifting swings wildly (the droplet is held or
-  // being pulled up) and is not what the lab manual's band is about.
-  const speed = Number(data.speedGridPerSec);
-  if (data.fieldState === "off" && data.speedGridPerSec !== null && data.speedGridPerSec !== undefined && Number.isFinite(speed)) {
-    state.lastSpeed = data.speedGridPerSec;
-  }
-  return state.lastSpeed;
-}
-
-// Target bands from the lab manual. These mirror FALL_SPEED_MIN/MAX and
-// BALANCE_VOLTS_MIN/MAX in web_server.py (which decides the actual verdict);
-// they are only used here to tint each reading and to print the hint beside it.
-const FALL_SPEED_RANGE = { min: 0.2, max: 0.5, unit: "grid/s" };
-const BALANCE_VOLTS_RANGE = { min: 150, max: 250, unit: "V" };
-document.getElementById("rangeVoltage").textContent =
-  `target ${BALANCE_VOLTS_RANGE.min}–${BALANCE_VOLTS_RANGE.max} ${BALANCE_VOLTS_RANGE.unit}`;
-document.getElementById("rangeVelocity").textContent =
-  `target ${FALL_SPEED_RANGE.min}–${FALL_SPEED_RANGE.max} ${FALL_SPEED_RANGE.unit}`;
-
-const FIELD_LABELS = { off: "Off (falling)", work: "Working", lift: "Lifting" };
-
-// One reading: print it, tint it against its band, and mark it "held" when the
-// field isn't in the state that measures it.
-function showReading(valueEl, heldEl, value, unit, digits, range, held) {
-  showMeasurement(valueEl, value, unit, digits);
-  const has = value !== null && value !== undefined && Number.isFinite(Number(value));
-  valueEl.classList.remove("in-range", "out-of-range");
-  if (has && range) {
-    const v = Math.abs(Number(value));
-    valueEl.classList.add(v >= range.min && v <= range.max ? "in-range" : "out-of-range");
-  }
-  const showHeld = has && held;
-  heldEl.classList.toggle("hidden", !showHeld);
-  valueEl.closest(".info-item").classList.toggle("is-held", showHeld);
-}
-
 // The pipeline's own guidance line -- what it draws along the bottom of its
 // window -- shown here instead, because the feed is cropped to the microscope
 // picture on purpose. It is the instruction the operator acts on.
@@ -1259,7 +976,6 @@ function bannerClass(text) {
 function showBanner(status, selected) {
   const raw = (status && status.message) || "";
   if (!raw) {
-    state.lastBannerText = null;   // so the same line returning later is repainted
     guidanceLine.textContent = "Waiting for the aid…";
     guidanceLine.className = "guidance-line idle";
     return;
@@ -1325,38 +1041,20 @@ function renderSelectedDroplet(selected) {
     state.lastSuitable = null;
     state.lastStage = null;
   }
-  // The verdict comes from web_server.py, which already does the field-aware
-  // check: a fall speed only counts while the field is "off", the balance
-  // voltage only while it is "work", the verdict stays "unknown" until both
-  // readings exist, and it only flips after SETTLE_SECONDS. So nothing is
-  // re-checked here -- the popup just announces the server's verdict and its
-  // own note (which spells out which reading is out of range).
-  if (data.suitable && data.suitable !== "unknown" && data.suitable !== state.lastSuitable) {
-    const name = data.label || "the droplet";
-    if (data.suitable === "yes") {
-      pushSystemMessage("success", `Valid measurement — ${name} is suitable.${data.note ? ` ${data.note}` : ""}`);
-    } else {
-      pushSystemMessage(
-        "warning",
-        `${name} ${state.lastSuitable === "yes" ? "is no longer suitable." : "is not suitable."}${data.note ? ` ${data.note}` : ""}`
-      );
-    }
-    state.lastSuitable = data.suitable;
-  }
-
   // One card as each half of the test is met, and none for losing it: the
   // server no longer demotes a droplet that has passed, so the pair of
   // contradicting cards that appeared seconds apart cannot happen again.
   if (data.stage && data.stage !== state.lastStage) {
-    // "suitable" is announced by the suitability block above, so it is not repeated here.
-    if (data.stage === "speed") {
+    if (data.stage === "suitable") {
+      pushSystemMessage("success", `Valid measurement — ${data.label || "the droplet"} is suitable.${data.note ? ` ${data.note}` : ""}`);
+    } else if (data.stage === "speed") {
       pushSystemMessage("success", `${data.label || "The droplet"} has a usable falling speed.${data.note ? ` ${data.note}` : ""}`);
     } else if (data.stage === "balance") {
       pushSystemMessage("success", `${data.label || "The droplet"} balances in range.${data.note ? ` ${data.note}` : ""}`);
     }
     state.lastStage = data.stage;
   }
-
+  state.lastSuitable = data.suitable;
   if (!data.label) {
     resetHeldMeasurements();
     state.lastDropletLabel = null;
@@ -1369,11 +1067,10 @@ function renderSelectedDroplet(selected) {
   dropletRing.className = `droplet-ring ${verdict.ring}`;
   dropletRing.title = data.note || verdict.text;
 
-  const field = data.fieldState;
-  showReading(dropletVoltage, dropletVoltageHeld, voltageToDisplay(data), "V", 0, BALANCE_VOLTS_RANGE, field !== "work");
-  showReading(dropletFallTime, dropletFallHeld, fallSecondsToDisplay(data), "s", 1, null, field !== "off");
-  showReading(dropletVelocity, dropletVelocityHeld, speedToDisplay(data), "grid/s", 2, FALL_SPEED_RANGE, field !== "off");
-  dropletField.textContent = FIELD_LABELS[field] || (field ? String(field) : MISSING);
+  showMeasurement(dropletVoltage, voltageToDisplay(data), "V", 0);
+  showMeasurement(dropletFallTime, fallSecondsToDisplay(data), "s", 1);
+  showMeasurement(dropletVelocity, data.speedGridPerSec, "grid/s", 2);
+  dropletField.textContent = data.fieldState || MISSING;
 }
 
 // The pipeline rewrites its status about once a second, so polling faster than
@@ -1388,73 +1085,14 @@ function scheduleLivePoll(delay) {
   state.livePoll = setTimeout(pollLiveState, delay ?? LIVE_POLL_MS);
 }
 
-// ---------------------------------------------------------------------------
-//  Connection health. Two different things can go wrong and look the same to
-//  the operator (a frozen picture under a LIVE label): the server stops
-//  answering, or the video stream itself drops. Either one raises the pill on
-//  the feed and freezes the session timer until things recover.
-// ---------------------------------------------------------------------------
-function renderConnectionBanner() {
-  let message = "";
-  if (state.connLost) {
-    message = state.live || state.starting ? "Connection lost — reconnecting…" : "Can't reach the server — retrying…";
-  } else if (state.streamLost) {
-    message = "Video stream interrupted — reconnecting…";
-  }
-  connBannerText.textContent = message;
-  connBanner.classList.toggle("hidden", !message);
-  sessionTimer.classList.toggle("stalled", Boolean(message));
-}
-
-function clearStreamTrouble() {
-  state.streamLost = false;
-  state.streamProbing = false;
-  if (state.streamRetryTimer) clearTimeout(state.streamRetryTimer);
-  state.streamRetryTimer = null;
-  renderConnectionBanner();
-}
-
-function scheduleStreamRetry() {
-  if (state.streamRetryTimer) return;
-  state.streamRetryTimer = setTimeout(() => {
-    state.streamRetryTimer = null;
-    if (!state.live || !state.streamLost) return;
-    state.streamProbing = true;
-    state.streamRetryAt = Date.now();
-    liveFeed.src = `${state.live.url}?t=${Date.now()}`;   // if it errors again, the handler schedules another try
-  }, 3000);
-}
-
-liveFeed.addEventListener("error", () => {
-  if (!state.live) return;
-  state.streamLost = true;
-  state.streamProbing = false;
-  renderConnectionBanner();
-  scheduleStreamRetry();
-});
-
 async function pollLiveState() {
   let payload;
   try {
     const response = await fetch("/api/live/status");
     payload = await response.json();
   } catch (_) {
-    state.pollFailures += 1;
-    if (state.pollFailures >= (state.live ? 2 : 1) && !state.connLost) {
-      state.connLost = true;
-      renderConnectionBanner();
-    }
     scheduleLivePoll(1500);
     return;
-  }
-  state.pollFailures = 0;
-  if (state.connLost) {
-    state.connLost = false;
-    renderConnectionBanner();
-  }
-  // A reconnect attempt that has run for a few seconds without erroring again worked.
-  if (state.streamLost && state.streamProbing && Date.now() - state.streamRetryAt > 2500) {
-    clearStreamTrouble();
   }
 
   if (state.live && !payload.running) {
@@ -1467,9 +1105,7 @@ async function pollLiveState() {
     liveButton.disabled = false;
   }
 
-  if (payload.running && !state.live && !state.starting) attachToRunningSession(payload);
   showTutor(payload.tutor);
-
   renderSelectedDroplet(payload.selected);
   if (payload.running && payload.status) {
     fitFeedBox(payload.status.frameWidth, payload.status.frameHeight);
@@ -1535,39 +1171,13 @@ aiInput.addEventListener("keydown", event => {
 });
 sendButton.addEventListener("click", sendQuery);
 
-// Starter prompts: one click sends the question as if it had been typed.
-if (starterPrompts) {
-  starterPrompts.addEventListener("click", event => {
-    const chip = event.target.closest(".starter-chip");
-    if (!chip || state.generating) return;
-    aiInput.value = chip.dataset.prompt || chip.textContent;
-    updateInputState();
-    sendQuery();
-  });
-}
-
 liveButton.addEventListener("click", () => {
-  if (state.starting) {
-    requestCancelStart();
-  } else if (state.live) {
+  if (state.live) {
     stopLive();
   } else {
     state.isDemo = false;
     startLive();
   }
-});
-
-// The idle footage may finish loading after the page's first paint; once it
-// has, and nothing is running or starting, show it instead of the empty state.
-fallbackVideo.addEventListener("loadeddata", () => {
-  if (!state.live && !state.starting) showFallback();
-});
-
-// Enter in the camera-index box starts the feed, like pressing the button.
-liveSourceInput.addEventListener("keydown", event => {
-  if (event.key !== "Enter" || event.isComposing) return;
-  event.preventDefault();
-  if (!liveButton.disabled && !state.live && !state.starting) liveButton.click();
 });
 
 fallbackVideo.addEventListener("error", () => {
